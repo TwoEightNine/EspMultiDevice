@@ -19,16 +19,33 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Detects card removal at runtime.
 - Retries mounting when a card is inserted again.
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
+- Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 
 ## Files
 
 - `esp_media.ino`: application entry point.
+- `Screen.h`: base class for application screens.
+- `Navigator.h`: screen ID and navigation stack interface.
+- `Navigator.cpp`: registered screen lookup and stack transitions.
+- `HomeScreen.h`: default screen interface.
+- `HomeScreen.cpp`: SD status display and touch-log screen behavior.
 - `DisplayController.h`: TFT display controller interface.
 - `DisplayController.cpp`: TFT_eSPI setup and simple status screens.
 - `TouchController.h`: XPT2046 touch controller interface.
 - `TouchController.cpp`: SPI polling, pressure detection, and coordinate mapping.
 - `SdCardController.h`: SD card controller interface.
 - `SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
+
+## Screen Architecture
+
+`esp_media.ino` owns hardware setup and screen registration only. After a screen is registered, the sketch does not call methods on specific screen types.
+
+The main loop talks only to the generic active `Screen` from `Navigator`:
+
+- changed touch points are forwarded through `Screen::handleTouch()`;
+- non-blocking screen work runs through `Screen::tick()`.
+
+Screens get common UI services from the base `Screen` constructor: `Navigator`, `TouchController`, and `DisplayController`. Screens that need feature-specific services receive those controllers in their own constructors. For example, `HomeScreen` receives `SdCardController&` and owns SD status drawing, mount-change handling, and the read/write self-test display.
 
 ## TFT_eSPI Setup
 
@@ -159,14 +176,14 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 
 ## Runtime Eject and Insert
 
-`SdCardController::update()` should be called from `loop()`. It returns an event when the SD card state changes:
+`SdCardController::update()` returns an event when the SD card state changes:
 
 - `SdCardEvent::Mounted`: a card was mounted.
 - `SdCardEvent::Removed`: the mounted card was removed or stopped responding.
 - `SdCardEvent::MountFailed`: a mount retry failed.
 - `SdCardEvent::None`: no state change.
 
-The current sketch prints a message when the card is mounted or removed. It also runs the read/write self-test after each successful mount.
+`HomeScreen` calls this from its non-blocking `tick()` method. The main sketch only calls `tick()` on the navigator's active `Screen`, so SD UI behavior stays inside the screen that uses the SD controller.
 
 For best hot-swap detection, use a socket or module with a card-detect pin and set:
 
