@@ -8,7 +8,7 @@
 #include "TouchController.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
-static const uint8_t DISPLAY_ROTATION = 1;
+static const uint8_t DISPLAY_ROTATION = 4;
 
 // SD uses the higher allowed GPIO range so the TFT parallel bus stays on fast low GPIOs.
 static const int SD_SCK_PIN = 40;

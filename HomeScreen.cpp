@@ -72,7 +72,11 @@ void HomeScreen::draw() {
     return;
   }
 
-  _display.showSdState(_sdMounted, _sdDetail);
+  _display.tft().fillRect(0, 0, 300, 100, TFT_BLACK);
+  _display.tft().setTextDatum(TL_DATUM);
+  _display.tft().setTextColor(TFT_WHITE, TFT_BLACK);
+  String status = "SD mounted: " + String(_sdMounted) + ". " + _sdDetail;
+  _display.tft().drawString(status, 10, 10, 2);
   redrawTouchLog();
 }
 

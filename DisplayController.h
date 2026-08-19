@@ -18,14 +18,10 @@ public:
   uint16_t height();
 
   void clear(uint16_t color = TFT_BLACK);
-  void showBootScreen();
-  void showStatus(const String &title, const String &detail, uint16_t accentColor = TFT_CYAN);
-  void showSdState(bool mounted, const String &detail);
 
 private:
   TFT_eSPI _tft;
   bool _ready = false;
 
   void configureBacklight(int backlightPin, bool backlightActiveHigh);
-  void drawFrame(uint16_t accentColor);
 };
