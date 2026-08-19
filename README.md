@@ -19,6 +19,8 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Detects card removal at runtime.
 - Retries mounting when a card is inserted again.
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
+- Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
+- Plays the saved voice clip through a MAX98357A I2S amplifier.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 
 ## Files
@@ -35,6 +37,12 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `TouchController.cpp`: SPI polling, pressure detection, and coordinate mapping.
 - `SdCardController.h`: SD card controller interface.
 - `SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
+- `MicController.h`: INMP441 I2S microphone controller interface.
+- `MicController.cpp`: microphone I2S setup, power-switch sensing, and PCM reads.
+- `SpeakerController.h`: MAX98357A I2S speaker controller interface.
+- `SpeakerController.cpp`: speaker I2S setup and PCM writes.
+- `VoiceRecorderScreen.h`: voice recorder screen interface.
+- `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 
 ## Screen Architecture
 
@@ -45,7 +53,7 @@ The main loop talks only to the generic active `Screen` from `Navigator`:
 - changed touch points are forwarded through `Screen::handleTouch()`;
 - non-blocking screen work runs through `Screen::tick()`.
 
-Screens get common UI services from the base `Screen` constructor: `Navigator`, `TouchController`, and `DisplayController`. Screens that need feature-specific services receive those controllers in their own constructors. For example, `HomeScreen` receives `SdCardController&` and owns SD status drawing, mount-change handling, and the read/write self-test display.
+Screens get common UI services from the base `Screen` constructor: `Navigator`, `TouchController`, and `DisplayController`. Screens that need feature-specific services receive those controllers in their own constructors. For example, `HomeScreen` receives `SdCardController&` and owns SD status drawing, mount-change handling, and the read/write self-test display. `VoiceRecorderScreen` receives `SdCardController&`, `MicController&`, and `SpeakerController&`, then owns the recorder UI and audio file lifecycle.
 
 ## TFT_eSPI Setup
 
@@ -163,6 +171,68 @@ static const int TOUCH_CS_PIN = 38;
 static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 ```
 
+## Default INMP441 Microphone Wiring
+
+The INMP441 uses I2S input on its own pins so it does not disturb the TFT, SD, or touch wiring. The microphone power should go through a real physical switch. The recommended switch wiring also feeds the switched 3.3V rail into a sense GPIO so the recorder screen can detect when the mic is off.
+
+| INMP441 Pin / Switch Node | ESP32-S3 GPIO / Supply |
+| --- | --- |
+| `SCK` / `BCLK` | `GPIO 18` |
+| `WS` / `LRCL` | `GPIO 21` |
+| `SD` / `DOUT` | `GPIO 35` |
+| `VDD` | Switched `3.3V` from the physical mic power switch |
+| Switch sense, same switched `3.3V` node | `GPIO 48` |
+| `L/R` | `GND` for left-channel output |
+| `GND` | `GND` |
+
+If you do not wire the switch sense line, leave `GPIO 48` disconnected and set `MIC_POWER_SENSE_PIN` to `MicController::NoPowerSensePin`. The mic will still record, but the UI cannot tell whether the physical switch is off.
+
+If your wiring is different, update these constants in `esp_media.ino`:
+
+```cpp
+static const int MIC_BCLK_PIN = 18;
+static const int MIC_WS_PIN = 21;
+static const int MIC_DATA_PIN = 35;
+static const int MIC_POWER_SENSE_PIN = 48;
+```
+
+## Default MAX98357A Speaker Wiring
+
+The MAX98357A uses a separate I2S output bus. This avoids sharing clock lines with the microphone and keeps the existing SPI wiring unchanged.
+
+| MAX98357A Pin | ESP32-S3 GPIO / Supply |
+| --- | --- |
+| `BCLK` | `GPIO 36` |
+| `LRC` / `WS` | `GPIO 37` |
+| `DIN` | `GPIO 47` |
+| `VIN` | `5V` preferred if your module and power budget allow it, otherwise `3.3V` |
+| `GND` | `GND` |
+| `SD` / `EN` | `GPIO 2`, with a 100k pulldown to `GND` recommended |
+| `GAIN` | Leave unconnected for the module default, or set per your breakout's docs |
+| Speaker `+` / `-` | 4-8 ohm speaker terminals only |
+
+Do not connect either speaker output terminal to ground. The MAX98357A drives the speaker differentially. Do not tie `SD` / `EN` permanently to `VIN` for this project; the sketch uses `GPIO 2` to keep the amplifier muted during boot and recording, then enables it only for playback.
+
+If your wiring is different, update these constants in `esp_media.ino`:
+
+```cpp
+static const int SPEAKER_BCLK_PIN = 36;
+static const int SPEAKER_WS_PIN = 37;
+static const int SPEAKER_DATA_PIN = 47;
+static const int SPEAKER_ENABLE_PIN = 2;
+```
+
+## 5V Power Notes
+
+Use one solid external regulated `5V` supply for the TFT backlight/module power and the MAX98357A `VIN`, sized for the display backlight plus speaker peaks. Connect the external supply `GND` to ESP32-S3 `GND` so the GPIO signals have a common reference.
+
+Do not connect an external `5V` supply to the ESP32-S3 board's `VIN` while USB is connected unless your exact board documents that simultaneous `VIN` and USB power is supported. Many boards have power-path protection, but many small ESP32-S3 boards do not. The safer default is:
+
+- USB powers the ESP32-S3 board for programming and serial.
+- External `5V` powers the TFT and MAX98357A.
+- All grounds are common.
+- The external `5V` positive line does not feed back into USB `5V` or board `VIN`.
+
 ## Pin Allocation
 
 | Purpose | GPIOs |
@@ -171,7 +241,11 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 | TFT control | `GPIO 12-16` |
 | SD SPI | `GPIO 39-42` |
 | Touch SPI | Shares `GPIO 39-41`, plus `GPIO 38` for `T_CS` |
-| Available from allowed set | `GPIO 0-3`, `GPIO 18-21`, `GPIO 35-37`, `GPIO 45-48` |
+| INMP441 mic I2S | `GPIO 18`, `GPIO 21`, `GPIO 35` |
+| Mic power switch sense | `GPIO 48` |
+| MAX98357A speaker I2S | `GPIO 36`, `GPIO 37`, `GPIO 47` |
+| MAX98357A speaker enable | `GPIO 2` |
+| Available from allowed set | `GPIO 1`, `GPIO 3` |
 | Usually best left unused unless needed | `GPIO 0`, `GPIO 19`, `GPIO 20`, `GPIO 45`, `GPIO 46` |
 
 ## Runtime Eject and Insert
@@ -183,7 +257,7 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 - `SdCardEvent::MountFailed`: a mount retry failed.
 - `SdCardEvent::None`: no state change.
 
-`HomeScreen` calls this from its non-blocking `tick()` method. The main sketch only calls `tick()` on the navigator's active `Screen`, so SD UI behavior stays inside the screen that uses the SD controller.
+`HomeScreen` and `VoiceRecorderScreen` call this from their non-blocking `tick()` methods. The main sketch only calls `tick()` on the navigator's active `Screen`, so SD UI behavior stays inside the screen that uses the SD controller.
 
 For best hot-swap detection, use a socket or module with a card-detect pin and set:
 

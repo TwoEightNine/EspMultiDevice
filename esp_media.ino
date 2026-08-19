@@ -2,10 +2,13 @@
 
 #include "DisplayController.h"
 #include "HomeScreen.h"
+#include "MicController.h"
 #include "SplashScreen.h"
 #include "Navigator.h"
 #include "SdCardController.h"
+#include "SpeakerController.h"
 #include "TouchController.h"
+#include "VoiceRecorderScreen.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
@@ -26,13 +29,28 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 // Optional card-detect pin. Leave as -1 when the socket/module has no CD pin.
 static const int SD_CARD_DETECT_PIN = -1;
 
+// INMP441 I2S microphone. Power sense is optional but recommended with the physical mic switch.
+static const int MIC_BCLK_PIN = 18;
+static const int MIC_WS_PIN = 21;
+static const int MIC_DATA_PIN = 35;
+static const int MIC_POWER_SENSE_PIN = 48;
+
+// MAX98357A I2S speaker amplifier.
+static const int SPEAKER_BCLK_PIN = 36;
+static const int SPEAKER_WS_PIN = 37;
+static const int SPEAKER_DATA_PIN = 47;
+static const int SPEAKER_ENABLE_PIN = 2;
+
 DisplayController *display = nullptr;
 SdCardController *sdCard = nullptr;
 TouchController *touch = nullptr;
+MicController *mic = nullptr;
+SpeakerController *speaker = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
 SplashScreen *splashScreen = nullptr;
+VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 
 void updateTouch();
 
@@ -84,20 +102,48 @@ void setup() {
     Serial.println(F("SD card not mounted."));
   }
 
+  mic = new MicController(
+    MIC_BCLK_PIN,
+    MIC_WS_PIN,
+    MIC_DATA_PIN,
+    MIC_POWER_SENSE_PIN
+  );
+  if (mic->begin()) {
+    Serial.println(F("INMP441 microphone ready."));
+  } else {
+    Serial.print(F("INMP441 microphone failed: "));
+    Serial.println(mic->lastError());
+  }
+
+  speaker = new SpeakerController(
+    SPEAKER_BCLK_PIN,
+    SPEAKER_WS_PIN,
+    SPEAKER_DATA_PIN,
+    SPEAKER_ENABLE_PIN
+  );
+  speaker->beginControl();
+  Serial.println(F("MAX98357A speaker configured for lazy startup."));
+
   navigator = new Navigator();
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard);
   splashScreen = new SplashScreen(*navigator, *touch, *display);
+  voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
-    Serial.println(F("Navigator failed to register Home screen."));
+    Serial.println(F("Navigator failed to register Splash screen."));
   }
   if (!navigator->registerScreen(ScreenId::Home, *homeScreen)) {
     Serial.println(F("Navigator failed to register Home screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::VoiceRecorder, *voiceRecorderScreen)) {
+    Serial.println(F("Navigator failed to register Voice Recorder screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {
     Serial.println(F("Navigator failed to activate Splash screen."));
   }
+
+  Serial.println(F("ESP Media setup complete."));
 }
 
 void loop() {

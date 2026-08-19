@@ -1,5 +1,7 @@
 #include "HomeScreen.h"
 
+#include "Navigator.h"
+
 namespace {
 static const int16_t TOUCH_LOG_LINE_HEIGHT = 18;
 }
@@ -14,7 +16,8 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _sdDetail(F("Touch ready, mounting SD card...")),
     _touchLogCount(0),
     _touchLogNext(0),
-    _touchEventCount(0) {
+    _touchEventCount(0),
+    _lastTouchDown(false) {
 }
 
 void HomeScreen::onEnter() {
@@ -25,12 +28,21 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
   _touchEventCount++;
 
   if (!point.touched) {
+    _lastTouchDown = false;
     Serial.println(F("Touch released."));
     String message = String(_touchEventCount);
     message += F(": released");
     logTouch(message);
     return;
   }
+
+  if (!_lastTouchDown && _recorderButton.contains(point.x, point.y)) {
+    _lastTouchDown = true;
+    _navigator.push(ScreenId::VoiceRecorder);
+    return;
+  }
+
+  _lastTouchDown = true;
 
   Serial.print(F("Touch x="));
   Serial.print(point.x);
@@ -72,12 +84,28 @@ void HomeScreen::draw() {
     return;
   }
 
-  _display.tft().fillRect(0, 0, 300, 100, TFT_BLACK);
+  layoutButtons();
+  _display.tft().fillRect(0, 0, _display.width(), 110, TFT_BLACK);
   _display.tft().setTextDatum(TL_DATUM);
   _display.tft().setTextColor(TFT_WHITE, TFT_BLACK);
   String status = "SD mounted: " + String(_sdMounted) + ". " + _sdDetail;
   _display.tft().drawString(status, 10, 10, 2);
+  drawRecorderButton();
   redrawTouchLog();
+}
+
+void HomeScreen::layoutButtons() {
+  _recorderButton = { 10, 46, 132, 42 };
+}
+
+void HomeScreen::drawRecorderButton() {
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRoundRect(_recorderButton.x, _recorderButton.y, _recorderButton.w, _recorderButton.h, 6, TFT_CYAN);
+  tft.drawRoundRect(_recorderButton.x, _recorderButton.y, _recorderButton.w, _recorderButton.h, 6, TFT_WHITE);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_BLACK, TFT_CYAN);
+  tft.drawString(F("Recorder"), _recorderButton.x + _recorderButton.w / 2, _recorderButton.y + _recorderButton.h / 2, 2);
+  tft.setTextDatum(TL_DATUM);
 }
 
 void HomeScreen::redrawTouchLog() {
