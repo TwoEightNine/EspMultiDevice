@@ -2,6 +2,7 @@
 
 #include "DisplayController.h"
 #include "HomeScreen.h"
+#include "SplashScreen.h"
 #include "Navigator.h"
 #include "SdCardController.h"
 #include "TouchController.h"
@@ -28,8 +29,10 @@ static const int SD_CARD_DETECT_PIN = -1;
 DisplayController *display = nullptr;
 SdCardController *sdCard = nullptr;
 TouchController *touch = nullptr;
+
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
+SplashScreen *splashScreen = nullptr;
 
 void updateTouch();
 
@@ -83,13 +86,17 @@ void setup() {
 
   navigator = new Navigator();
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard);
+  splashScreen = new SplashScreen(*navigator, *touch, *display);
 
+  if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
+    Serial.println(F("Navigator failed to register Home screen."));
+  }
   if (!navigator->registerScreen(ScreenId::Home, *homeScreen)) {
     Serial.println(F("Navigator failed to register Home screen."));
   }
 
-  if (!navigator->setRoot(ScreenId::Home)) {
-    Serial.println(F("Navigator failed to activate Home screen."));
+  if (!navigator->setRoot(ScreenId::Splash)) {
+    Serial.println(F("Navigator failed to activate Splash screen."));
   }
 }
 

@@ -5,6 +5,7 @@
 class Screen;
 
 enum class ScreenId : uint8_t {
+  Splash,
   Home
 };
 
