@@ -93,8 +93,11 @@ bool TouchController::readPoint(TouchPoint &point) {
     point.rawX = readMedian(0xD0);
     point.rawY = readMedian(0x90);
     point.z = pressure;
-    point.touched = true;
-    mapToScreen(point);
+
+    if (!isPhantomCorner(point.rawX, point.rawY)) {
+      point.touched = true;
+      mapToScreen(point);
+    }
   }
 
   digitalWrite(_csPin, HIGH);
@@ -151,24 +154,36 @@ uint16_t TouchController::mapAxis(uint16_t value,
   return (uint16_t)constrain(mapped, 0L, (long)outMax - 1);
 }
 
+uint16_t TouchController::mapInvertedAxis(uint16_t value,
+                                          uint16_t rawMin,
+                                          uint16_t rawMax,
+                                          uint16_t outMax) const {
+  if (outMax == 0) {
+    return 0;
+  }
+
+  return outMax - 1 - mapAxis(value, rawMin, rawMax, outMax);
+}
+
+bool TouchController::isPhantomCorner(uint16_t rawX, uint16_t rawY) const {
+  return rawX <= _rawMinX + PhantomCornerMargin &&
+         rawY + PhantomCornerMargin >= _rawMaxY;
+}
+
 void TouchController::mapToScreen(TouchPoint &point) const {
   switch (_rotation) {
     case 1:
-      point.x = _screenWidth > 0
-                  ? _screenWidth - 1 - mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenWidth)
-                  : 0;
+      point.x = mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenWidth);
       point.y = mapAxis(point.rawX, _rawMinX, _rawMaxX, _screenHeight);
       break;
     case 2:
       point.x = _screenWidth > 0
                   ? _screenWidth - 1 - mapAxis(point.rawX, _rawMinX, _rawMaxX, _screenWidth)
                   : 0;
-      point.y = _screenHeight > 0
-                  ? _screenHeight - 1 - mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenHeight)
-                  : 0;
+      point.y = mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenHeight);
       break;
     case 3:
-      point.x = mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenWidth);
+      point.x = mapInvertedAxis(point.rawY, _rawMinY, _rawMaxY, _screenWidth);
       point.y = _screenHeight > 0
                   ? _screenHeight - 1 - mapAxis(point.rawX, _rawMinX, _rawMaxX, _screenHeight)
                   : 0;
@@ -176,7 +191,7 @@ void TouchController::mapToScreen(TouchPoint &point) const {
     case 0:
     default:
       point.x = mapAxis(point.rawX, _rawMinX, _rawMaxX, _screenWidth);
-      point.y = mapAxis(point.rawY, _rawMinY, _rawMaxY, _screenHeight);
+      point.y = mapInvertedAxis(point.rawY, _rawMinY, _rawMaxY, _screenHeight);
       break;
   }
 }

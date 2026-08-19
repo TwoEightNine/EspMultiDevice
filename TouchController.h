@@ -35,6 +35,7 @@ public:
 private:
   static const uint32_t SpiFrequency = 2500000;
   static const uint16_t TouchThreshold = 350;
+  static const uint16_t PhantomCornerMargin = 90;
   static const uint8_t SamplesPerAxis = 3;
 
   int _sckPin;
@@ -57,5 +58,7 @@ private:
   uint16_t readRawCommand(uint8_t command);
   uint16_t readMedian(uint8_t command);
   uint16_t mapAxis(uint16_t value, uint16_t rawMin, uint16_t rawMax, uint16_t outMax) const;
+  uint16_t mapInvertedAxis(uint16_t value, uint16_t rawMin, uint16_t rawMax, uint16_t outMax) const;
+  bool isPhantomCorner(uint16_t rawX, uint16_t rawY) const;
   void mapToScreen(TouchPoint &point) const;
 };
