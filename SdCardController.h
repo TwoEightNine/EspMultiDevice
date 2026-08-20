@@ -25,9 +25,6 @@ public:
   bool isCardPresent() const;
 
   bool runReadWriteTest(const char *path = "/sd_rw_test.txt");
-  bool writeTextFile(const char *path, const char *content);
-  bool appendTextFile(const char *path, const char *content);
-  bool readTextFile(const char *path, String &content);
 
 private:
   static const uint32_t DefaultSpiFrequency = 4000000;
@@ -48,4 +45,8 @@ private:
   void unmount();
   bool mountedCardStillResponds();
   void configurePins();
+
+  bool writeTextFile(const char *path, const char *content);
+  bool appendTextFile(const char *path, const char *content);
+  bool readTextFile(const char *path, String &content);
 };
