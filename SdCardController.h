@@ -27,7 +27,7 @@ public:
   bool runReadWriteTest(const char *path = "/sd_rw_test.txt");
 
 private:
-  static const uint32_t DefaultSpiFrequency = 4000000;
+  static const uint32_t DefaultSpiFrequency = 20000000;
   static const uint32_t MountRetryIntervalMs = 1000;
   static const uint32_t NoDetectRetryIntervalMs = 30000;
   static const uint32_t HealthCheckIntervalMs = 500;

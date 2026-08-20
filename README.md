@@ -23,6 +23,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
+- Image Viewer uses PSRAM-backed full-frame loading for a single final image presentation and runs SD SPI at 20 MHz.
 
 ## Files
 
@@ -45,6 +46,8 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
+- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for common Windows BMP variants.
+- `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 
 ## Screen Architecture
 
@@ -56,6 +59,8 @@ The main loop talks only to the generic active `Screen` from `Navigator`:
 - non-blocking screen work runs through `Screen::tick()`.
 
 Screens get common UI services from the base `Screen` constructor: `Navigator`, `TouchController`, and `DisplayController`. Screens that need feature-specific services receive those controllers in their own constructors. For example, `HomeScreen` receives `SdCardController&` and owns SD status drawing, mount-change handling, and the read/write self-test display. `VoiceRecorderScreen` receives `SdCardController&`, `MicController&`, and `SpeakerController&`, then owns the recorder UI and audio file lifecycle.
+
+`Navigator::push` and `Navigator::replace` optionally accept a `ScreenData` payload, which is retained with the stack entry and delivered to the destination in `Screen::onEnter(const ScreenData&)`. A child can return a `ScreenResult` with `Navigator::pop(result)`; the resumed screen receives it through `Screen::onResult`. The Files screen uses this mechanism to pass a BMP path to `ImageViewerScreen`.
 
 ## TFT_eSPI Setup
 

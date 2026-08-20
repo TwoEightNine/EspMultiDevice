@@ -11,7 +11,7 @@ Navigator::Navigator()
   }
 
   for (uint8_t i = 0; i < MaxStackDepth; i++) {
-    _stack[i] = ScreenId::Home;
+    _stack[i].id = ScreenId::Home;
   }
 }
 
@@ -32,39 +32,51 @@ bool Navigator::setRoot(ScreenId id) {
   }
 
   exitActive();
-  _stack[0] = id;
+  _stack[0].id = id;
+  _stack[0].data = ScreenData();
   _stackDepth = 1;
-  enter(id);
+  enter(_stack[0]);
   return true;
 }
 
 bool Navigator::push(ScreenId id) {
+  return push(id, ScreenData());
+}
+
+bool Navigator::push(ScreenId id, const ScreenData &data) {
   if (!isRegistered(id) || _stackDepth >= MaxStackDepth) {
     return false;
   }
 
   exitActive();
-  _stack[_stackDepth] = id;
+  _stack[_stackDepth].id = id;
+  _stack[_stackDepth].data = data;
   _stackDepth++;
-  enter(id);
+  enter(_stack[_stackDepth - 1]);
   return true;
 }
 
 bool Navigator::replace(ScreenId id) {
+  return replace(id, ScreenData());
+}
+
+bool Navigator::replace(ScreenId id, const ScreenData &data) {
   if (!isRegistered(id)) {
     return false;
   }
 
   if (_stackDepth == 0) {
-    _stack[0] = id;
+    _stack[0].id = id;
+    _stack[0].data = data;
     _stackDepth = 1;
-    enter(id);
+    enter(_stack[0]);
     return true;
   }
 
   exitActive();
-  _stack[_stackDepth - 1] = id;
-  enter(id);
+  _stack[_stackDepth - 1].id = id;
+  _stack[_stackDepth - 1].data = data;
+  enter(_stack[_stackDepth - 1]);
   return true;
 }
 
@@ -79,12 +91,27 @@ bool Navigator::pop() {
   return true;
 }
 
+bool Navigator::pop(const ScreenResult &result) {
+  if (_stackDepth <= 1) {
+    return false;
+  }
+
+  exitActive();
+  _stackDepth--;
+  enter(_stack[_stackDepth - 1]);
+  Screen *screen = activeScreen();
+  if (screen) {
+    screen->onResult(result);
+  }
+  return true;
+}
+
 Screen *Navigator::activeScreen() {
   if (!hasActiveScreen()) {
     return nullptr;
   }
 
-  return screenFor(_stack[_stackDepth - 1]);
+  return screenFor(_stack[_stackDepth - 1].id);
 }
 
 ScreenId Navigator::activeScreenId() const {
@@ -92,7 +119,7 @@ ScreenId Navigator::activeScreenId() const {
     return ScreenId::Home;
   }
 
-  return _stack[_stackDepth - 1];
+  return _stack[_stackDepth - 1].id;
 }
 
 bool Navigator::hasActiveScreen() const {
@@ -113,10 +140,10 @@ bool Navigator::isRegistered(ScreenId id) const {
   return screenFor(id) != nullptr;
 }
 
-void Navigator::enter(ScreenId id) {
-  Screen *screen = screenFor(id);
+void Navigator::enter(const StackEntry &entry) {
+  Screen *screen = screenFor(entry.id);
   if (screen) {
-    screen->onEnter();
+    screen->onEnter(entry.data);
   }
 }
 

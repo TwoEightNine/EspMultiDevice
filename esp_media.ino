@@ -3,6 +3,7 @@
 #include "DisplayController.h"
 #include "FilesScreen.h"
 #include "HomeScreen.h"
+#include "ImageViewerScreen.h"
 #include "MicController.h"
 #include "SplashScreen.h"
 #include "Navigator.h"
@@ -54,6 +55,7 @@ HomeScreen *homeScreen = nullptr;
 SplashScreen *splashScreen = nullptr;
 VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 FilesScreen *filesScreen = nullptr;
+ImageViewerScreen *imageViewerScreen = nullptr;
 
 void updateTouch();
 
@@ -128,6 +130,7 @@ void setup() {
   splashScreen = new SplashScreen(*navigator, *touch, *display);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
+  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -140,6 +143,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Files, *filesScreen)) {
     Serial.println(F("Navigator failed to register Files screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::ImageViewer, *imageViewerScreen)) {
+    Serial.println(F("Navigator failed to register Image Viewer screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "DisplayController.h"
+#include "Navigation.h"
 #include "TouchController.h"
 
 class Navigator;
@@ -20,7 +21,16 @@ public:
   virtual void onEnter() {
   }
 
+  virtual void onEnter(const ScreenData &data) {
+    (void)data;
+    onEnter();
+  }
+
   virtual void onExit() {
+  }
+
+  virtual void onResult(const ScreenResult &result) {
+    (void)result;
   }
 
   virtual void handleTouch(const TouchPoint &point) {

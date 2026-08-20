@@ -77,15 +77,26 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
     bool isDirectory = false;
     if (_rows[i].entryIndex == 0xffff) {
       openParentDirectory();
-    } else if (entryAt(_rows[i].entryIndex, name, isDirectory) && isDirectory) {
+    } else if (entryAt(_rows[i].entryIndex, name, isDirectory)) {
       String nextPath = name;
       if (!nextPath.startsWith("/")) {
         nextPath = _currentPath + ( _currentPath == "/" ? "" : "/" ) + nextPath;
       }
-      openDirectory(nextPath);
+      if (isDirectory) {
+        openDirectory(nextPath);
+      } else if (isBmpFile(name)) {
+        _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(nextPath));
+      }
     }
     return;
   }
+}
+
+bool FilesScreen::isBmpFile(const String &name) const {
+  if (name.length() < 4) return false;
+  String suffix = name.substring(name.length() - 4);
+  suffix.toLowerCase();
+  return suffix == F(".bmp");
 }
 
 void FilesScreen::tick(uint32_t nowMs) {
