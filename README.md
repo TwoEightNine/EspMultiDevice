@@ -21,6 +21,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
 - Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
+- Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 
 ## Files
@@ -43,6 +44,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `SpeakerController.cpp`: speaker I2S setup and PCM writes.
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
+- `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
 
 ## Screen Architecture
 

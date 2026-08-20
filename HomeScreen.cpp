@@ -57,10 +57,12 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       continue;
     }
 
-    if (app.action == AppAction::Recorder) {
+    if (app.action == AppAction::Files) {
+      _navigator.push(ScreenId::Files);
+    } else if (app.action == AppAction::Recorder) {
       _navigator.push(ScreenId::VoiceRecorder);
     }
-    // Files and Settings are intentional no-op stubs until their screens exist.
+    // Settings remains a no-op stub until its screen exists.
     return;
   }
 }

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "DisplayController.h"
+#include "FilesScreen.h"
 #include "HomeScreen.h"
 #include "MicController.h"
 #include "SplashScreen.h"
@@ -52,6 +53,7 @@ Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
 SplashScreen *splashScreen = nullptr;
 VoiceRecorderScreen *voiceRecorderScreen = nullptr;
+FilesScreen *filesScreen = nullptr;
 
 void updateTouch();
 
@@ -125,6 +127,7 @@ void setup() {
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard);
   splashScreen = new SplashScreen(*navigator, *touch, *display);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
+  filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -134,6 +137,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::VoiceRecorder, *voiceRecorderScreen)) {
     Serial.println(F("Navigator failed to register Voice Recorder screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::Files, *filesScreen)) {
+    Serial.println(F("Navigator failed to register Files screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

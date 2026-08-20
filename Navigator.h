@@ -7,7 +7,8 @@ class Screen;
 enum class ScreenId : uint8_t {
   Splash,
   Home,
-  VoiceRecorder
+  VoiceRecorder,
+  Files
 };
 
 class Navigator {
