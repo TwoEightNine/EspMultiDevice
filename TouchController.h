@@ -27,14 +27,16 @@ public:
 
   bool isTouched() const;
   TouchPoint point() const;
+  uint16_t pressureThreshold() const;
 
   void setRotation(uint8_t rotation);
   void setScreenSize(uint16_t screenWidth, uint16_t screenHeight);
   void setCalibration(uint16_t rawMinX, uint16_t rawMaxX, uint16_t rawMinY, uint16_t rawMaxY);
+  void setPressureThreshold(uint16_t pressureThreshold);
 
 private:
   static const uint32_t SpiFrequency = 2500000;
-  static const uint16_t TouchThreshold = 350;
+  static const uint16_t DefaultPressureThreshold = 350;
   static const uint16_t PhantomCornerMargin = 90;
   static const uint8_t SamplesPerAxis = 3;
 
@@ -50,6 +52,7 @@ private:
   uint16_t _rawMaxX;
   uint16_t _rawMinY;
   uint16_t _rawMaxY;
+  uint16_t _pressureThreshold;
   TouchPoint _point;
   SPISettings _spiSettings;
 

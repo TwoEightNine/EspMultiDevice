@@ -17,6 +17,7 @@ TouchController::TouchController(int sckPin,
     _rawMaxX(3900),
     _rawMinY(200),
     _rawMaxY(3900),
+    _pressureThreshold(DefaultPressureThreshold),
     _spiSettings(SpiFrequency, MSBFIRST, SPI_MODE0) {
 }
 
@@ -47,6 +48,10 @@ TouchPoint TouchController::point() const {
   return _point;
 }
 
+uint16_t TouchController::pressureThreshold() const {
+  return _pressureThreshold;
+}
+
 void TouchController::setRotation(uint8_t rotation) {
   _rotation = rotation % 4;
 }
@@ -64,6 +69,10 @@ void TouchController::setCalibration(uint16_t rawMinX,
   _rawMaxX = rawMaxX;
   _rawMinY = rawMinY;
   _rawMaxY = rawMaxY;
+}
+
+void TouchController::setPressureThreshold(uint16_t pressureThreshold) {
+  _pressureThreshold = pressureThreshold;
 }
 
 void TouchController::configurePins() {
@@ -89,7 +98,7 @@ bool TouchController::readPoint(TouchPoint &point) {
   uint16_t z2 = readRawCommand(0xC0);
   uint16_t pressure = z1 + 4095 - z2;
 
-  if (pressure >= TouchThreshold) {
+  if (pressure >= _pressureThreshold) {
     point.rawX = readMedian(0xD0);
     point.rawY = readMedian(0x90);
     point.z = pressure;

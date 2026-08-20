@@ -25,6 +25,7 @@ static const int TOUCH_MISO_PIN = SD_MISO_PIN;
 static const int TOUCH_MOSI_PIN = SD_MOSI_PIN;
 static const int TOUCH_CS_PIN = 38;
 static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
+static const uint16_t TOUCH_PRESSURE_THRESHOLD = 1100;
 
 // Optional card-detect pin. Leave as -1 when the socket/module has no CD pin.
 static const int SD_CARD_DETECT_PIN = -1;
@@ -85,8 +86,10 @@ void setup() {
     TOUCH_CS_PIN,
     TOUCH_IRQ_PIN
   );
+  touch->setPressureThreshold(TOUCH_PRESSURE_THRESHOLD);
   touch->begin(display->width(), display->height(), DISPLAY_ROTATION);
-  Serial.println(F("XPT2046 touch ready."));
+  Serial.print(F("XPT2046 touch ready. Pressure threshold: "));
+  Serial.println(touch->pressureThreshold());
 
   sdCard = new SdCardController(
     SD_SCK_PIN,

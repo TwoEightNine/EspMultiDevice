@@ -169,7 +169,10 @@ static const int TOUCH_MISO_PIN = SD_MISO_PIN;
 static const int TOUCH_MOSI_PIN = SD_MOSI_PIN;
 static const int TOUCH_CS_PIN = 38;
 static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
+static const uint16_t TOUCH_PRESSURE_THRESHOLD = 900;
 ```
+
+`TOUCH_PRESSURE_THRESHOLD` controls how firm a press must be before the app sees it as a touch. Lower it if taps are missed; raise it if the panel still reacts to light brushes or noise.
 
 ## Default INMP441 Microphone Wiring
 
