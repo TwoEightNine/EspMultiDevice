@@ -17,37 +17,52 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  enum {
-    TouchLogLines = 5
+  static const uint8_t AppCount = 3;
+  static const int16_t StatusBarHeight = 24;
+  static const int16_t IconDiameter = 80;
+  static const int16_t IconBitmapSize = 64;
+  static const uint8_t BatteryStubPercent = 78;
+
+  enum class AppAction : uint8_t {
+    Files,
+    Recorder,
+    Settings
   };
 
-  struct Button {
+  struct AppTile {
+    const char *label;
+    AppAction action;
+    uint16_t circleColor;
+    // Replace nullptr with a 64x64, 1-bit bitmap when the final asset is ready.
+    // TFT_eSPI renders these with a runtime foreground color, keeping icons monochrome and themeable.
+    const uint8_t *bitmap;
     int16_t x;
     int16_t y;
     int16_t w;
     int16_t h;
-
-    bool contains(int16_t px, int16_t py) const {
-      return px >= x && px < x + w && py >= y && py < y + h;
-    }
   };
 
   SdCardController &_sdCard;
   bool _sdMounted;
-  String _sdDetail;
-  String _touchLog[TouchLogLines];
-  uint8_t _touchLogCount;
-  uint8_t _touchLogNext;
-  uint32_t _touchEventCount;
+  bool _wifiConnected;
+  uint8_t _batteryPercent;
   bool _lastTouchDown;
-  Button _recorderButton;
+  uint32_t _lastClockMinute;
+  String _lastClockText;
+  AppTile _apps[AppCount];
 
   void draw();
-  void layoutButtons();
-  void drawRecorderButton();
-  void redrawTouchLog();
-  void logTouch(const String &message);
-  void setSdState(bool mounted, const String &detail);
+  void layoutApps();
+  void drawStatusBar();
+  void drawClock(bool force);
+  void drawSdIcon();
+  void drawWifiIcon();
+  void drawBattery();
+  void drawApps();
+  void drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY);
+  String clockText(uint32_t nowMs) const;
+  String truncateLabel(const String &label, int16_t maxWidth);
+  void setSdState(bool mounted);
   void refreshSdState();
   void runSdSelfTest();
   void handleSdCardEvent(SdCardEvent event);
