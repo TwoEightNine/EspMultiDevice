@@ -322,7 +322,7 @@ void VoiceRecorderScreen::startRecording() {
     return;
   }
 
-  if (!_mic.isReady()) {
+  if (!_mic.isReady() && !_mic.begin()) {
     setStatus(_mic.lastError());
     return;
   }

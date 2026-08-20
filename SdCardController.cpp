@@ -18,7 +18,9 @@ SdCardController::SdCardController(int sckPin,
     _cardDetectPin(cardDetectPin),
     _cardDetectActiveLow(cardDetectActiveLow),
     _mounted(false),
+    _autoRetrySuspended(false),
     _lastMountAttemptMs(0),
+    _nextMountAttemptMs(0),
     _lastHealthCheckMs(0) {
 }
 
@@ -48,7 +50,7 @@ SdCardEvent SdCardController::update() {
     }
   }
 
-  if (!_mounted && now - _lastMountAttemptMs >= MountRetryIntervalMs) {
+  if (!_mounted && !_autoRetrySuspended && now >= _nextMountAttemptMs && now - _lastMountAttemptMs >= MountRetryIntervalMs) {
     if (mount()) {
       return SdCardEvent::Mounted;
     }
@@ -167,6 +169,7 @@ bool SdCardController::readTextFile(const char *path, String &content) {
 
 bool SdCardController::mount() {
   _lastMountAttemptMs = millis();
+  _nextMountAttemptMs = _lastMountAttemptMs + MountRetryIntervalMs;
 
   if (!isCardPresent()) {
     return false;
@@ -175,6 +178,7 @@ bool SdCardController::mount() {
   SD.end();
   SPI.end();
   delay(10);
+  yield();
 
   configurePins();
   SPI.begin(_sckPin, _misoPin, _mosiPin, _csPin);
@@ -182,16 +186,27 @@ bool SdCardController::mount() {
   if (!SD.begin(_csPin, SPI, DefaultSpiFrequency)) {
     SD.end();
     _mounted = false;
+    if (_cardDetectPin < 0) {
+      _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
+      _autoRetrySuspended = true;
+      Serial.println(F("SD mount failed; auto retry suspended because no card-detect pin is configured."));
+    }
     return false;
   }
 
   if (SD.cardType() == CARD_NONE) {
     SD.end();
     _mounted = false;
+    if (_cardDetectPin < 0) {
+      _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
+      _autoRetrySuspended = true;
+      Serial.println(F("SD card not detected; auto retry suspended because no card-detect pin is configured."));
+    }
     return false;
   }
 
   _mounted = true;
+  _autoRetrySuspended = false;
   _lastHealthCheckMs = millis();
   return true;
 }

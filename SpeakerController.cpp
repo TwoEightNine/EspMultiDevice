@@ -24,18 +24,21 @@ SpeakerController::SpeakerController(int bclkPin,
     _port(port),
     _sampleRate(sampleRate),
     _ready(false),
+    _controlStarted(false),
     _lastError(F("Not initialized")) {
 }
 
 void SpeakerController::beginControl() {
+  if (_controlStarted) {
+    return;
+  }
+
   if (_enablePin != NoEnablePin) {
     pinMode(_enablePin, OUTPUT);
     digitalWrite(_enablePin, LOW);
   }
 
-  pinMode(_bclkPin, INPUT);
-  pinMode(_wsPin, INPUT);
-  pinMode(_dataPin, INPUT);
+  _controlStarted = true;
 }
 
 bool SpeakerController::begin() {
@@ -57,12 +60,16 @@ bool SpeakerController::isReady() const {
 }
 
 void SpeakerController::mute() {
+  beginControl();
+
   if (_enablePin != NoEnablePin) {
     digitalWrite(_enablePin, LOW);
   }
 }
 
 void SpeakerController::unmute() {
+  beginControl();
+
   if (_enablePin != NoEnablePin) {
     digitalWrite(_enablePin, HIGH);
   }
@@ -115,12 +122,13 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
 }
 
 void SpeakerController::stop() {
-  if (_ready) {
-    mute();
-    i2s_driver_uninstall(_port);
-    _ready = false;
+  if (!_ready) {
+    return;
   }
 
+  mute();
+  i2s_driver_uninstall(_port);
+  _ready = false;
   pinMode(_bclkPin, INPUT);
   pinMode(_wsPin, INPUT);
   pinMode(_dataPin, INPUT);

@@ -173,13 +173,13 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 
 ## Default INMP441 Microphone Wiring
 
-The INMP441 uses I2S input on its own pins so it does not disturb the TFT, SD, or touch wiring. The microphone power should go through a real physical switch. The recommended switch wiring also feeds the switched 3.3V rail into a sense GPIO so the recorder screen can detect when the mic is off.
+The INMP441 uses I2S input on pins that avoid the TFT, SD, touch, and the ESP32-S3 high GPIOs that are commonly tied to flash, PSRAM, or board features. The microphone power should go through a real physical switch. Power-switch sensing is supported by `MicController`, but it is disabled in the default wiring to avoid touching extra board-dependent pins during startup.
 
 | INMP441 Pin / Switch Node | ESP32-S3 GPIO / Supply |
 | --- | --- |
 | `SCK` / `BCLK` | `GPIO 18` |
 | `WS` / `LRCL` | `GPIO 21` |
-| `SD` / `DOUT` | `GPIO 35` |
+| `SD` / `DOUT` | `GPIO 17` |
 | `VDD` | Switched `3.3V` from the physical mic power switch |
 | Switch sense, same switched `3.3V` node | `GPIO 48` |
 | `L/R` | `GND` for left-channel output |
@@ -192,23 +192,23 @@ If your wiring is different, update these constants in `esp_media.ino`:
 ```cpp
 static const int MIC_BCLK_PIN = 18;
 static const int MIC_WS_PIN = 21;
-static const int MIC_DATA_PIN = 35;
+static const int MIC_DATA_PIN = 17;
 static const int MIC_POWER_SENSE_PIN = 48;
 ```
 
 ## Default MAX98357A Speaker Wiring
 
-The MAX98357A uses a separate I2S output bus. This avoids sharing clock lines with the microphone and keeps the existing SPI wiring unchanged.
+The MAX98357A shares the I2S clock and word-select pins with the microphone, but recording and playback are never active at the same time. This avoids the risky high GPIO range and keeps the existing SPI wiring unchanged.
 
 | MAX98357A Pin | ESP32-S3 GPIO / Supply |
 | --- | --- |
-| `BCLK` | `GPIO 36` |
-| `LRC` / `WS` | `GPIO 37` |
-| `DIN` | `GPIO 47` |
+| `BCLK` | `GPIO 18` |
+| `LRC` / `WS` | `GPIO 21` |
+| `DIN` | `GPIO 1` |
 | `VIN` | `5V` preferred if your module and power budget allow it, otherwise `3.3V` |
 | `GND` | `GND` |
 | `SD` / `EN` | `GPIO 2`, with a 100k pulldown to `GND` recommended |
-| `GAIN` | Leave unconnected for the module default, or set per your breakout's docs |
+| `GAIN` | `100k` resistor to `GND` for highest gain, 15 dB |
 | Speaker `+` / `-` | 4-8 ohm speaker terminals only |
 
 Do not connect either speaker output terminal to ground. The MAX98357A drives the speaker differentially. Do not tie `SD` / `EN` permanently to `VIN` for this project; the sketch uses `GPIO 2` to keep the amplifier muted during boot and recording, then enables it only for playback.
@@ -216,9 +216,9 @@ Do not connect either speaker output terminal to ground. The MAX98357A drives th
 If your wiring is different, update these constants in `esp_media.ino`:
 
 ```cpp
-static const int SPEAKER_BCLK_PIN = 36;
-static const int SPEAKER_WS_PIN = 37;
-static const int SPEAKER_DATA_PIN = 47;
+static const int SPEAKER_BCLK_PIN = MIC_BCLK_PIN;
+static const int SPEAKER_WS_PIN = MIC_WS_PIN;
+static const int SPEAKER_DATA_PIN = 1;
 static const int SPEAKER_ENABLE_PIN = 2;
 ```
 
@@ -241,11 +241,11 @@ Do not connect an external `5V` supply to the ESP32-S3 board's `VIN` while USB i
 | TFT control | `GPIO 12-16` |
 | SD SPI | `GPIO 39-42` |
 | Touch SPI | Shares `GPIO 39-41`, plus `GPIO 38` for `T_CS` |
-| INMP441 mic I2S | `GPIO 18`, `GPIO 21`, `GPIO 35` |
+| INMP441 mic I2S | `GPIO 18`, `GPIO 21`, `GPIO 17` |
 | Mic power switch sense | `GPIO 48` |
-| MAX98357A speaker I2S | `GPIO 36`, `GPIO 37`, `GPIO 47` |
+| MAX98357A speaker I2S | Shares `GPIO 18`, `GPIO 21`, plus `GPIO 1` |
 | MAX98357A speaker enable | `GPIO 2` |
-| Available from allowed set | `GPIO 1`, `GPIO 3` |
+| Available from allowed set | Confirm per board before using high GPIOs |
 | Usually best left unused unless needed | `GPIO 0`, `GPIO 19`, `GPIO 20`, `GPIO 45`, `GPIO 46` |
 
 ## Runtime Eject and Insert
@@ -267,7 +267,7 @@ static const int SD_CARD_DETECT_PIN = -1;
 
 to the GPIO connected to the socket's `CD` pin. Most card-detect switches are active-low, which matches the controller default.
 
-If no card-detect pin is available, leave `SD_CARD_DETECT_PIN` as `-1`. The controller will periodically check whether the mounted filesystem still responds and will retry mounting when no card is mounted. This works for normal use, but a physical card-detect pin is the most reliable way to detect eject/insert immediately.
+If no card-detect pin is available, leave `SD_CARD_DETECT_PIN` as `-1`. The controller will try to mount once during startup, but it will not keep retrying in the background after a failed mount. This avoids watchdog resets when the SD module is absent or under-powered. Insert or fix the card, then reboot the ESP32-S3 to mount it. A physical card-detect pin is the most reliable way to support automatic eject/insert handling.
 
 ## SD Card Formatting
 

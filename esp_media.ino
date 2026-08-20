@@ -32,13 +32,13 @@ static const int SD_CARD_DETECT_PIN = -1;
 // INMP441 I2S microphone. Power sense is optional but recommended with the physical mic switch.
 static const int MIC_BCLK_PIN = 18;
 static const int MIC_WS_PIN = 21;
-static const int MIC_DATA_PIN = 35;
+static const int MIC_DATA_PIN = 17;
 static const int MIC_POWER_SENSE_PIN = 48;
 
 // MAX98357A I2S speaker amplifier.
-static const int SPEAKER_BCLK_PIN = 36;
-static const int SPEAKER_WS_PIN = 37;
-static const int SPEAKER_DATA_PIN = 47;
+static const int SPEAKER_BCLK_PIN = MIC_BCLK_PIN;
+static const int SPEAKER_WS_PIN = MIC_WS_PIN;
+static const int SPEAKER_DATA_PIN = 1;
 static const int SPEAKER_ENABLE_PIN = 2;
 
 DisplayController *display = nullptr;
@@ -108,12 +108,7 @@ void setup() {
     MIC_DATA_PIN,
     MIC_POWER_SENSE_PIN
   );
-  if (mic->begin()) {
-    Serial.println(F("INMP441 microphone ready."));
-  } else {
-    Serial.print(F("INMP441 microphone failed: "));
-    Serial.println(mic->lastError());
-  }
+  Serial.println(F("INMP441 microphone configured for lazy startup."));
 
   speaker = new SpeakerController(
     SPEAKER_BCLK_PIN,
@@ -121,7 +116,6 @@ void setup() {
     SPEAKER_DATA_PIN,
     SPEAKER_ENABLE_PIN
   );
-  speaker->beginControl();
   Serial.println(F("MAX98357A speaker configured for lazy startup."));
 
   navigator = new Navigator();

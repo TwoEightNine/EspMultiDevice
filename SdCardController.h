@@ -29,6 +29,7 @@ public:
 private:
   static const uint32_t DefaultSpiFrequency = 4000000;
   static const uint32_t MountRetryIntervalMs = 1000;
+  static const uint32_t NoDetectRetryIntervalMs = 30000;
   static const uint32_t HealthCheckIntervalMs = 500;
 
   int _sckPin;
@@ -38,7 +39,9 @@ private:
   int _cardDetectPin;
   bool _cardDetectActiveLow;
   bool _mounted;
+  bool _autoRetrySuspended;
   uint32_t _lastMountAttemptMs;
+  uint32_t _nextMountAttemptMs;
   uint32_t _lastHealthCheckMs;
 
   bool mount();

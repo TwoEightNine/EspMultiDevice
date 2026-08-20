@@ -34,6 +34,7 @@ private:
   i2s_port_t _port;
   uint32_t _sampleRate;
   bool _ready;
+  bool _controlStarted;
   String _lastError;
 
   bool configureI2s();
