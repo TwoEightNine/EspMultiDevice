@@ -69,13 +69,28 @@ WiFiScreen *wifiScreen = nullptr;
 void updateTouch();
 
 void updateTouch() {
-  if (!touch || !touch->update() || !navigator) {
+  // TouchController::update() also reports coordinate changes while a finger
+  // remains on the panel.  Deliver only state edges to screens so a screen
+  // opened by a press cannot receive that same held press as a new click.
+  static bool touchWasDown = false;
+
+  if (!touch || !touch->update()) {
+    return;
+  }
+
+  TouchPoint point = touch->point();
+  if (point.touched == touchWasDown) {
+    return;
+  }
+  touchWasDown = point.touched;
+
+  if (!navigator) {
     return;
   }
 
   Screen *screen = navigator->activeScreen();
   if (screen) {
-    screen->handleTouch(touch->point());
+    screen->handleTouch(point);
   }
 }
 
