@@ -12,6 +12,7 @@
 #include "SpeakerController.h"
 #include "TouchController.h"
 #include "TouchCalibrationScreen.h"
+#include "TextInputScreen.h"
 #include "VoiceRecorderScreen.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
@@ -59,6 +60,7 @@ FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
+TextInputScreen *textInputScreen = nullptr;
 
 void updateTouch();
 
@@ -137,6 +139,7 @@ void setup() {
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
+  textInputScreen = new TextInputScreen(*navigator, *touch, *display);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -158,6 +161,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::ImageViewer, *imageViewerScreen)) {
     Serial.println(F("Navigator failed to register Image Viewer screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::TextInput, *textInputScreen)) {
+    Serial.println(F("Navigator failed to register Text Input screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

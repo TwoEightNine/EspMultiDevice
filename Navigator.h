@@ -13,7 +13,8 @@ enum class ScreenId : uint8_t {
   Files,
   Settings,
   TouchCalibration,
-  ImageViewer
+  ImageViewer,
+  TextInput
 };
 
 class Navigator {
