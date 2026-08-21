@@ -32,7 +32,10 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
 
   if (point.x >= ListPadding && point.x < _display.width() - ListPadding &&
       point.y >= RowTop && point.y < RowTop + OptionCount * RowHeight) {
-    // Settings options are intentionally no-ops until their destination screens exist.
+    uint8_t option = (point.y - RowTop) / RowHeight;
+    if (option == 1) {
+      _navigator.push(ScreenId::TouchCalibration);
+    }
     return;
   }
 }

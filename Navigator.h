@@ -12,6 +12,7 @@ enum class ScreenId : uint8_t {
   VoiceRecorder,
   Files,
   Settings,
+  TouchCalibration,
   ImageViewer
 };
 

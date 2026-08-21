@@ -11,6 +11,7 @@
 #include "SettingsScreen.h"
 #include "SpeakerController.h"
 #include "TouchController.h"
+#include "TouchCalibrationScreen.h"
 #include "VoiceRecorderScreen.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
@@ -28,7 +29,6 @@ static const int TOUCH_MISO_PIN = SD_MISO_PIN;
 static const int TOUCH_MOSI_PIN = SD_MOSI_PIN;
 static const int TOUCH_CS_PIN = 38;
 static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
-static const uint16_t TOUCH_PRESSURE_THRESHOLD = 1100;
 
 // Optional card-detect pin. Leave as -1 when the socket/module has no CD pin.
 static const int SD_CARD_DETECT_PIN = -1;
@@ -57,6 +57,7 @@ SplashScreen *splashScreen = nullptr;
 VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
+TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 
 void updateTouch();
@@ -92,10 +93,8 @@ void setup() {
     TOUCH_CS_PIN,
     TOUCH_IRQ_PIN
   );
-  touch->setPressureThreshold(TOUCH_PRESSURE_THRESHOLD);
   touch->begin(display->width(), display->height(), DISPLAY_ROTATION);
-  Serial.print(F("XPT2046 touch ready. Pressure threshold: "));
-  Serial.println(touch->pressureThreshold());
+  Serial.println(F("XPT2046 touch ready."));
 
   sdCard = new SdCardController(
     SD_SCK_PIN,
@@ -107,6 +106,9 @@ void setup() {
 
   if (sdCard->begin()) {
     Serial.println(F("SD card mounted."));
+    if (touch->loadCalibration()) {
+      Serial.println(F("Touch mesh calibration loaded."));
+    }
   } else {
     Serial.println(F("SD card not mounted."));
   }
@@ -133,6 +135,7 @@ void setup() {
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
+  touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
@@ -149,6 +152,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Settings, *settingsScreen)) {
     Serial.println(F("Navigator failed to register Settings screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::TouchCalibration, *touchCalibrationScreen)) {
+    Serial.println(F("Navigator failed to register Touch Calibration screen."));
   }
   if (!navigator->registerScreen(ScreenId::ImageViewer, *imageViewerScreen)) {
     Serial.println(F("Navigator failed to register Image Viewer screen."));
