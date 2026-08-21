@@ -84,7 +84,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
       }
       if (isDirectory) {
         openDirectory(nextPath);
-      } else if (isBmpFile(name)) {
+      } else if (isImageFile(name)) {
         _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(nextPath));
       }
     }
@@ -92,11 +92,12 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
   }
 }
 
-bool FilesScreen::isBmpFile(const String &name) const {
+bool FilesScreen::isImageFile(const String &name) const {
   if (name.length() < 4) return false;
-  String suffix = name.substring(name.length() - 4);
+  String suffix = name.substring(name.lastIndexOf('.'));
   suffix.toLowerCase();
-  return suffix == F(".bmp");
+  return suffix == F(".bmp") || suffix == F(".png") ||
+         suffix == F(".jpg") || suffix == F(".jpeg");
 }
 
 void FilesScreen::tick(uint32_t nowMs) {

@@ -13,12 +13,15 @@ const uint32_t InvalidSourceRow = 0xffffffffUL;
 const uint32_t MaxSupportedDibSize = 124;
 }
 
+ImageViewerScreen *ImageViewerScreen::_decoderOwner = nullptr;
+
 ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
                                      TouchController &touch,
                                      DisplayController &display,
                                      SdCardController &sdCard)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
+    _format(ImageFormat::Unknown),
     _pixelOffset(0),
     _sourceWidth(0),
     _sourceHeight(0),
@@ -73,14 +76,26 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     return;
   }
   _file = SD.open(_path.c_str(), FILE_READ);
-  if (!_file || !readHeader() || !prepareRender()) {
+  if (!_file || !readRasterHeader() || !prepareRender()) {
     if (_error.length() == 0) _error = F("Unable to render image");
     drawError();
     return;
   }
   draw();
   drawLoading(0);
-  _rendering = true;
+  if (_format != ImageFormat::Bmp && !decodeRasterImage()) {
+    if (_error.length() == 0) _error = F("Could not decode image");
+    releaseBuffers();
+    drawError();
+    return;
+  }
+  _rendering = _format == ImageFormat::Bmp;
+  if (!_rendering) {
+    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
+    releaseBuffers();
+    drawCloseIcon();
+    return;
+  }
   if (!renderRows(16)) {
     _rendering = false;
     if (_error.length() == 0) _error = F("Could not read image data");
@@ -117,10 +132,13 @@ void ImageViewerScreen::handleTouch(const TouchPoint &point) {
 
 void ImageViewerScreen::reset() {
   _rendering = false;
+  _decoderOwner = nullptr;
   if (_file) _file.close();
+  if (_decoderFile) _decoderFile.close();
   releaseBuffers();
   _path = "";
   _error = "";
+  _format = ImageFormat::Unknown;
   _pixelOffset = 0;
   _sourceWidth = 0;
   _sourceHeight = 0;
@@ -160,11 +178,40 @@ void ImageViewerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Image unavailable"), _display.width() / 2, _display.height() / 2 - 16, 2);
+  int16_t centerX = _display.width() / 2;
+  int16_t centerY = _display.height() / 2;
+  tft.drawString(F("Image unavailable"), centerX, centerY - 40, 2);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(_error, _display.width() / 2, _display.height() / 2 + 14, 2);
+  tft.drawString(_error, centerX, centerY - 12, 2);
+  String details = String(F("Format: ")) + formatName() + F("  Size: ") +
+                   String(_sourceWidth) + F("x") + String(_sourceHeight);
+  tft.drawString(details, centerX, centerY + 12, 2);
+  String filename = _path;
+  int slash = filename.lastIndexOf('/');
+  if (slash >= 0) filename = filename.substring(slash + 1);
+  if (filename.length() > 28) filename = String(F("...")) + filename.substring(filename.length() - 25);
+  tft.drawString(filename, centerX, centerY + 36, 2);
   tft.setTextDatum(TL_DATUM);
+  Serial.print(F("Image viewer error: format="));
+  Serial.print(formatName());
+  Serial.print(F(" size="));
+  Serial.print(_sourceWidth);
+  Serial.print('x');
+  Serial.print(_sourceHeight);
+  Serial.print(F(" file="));
+  Serial.print(_path);
+  Serial.print(F(" reason="));
+  Serial.println(_error);
   drawCloseIcon();
+}
+
+const char *ImageViewerScreen::formatName() const {
+  switch (_format) {
+    case ImageFormat::Bmp: return "BMP";
+    case ImageFormat::Png: return "PNG";
+    case ImageFormat::Jpeg: return "JPEG";
+    default: return "unknown";
+  }
 }
 
 void ImageViewerScreen::drawLoading(uint8_t percent) {
@@ -181,6 +228,13 @@ void ImageViewerScreen::drawLoading(uint8_t percent) {
   tft.drawString(progress, centerX, centerY + 14, 2);
   tft.setTextDatum(TL_DATUM);
   drawCloseIcon();
+}
+
+void ImageViewerScreen::updateDecodeProgress(uint8_t percent) {
+  if (percent == 100 || percent >= (uint8_t)(_lastProgress + 5)) {
+    _lastProgress = percent;
+    drawLoading(percent);
+  }
 }
 
 bool ImageViewerScreen::readHeader() {
@@ -333,6 +387,63 @@ bool ImageViewerScreen::readHeader() {
   return true;
 }
 
+bool ImageViewerScreen::readRasterHeader() {
+  uint8_t signature[8] = {};
+  if (!_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) {
+    _error = F("Unable to read image header");
+    return false;
+  }
+  if (signature[0] == 'B' && signature[1] == 'M') {
+    _format = ImageFormat::Bmp;
+    return readHeader();
+  }
+  if (signature[0] == 0x89 && signature[1] == 'P' && signature[2] == 'N' && signature[3] == 'G' &&
+      signature[4] == 0x0d && signature[5] == 0x0a && signature[6] == 0x1a && signature[7] == 0x0a) {
+    _format = ImageFormat::Png;
+    _decoderOwner = this;
+    int pngResult = _png.open(_path.c_str(), pngOpen, pngClose, pngRead, pngSeek, pngDraw);
+    if (pngResult != PNG_SUCCESS) {
+      _error = String(F("PNG header error ")) + pngResult;
+      return false;
+    }
+    if (_png.isInterlaced()) {
+      _error = F("Interlaced PNG unsupported");
+      _png.close();
+      return false;
+    }
+    _sourceWidth = (uint32_t)_png.getWidth();
+    _sourceHeight = (uint32_t)_png.getHeight();
+    if (_sourceWidth == 0 || _sourceHeight == 0) {
+      _error = F("PNG has invalid dimensions");
+      return false;
+    }
+    return true;
+  }
+  if (signature[0] == 0xff && signature[1] == 0xd8) {
+    _format = ImageFormat::Jpeg;
+    _decoderOwner = this;
+    int jpegResult = _file.seek(0) ? _jpeg.open(_file, jpegDraw) : 0;
+    if (jpegResult != 1) {
+      _error = String(F("JPEG header error ")) + _jpeg.getLastError();
+      return false;
+    }
+    if (_jpeg.getJPEGType() != JPEG_MODE_BASELINE) {
+      _error = F("Progressive JPEG unsupported");
+      _jpeg.close();
+      return false;
+    }
+    _sourceWidth = (uint32_t)_jpeg.getWidth();
+    _sourceHeight = (uint32_t)_jpeg.getHeight();
+    if (_sourceWidth == 0 || _sourceHeight == 0) {
+      _error = F("JPEG has invalid dimensions");
+      return false;
+    }
+    return true;
+  }
+  _error = F("Unsupported image format");
+  return false;
+}
+
 bool ImageViewerScreen::prepareRender() {
   if (!_display.isReady() || _sourceWidth == 0 || _sourceHeight == 0) {
     _error = F("Invalid image size");
@@ -366,10 +477,13 @@ bool ImageViewerScreen::prepareRender() {
   }
   _frameBuffer = (uint16_t *)ps_malloc((size_t)screenWidth * screenHeight * sizeof(uint16_t));
   _xCoordinates = (uint32_t *)malloc((size_t)_drawWidth * sizeof(uint32_t));
-  _row0 = (uint8_t *)malloc(sourceBytes);
-  _row1 = (uint8_t *)malloc(sourceBytes);
-  if (!_rle) _rawRow = (uint8_t *)malloc(_rowStride);
-  if (!_frameBuffer || !_xCoordinates || !_row0 || !_row1 || (!_rle && !_rawRow)) {
+  if (_format == ImageFormat::Bmp) {
+    _row0 = (uint8_t *)malloc(sourceBytes);
+    _row1 = (uint8_t *)malloc(sourceBytes);
+    if (!_rle) _rawRow = (uint8_t *)malloc(_rowStride);
+  }
+  if (!_frameBuffer || !_xCoordinates ||
+      (_format == ImageFormat::Bmp && (!_row0 || !_row1 || (!_rle && !_rawRow)))) {
     _error = F("Image needs too much memory");
     releaseBuffers();
     return false;
@@ -380,6 +494,97 @@ bool ImageViewerScreen::prepareRender() {
       ? (uint32_t)(((uint64_t)dx * (_sourceWidth - 1) << 16) / (_drawWidth - 1)) : 0;
   }
   return true;
+}
+
+bool ImageViewerScreen::decodeRasterImage() {
+  int result = 0;
+  if (_format == ImageFormat::Png) {
+    result = _png.decode(this, PNG_CHECK_CRC);
+    int pngError = _png.getLastError();
+    _png.close();
+    _decoderOwner = nullptr;
+    if (result != PNG_SUCCESS) {
+      _error = String(F("PNG decode error ")) + result + F("/code ") + pngError;
+      return false;
+    }
+  } else if (_format == ImageFormat::Jpeg) {
+    result = _jpeg.decode(0, 0, 0);
+    int jpegError = _jpeg.getLastError();
+    _jpeg.close();
+    _decoderOwner = nullptr;
+    if (result != 1) {
+      _error = String(F("JPEG decode error ")) + jpegError;
+      return false;
+    }
+  }
+  _lastProgress = 100;
+  drawLoading(100);
+  return true;
+}
+
+void ImageViewerScreen::storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color) {
+  if (!_frameBuffer || sourceX >= _sourceWidth || sourceY >= _sourceHeight) return;
+  uint32_t dx0 = (uint32_t)(((uint64_t)sourceX * _drawWidth) / _sourceWidth);
+  uint32_t dx1 = (uint32_t)((((uint64_t)(sourceX + 1) * _drawWidth) + _sourceWidth - 1) / _sourceWidth);
+  uint32_t dy0 = (uint32_t)(((uint64_t)sourceY * _drawHeight) / _sourceHeight);
+  uint32_t dy1 = (uint32_t)((((uint64_t)(sourceY + 1) * _drawHeight) + _sourceHeight - 1) / _sourceHeight);
+  if (dx1 <= dx0) dx1 = dx0 + 1;
+  if (dy1 <= dy0) dy1 = dy0 + 1;
+  if (dx1 > _drawWidth) dx1 = _drawWidth;
+  if (dy1 > _drawHeight) dy1 = _drawHeight;
+  for (uint32_t dy = dy0; dy < dy1; dy++) {
+    uint16_t *row = _frameBuffer + (size_t)(_top + dy) * _display.width() + _left;
+    for (uint32_t dx = dx0; dx < dx1; dx++) row[dx] = color;
+  }
+}
+
+void *ImageViewerScreen::pngOpen(const char *name, int32_t *size) {
+  if (!_decoderOwner) return nullptr;
+  _decoderOwner->_decoderFile = SD.open(name, FILE_READ);
+  if (!_decoderOwner->_decoderFile) return nullptr;
+  *size = (int32_t)_decoderOwner->_decoderFile.size();
+  return &_decoderOwner->_decoderFile;
+}
+
+void ImageViewerScreen::pngClose(void *handle) {
+  File *file = static_cast<File *>(handle);
+  if (file) file->close();
+}
+
+int32_t ImageViewerScreen::pngRead(PNGFILE *file, uint8_t *buffer, int32_t length) {
+  if (!file || !file->fHandle) return 0;
+  File *source = static_cast<File *>(file->fHandle);
+  return source->read(buffer, length);
+}
+
+int32_t ImageViewerScreen::pngSeek(PNGFILE *file, int32_t position) {
+  if (!file || !file->fHandle || position < 0) return 0;
+  File *source = static_cast<File *>(file->fHandle);
+  return source->seek(position) ? position : 0;
+}
+
+int ImageViewerScreen::pngDraw(PNGDRAW *draw) {
+  if (!_decoderOwner || !draw) return 0;
+  ImageViewerScreen &viewer = *_decoderOwner;
+  uint16_t *pixels = (uint16_t *)malloc((size_t)draw->iWidth * sizeof(uint16_t));
+  if (!pixels) return 0;
+  viewer._png.getLineAsRGB565(draw, pixels, PNG_RGB565_LITTLE_ENDIAN, 0);
+  for (int x = 0; x < draw->iWidth; x++) viewer.storeRasterPixel((uint32_t)x, (uint32_t)draw->y, pixels[x]);
+  free(pixels);
+  viewer.updateDecodeProgress((uint8_t)(((uint32_t)(draw->y + 1) * 100) / viewer._sourceHeight));
+  return 1;
+}
+
+int ImageViewerScreen::jpegDraw(JPEGDRAW *draw) {
+  if (!_decoderOwner || !draw || !draw->pPixels) return 0;
+  ImageViewerScreen &viewer = *_decoderOwner;
+  for (int y = 0; y < draw->iHeight; y++) {
+    for (int x = 0; x < draw->iWidthUsed; x++) {
+      viewer.storeRasterPixel((uint32_t)(draw->x + x), (uint32_t)(draw->y + y), draw->pPixels[y * draw->iWidth + x]);
+    }
+  }
+  viewer.updateDecodeProgress((uint8_t)(((uint32_t)(draw->y + draw->iHeight) * 100) / viewer._sourceHeight));
+  return 1;
 }
 
 bool ImageViewerScreen::renderRows(uint8_t maxRows) {
@@ -407,10 +612,7 @@ bool ImageViewerScreen::renderRows(uint8_t maxRows) {
     _nextDrawY--;
     done++;
     uint8_t percent = (uint8_t)(((uint32_t)(_drawHeight - 1 - _nextDrawY) * 100) / _drawHeight);
-    if (percent != _lastProgress) {
-      _lastProgress = percent;
-      drawLoading(percent);
-    }
+    updateDecodeProgress(percent);
   }
   if (_nextDrawY < 0) {
     _rendering = false;

@@ -3,6 +3,20 @@
 #include <Arduino.h>
 #include <FS.h>
 
+// JPEGDEC 1.8.x declares its filesystem overload with an unqualified File.
+// ESP32's FS core keeps File in namespace fs, so provide the expected alias
+// before including the decoder header.
+using File = fs::File;
+
+#ifndef PNG_MAX_BUFFERED_PIXELS
+// PNGdec needs two uncompressed input rows. This supports common images up
+// to 4096 pixels wide, including 32-bit RGBA PNG files.
+#define PNG_MAX_BUFFERED_PIXELS ((4096 * 4 + 1) * 2)
+#endif
+
+#include <JPEGDEC.h>
+#include <PNGdec.h>
+
 #include "Screen.h"
 #include "SdCardController.h"
 
@@ -30,6 +44,8 @@ private:
     AlphaBitfields = 6
   };
 
+  enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg };
+
   struct PaletteEntry {
     uint8_t r;
     uint8_t g;
@@ -38,8 +54,10 @@ private:
 
   SdCardController &_sdCard;
   fs::File _file;
+  fs::File _decoderFile;
   String _path;
   String _error;
+  ImageFormat _format;
   uint32_t _pixelOffset;
   uint32_t _sourceWidth;
   uint32_t _sourceHeight;
@@ -81,13 +99,21 @@ private:
   uint32_t _rlePendingBlankRows;
   bool _rleDone;
 
+  PNG _png;
+  JPEGDEC _jpeg;
+  static ImageViewerScreen *_decoderOwner;
+
   void reset();
   void draw();
   void drawCloseIcon();
   void drawError();
   void drawLoading(uint8_t percent);
+  void updateDecodeProgress(uint8_t percent);
+  const char *formatName() const;
   bool readHeader();
+  bool readRasterHeader();
   bool prepareRender();
+  bool decodeRasterImage();
   bool renderRows(uint8_t maxRows);
   bool readSourceRow(uint32_t sourceY, uint8_t *target);
   bool readUncompressedRow(uint32_t sourceY, uint8_t *target);
@@ -103,4 +129,12 @@ private:
   uint16_t readLe16(const uint8_t *buffer) const;
   uint32_t readLe32(const uint8_t *buffer) const;
   int32_t readLe32Signed(const uint8_t *buffer) const;
+
+  static void *pngOpen(const char *name, int32_t *size);
+  static void pngClose(void *handle);
+  static int32_t pngRead(PNGFILE *file, uint8_t *buffer, int32_t length);
+  static int32_t pngSeek(PNGFILE *file, int32_t position);
+  static int pngDraw(PNGDRAW *draw);
+  static int jpegDraw(JPEGDRAW *draw);
+  void storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color);
 };
