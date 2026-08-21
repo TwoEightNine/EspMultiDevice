@@ -1,13 +1,15 @@
 #include "FilesScreen.h"
 
 #include "Navigator.h"
+#include "icons.h"
 
 #include <FS.h>
 #include <SD.h>
 
 namespace {
 const uint16_t FolderColor = TFT_YELLOW;
-const uint16_t FileColor = TFT_WHITE;
+const uint16_t FileColor = TFT_LIGHTGREY;
+const uint16_t ImageFileColor = TFT_GREEN;
 const uint16_t ControlColor = TFT_LIGHTGREY;
 }
 
@@ -23,7 +25,14 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _lastTouchDown(false),
     _entryCount(0),
     _pageCount(0),
+    _rows(nullptr),
+    _rowCapacity(0),
+    _pageSize(1),
     _rowCount(0) {
+}
+
+FilesScreen::~FilesScreen() {
+  delete[] _rows;
 }
 
 void FilesScreen::onEnter() {
@@ -145,43 +154,52 @@ void FilesScreen::drawListing() {
   refreshListingInfo();
   _rowCount = 0;
 
+  const int16_t listWidth = _display.width() - 2 * ListPadding;
+  auto addRow = [&](int16_t y, uint8_t kind, uint16_t entryIndex) -> Row * {
+    if (_rowCount >= _rowCapacity) return nullptr;
+    Row &row = _rows[_rowCount++];
+    row = { ListPadding, listWidth, y, RowHeight, kind, entryIndex };
+    return &row;
+  };
+
   if (_currentPath != "/" && _page == 0) {
-    _rows[_rowCount] = { RowTop + _rowCount * RowHeight, RowHeight, RowKindEntry, 0xffff };
+    int16_t y = RowTop + _rowCount * RowHeight;
+    if (!addRow(y, RowKindEntry, 0xffff)) return;
     TFT_eSPI &tft = _display.tft();
-    tft.fillRect(18, RowTop + 8, 14, 14, FolderColor);
-    // Replace the rectangle with the final parent bitmap when available:
-    // tft.pushImage(18, RowTop + 5, 20, 20, parentFolderBitmap);
+    tft.drawXBitmap(ListPadding + 2, y + 7, ic_dir, 16, 16, FolderColor);
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(F(".."), 44, RowTop + RowHeight / 2, 2);
+    tft.drawString(F(".."), ListPadding + 28, y + RowHeight / 2, 2);
     tft.setTextDatum(TL_DATUM);
-    _rowCount++;
   }
 
   if (_page > 0) {
-    _rows[_rowCount] = { RowTop + _rowCount * RowHeight, RowHeight, RowKindPrevious, 0 };
-    _rowCount++;
+    int16_t y = RowTop + _rowCount * RowHeight;
+    if (!addRow(y, RowKindPrevious, 0)) return;
   }
 
-  uint16_t firstEntry = _page * PageSize;
+  uint16_t firstEntry = _page * _pageSize;
   uint16_t displayed = 0;
   uint16_t index = firstEntry;
-  while (displayed < PageSize && index < _entryCount) {
+  while (displayed < _pageSize && index < _entryCount) {
     String name;
     bool isDirectory = false;
     if (entryAt(index, name, isDirectory)) {
       int16_t y = RowTop + _rowCount * RowHeight;
       TFT_eSPI &tft = _display.tft();
-      uint16_t color = isDirectory ? FolderColor : FileColor;
-      tft.fillRect(18, y + 8, 14, 14, color);
-      // Replace the rectangle with the final bitmap when available:
-      // tft.pushImage(18, y + 5, 20, 20, isDirectory ? folderBitmap : fileBitmap);
+      if (!addRow(y, RowKindEntry, index)) return;
+      tft.fillRect(ListPadding, y, listWidth, RowHeight, TFT_BLACK);
+      if (isDirectory) {
+        tft.drawXBitmap(ListPadding + 2, y + 7, ic_dir, 16, 16, FolderColor);
+      } else {
+        // drawXBitmap paints only set bits, preserving the background beneath the mask.
+        uint16_t color = isImageFile(name) ? ImageFileColor : FileColor;
+        tft.drawXBitmap(ListPadding + 2, y + 7, ic_file, 16, 16, color);
+      }
       tft.setTextDatum(ML_DATUM);
       tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.drawString(truncateLabel(displayName(name), _display.width() - 58), 44, y + RowHeight / 2, 2);
+      tft.drawString(truncateLabel(displayName(name), listWidth - 42), ListPadding + 28, y + RowHeight / 2, 2);
       tft.setTextDatum(TL_DATUM);
-      _rows[_rowCount] = { y, RowHeight, RowKindEntry, index };
-      _rowCount++;
       displayed++;
     }
     index++;
@@ -189,12 +207,11 @@ void FilesScreen::drawListing() {
 
   if (_page + 1 < _pageCount) {
     int16_t y = RowTop + _rowCount * RowHeight;
-    _rows[_rowCount] = { y, RowHeight, RowKindNext, 0 };
-    _rowCount++;
+    if (!addRow(y, RowKindNext, 0)) return;
     TFT_eSPI &tft = _display.tft();
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(ControlColor, TFT_BLACK);
-    tft.drawString(F("Next page"), 44, y + RowHeight / 2, 2);
+    tft.drawString(F("Next page"), ListPadding + 28, y + RowHeight / 2, 2);
     tft.setTextDatum(TL_DATUM);
   }
 
@@ -203,7 +220,7 @@ void FilesScreen::drawListing() {
     int16_t y = RowTop;
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(ControlColor, TFT_BLACK);
-    tft.drawString(F("Previous page"), 44, y + RowHeight / 2, 2);
+    tft.drawString(F("Previous page"), ListPadding + 28, y + RowHeight / 2, 2);
     tft.setTextDatum(TL_DATUM);
   }
 }
@@ -223,14 +240,28 @@ void FilesScreen::drawUnavailable() {
 }
 
 void FilesScreen::refreshListingInfo() {
+  uint16_t availableHeight = _display.height() > RowTop ? _display.height() - RowTop : 0;
+  uint8_t rowSlots = availableHeight / RowHeight;
+  // Keep room for navigation rows (parent and previous/next) on every page.
+  _pageSize = rowSlots > 2 ? rowSlots - 2 : 1;
+  ensureRowCapacity(rowSlots > 0 ? rowSlots : 1);
   _entryCount = countEntries();
-  _pageCount = (_entryCount + PageSize - 1) / PageSize;
+  _pageCount = (_entryCount + _pageSize - 1) / _pageSize;
   if (_pageCount == 0) {
     _pageCount = 1;
   }
   if (_page >= _pageCount) {
     _page = _pageCount - 1;
   }
+}
+
+void FilesScreen::ensureRowCapacity(uint8_t capacity) {
+  if (capacity == 0 || capacity == _rowCapacity) return;
+  Row *rows = new Row[capacity];
+  if (!rows) return;
+  delete[] _rows;
+  _rows = rows;
+  _rowCapacity = capacity;
 }
 
 uint16_t FilesScreen::countEntries() const {
@@ -243,7 +274,8 @@ uint16_t FilesScreen::countEntries() const {
   uint16_t count = 0;
   File entry = directory.openNextFile();
   while (entry) {
-    count++;
+    String name = entry.name();
+    if (!isHiddenEntry(name)) count++;
     entry.close();
     entry = directory.openNextFile();
   }
@@ -261,19 +293,26 @@ bool FilesScreen::entryAt(uint16_t index, String &name, bool &isDirectory) const
   uint16_t current = 0;
   File entry = directory.openNextFile();
   while (entry) {
-    if (current == index) {
-      name = entry.name();
-      isDirectory = entry.isDirectory();
-      entry.close();
-      directory.close();
-      return true;
+    String entryName = entry.name();
+    if (!isHiddenEntry(entryName)) {
+      if (current == index) {
+        name = entryName;
+        isDirectory = entry.isDirectory();
+        entry.close();
+        directory.close();
+        return true;
+      }
+      current++;
     }
-    current++;
     entry.close();
     entry = directory.openNextFile();
   }
   directory.close();
   return false;
+}
+
+bool FilesScreen::isHiddenEntry(const String &path) const {
+  return displayName(path).startsWith(F("._"));
 }
 
 void FilesScreen::openDirectory(const String &path) {

@@ -11,6 +11,7 @@ public:
               TouchController &touch,
               DisplayController &display,
               SdCardController &sdCard);
+  ~FilesScreen() override;
 
   void onEnter() override;
   void handleTouch(const TouchPoint &point) override;
@@ -18,18 +19,20 @@ public:
 
 private:
   struct Row {
+    int16_t x;
+    int16_t w;
     int16_t y;
     int16_t h;
     uint8_t kind;
     uint16_t entryIndex;
 
     bool contains(int16_t x, int16_t touchY) const {
-      (void)x;
-      return touchY >= y && touchY < y + h;
+      return x >= this->x && x < this->x + w &&
+             touchY >= y && touchY < y + h;
     }
   };
 
-  static const uint8_t PageSize = 5;
+  static const int16_t ListPadding = 16;
   static const int16_t RowTop = 88;
   static const int16_t RowHeight = 30;
   static const uint8_t RowKindEntry = 0;
@@ -43,8 +46,10 @@ private:
   bool _lastTouchDown;
   uint16_t _entryCount;
   uint16_t _pageCount;
-  Row _rows[PageSize + 2];
+  Row *_rows;
+  uint8_t _rowCapacity;
   uint8_t _rowCount;
+  uint16_t _pageSize;
 
   void draw();
   void drawTopBar();
@@ -52,8 +57,10 @@ private:
   void drawListing();
   void drawUnavailable();
   void refreshListingInfo();
+  void ensureRowCapacity(uint8_t capacity);
   uint16_t countEntries() const;
   bool entryAt(uint16_t index, String &name, bool &isDirectory) const;
+  bool isHiddenEntry(const String &path) const;
   bool isImageFile(const String &name) const;
   void openDirectory(const String &path);
   void openParentDirectory();
