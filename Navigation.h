@@ -6,20 +6,30 @@
 // Navigator. New payload kinds can be added without changing screen APIs.
 enum class ScreenDataKind : uint8_t {
   None,
-  ImagePath
+  ImagePath,
+  TextInput
 };
 
 struct ScreenData {
   ScreenDataKind kind;
   String text;
+  bool maskInput;
 
-  ScreenData() : kind(ScreenDataKind::None), text() {
+  ScreenData() : kind(ScreenDataKind::None), text(), maskInput(false) {
   }
 
   static ScreenData imagePath(const String &path) {
     ScreenData data;
     data.kind = ScreenDataKind::ImagePath;
     data.text = path;
+    return data;
+  }
+
+  static ScreenData textInput(const String &title, bool mask) {
+    ScreenData data;
+    data.kind = ScreenDataKind::TextInput;
+    data.text = title;
+    data.maskInput = mask;
     return data;
   }
 };

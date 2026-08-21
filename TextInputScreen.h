@@ -11,6 +11,7 @@ public:
                   DisplayController &display);
 
   void onEnter() override;
+  void onEnter(const ScreenData &data) override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
 
@@ -50,6 +51,8 @@ private:
   };
 
   String _text;
+  String _title;
+  bool _maskText;
   uint32_t _cursor;
   bool _shift;
   bool _symbols;
@@ -91,6 +94,7 @@ private:
   uint16_t cursorLine() const;
   uint16_t visibleLineCount() const;
   uint16_t textWidth(const String &value) const;
+  String displayText(const String &value) const;
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
   int8_t keyAt(int16_t x, int16_t y) const;
   void drawButton(const Rect &bounds, const char *label, bool active);

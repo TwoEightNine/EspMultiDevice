@@ -33,7 +33,9 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
   if (point.x >= ListPadding && point.x < _display.width() - ListPadding &&
       point.y >= RowTop && point.y < RowTop + OptionCount * RowHeight) {
     uint8_t option = (point.y - RowTop) / RowHeight;
-    if (option == 1) {
+    if (option == 0) {
+      _navigator.push(ScreenId::WiFi);
+    } else if (option == 1) {
       _navigator.push(ScreenId::TouchCalibration);
     }
     return;

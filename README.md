@@ -1,6 +1,6 @@
 # ESP Media
 
-ESP Media is an ESP32-S3 media-device project. The current build brings up an 8-bit parallel ILI9488 TFT through TFT_eSPI, polls the display's XPT2046 resistive touch panel through `TouchController`, and keeps SD card storage encapsulated in `SdCardController`.
+ESP Media is an ESP32-S3 media-device project. The current build brings up an 8-bit parallel ILI9488 TFT through TFT_eSPI, polls the display's XPT2046 resistive touch panel through `TouchController`, keeps SD card storage encapsulated in `SdCardController`, and manages station-mode Wi-Fi through `WiFiController`.
 
 All project wiring is kept inside these GPIO ranges:
 
@@ -18,6 +18,8 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Runs a simple read/write self-test through `SdCardController`.
 - Detects card removal at runtime.
 - Retries mounting when a card is inserted again.
+- Scans, connects to, disconnects from, and forgets Wi-Fi networks through the Settings flow.
+- Remembers Wi-Fi credentials in the ESP32 Wi-Fi configuration and updates the Home status icon.
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
 - Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
@@ -39,6 +41,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `TouchController.cpp`: SPI polling, pressure detection, and coordinate mapping.
 - `SdCardController.h`: SD card controller interface.
 - `SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
+- `WiFiController.h` / `WiFiController.cpp`: asynchronous Wi-Fi scan, connection, reconnect, and credential lifecycle.
 - `MicController.h`: INMP441 I2S microphone controller interface.
 - `MicController.cpp`: microphone I2S setup, power-switch sensing, and PCM reads.
 - `SpeakerController.h`: MAX98357A I2S speaker controller interface.
@@ -48,6 +51,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
 - `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, and baseline JPEG images, with reusable `.cache/*.em16` RGB565 canvases.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
+- `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
 
 ## Screen Architecture
 

@@ -12,6 +12,7 @@ enum class ScreenId : uint8_t {
   VoiceRecorder,
   Files,
   Settings,
+  WiFi,
   TouchCalibration,
   ImageViewer,
   TextInput
@@ -19,7 +20,7 @@ enum class ScreenId : uint8_t {
 
 class Navigator {
 public:
-  static const uint8_t MaxScreens = 8;
+  static const uint8_t MaxScreens = 9;
   static const uint8_t MaxStackDepth = 8;
 
   Navigator();

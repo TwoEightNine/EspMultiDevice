@@ -17,9 +17,11 @@ const uint16_t AppIconColor = TFT_WHITE;
 HomeScreen::HomeScreen(Navigator &navigator,
                        TouchController &touch,
                        DisplayController &display,
-                       SdCardController &sdCard)
+                       SdCardController &sdCard,
+                       WiFiController &wifi)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
+    _wifi(wifi),
     _sdMounted(false),
     _wifiConnected(false),
     _batteryPercent(BatteryStubPercent),
@@ -33,6 +35,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
 
 void HomeScreen::onEnter() {
   refreshSdState();
+  _wifiConnected = _wifi.isConnected();
   _lastClockMinute = 0xffffffffUL;
   _lastClockText = "";
   draw();
@@ -76,6 +79,7 @@ void HomeScreen::tick(uint32_t nowMs) {
   }
 
   handleSdCardEvent(_sdCard.update());
+  setWifiState(_wifi.isConnected());
 }
 
 void HomeScreen::draw() {
@@ -222,6 +226,14 @@ void HomeScreen::setSdState(bool mounted) {
   }
   _sdMounted = mounted;
   drawSdIcon();
+}
+
+void HomeScreen::setWifiState(bool connected) {
+  if (_wifiConnected == connected) {
+    return;
+  }
+  _wifiConnected = connected;
+  drawWifiIcon();
 }
 
 void HomeScreen::refreshSdState() {

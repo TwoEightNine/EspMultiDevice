@@ -39,6 +39,8 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
                                  DisplayController &display)
   : Screen(navigator, touch, display),
     _text(),
+    _title("Text input"),
+    _maskText(false),
     _cursor(0),
     _shift(false),
     _symbols(false),
@@ -56,6 +58,25 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
 }
 
 void TextInputScreen::onEnter() {
+  _title = "Text input";
+  _maskText = false;
+  _text = "";
+  _cursor = 0;
+  _shift = false;
+  _symbols = false;
+  _lastTouchDown = false;
+  _cursorVisible = true;
+  _lastBlinkMs = millis();
+  _pressedKey = -1;
+  _pressedUntilMs = 0;
+  _scrollLine = 0;
+  draw();
+}
+
+void TextInputScreen::onEnter(const ScreenData &data) {
+  _title = data.kind == ScreenDataKind::TextInput && data.text.length() > 0
+             ? data.text : "Text input";
+  _maskText = data.kind == ScreenDataKind::TextInput && data.maskInput;
   _text = "";
   _cursor = 0;
   _shift = false;
@@ -246,15 +267,16 @@ void TextInputScreen::drawInput() {
   }
 
   const int16_t textX = _inputBounds.x + TextPadding;
-  const int16_t textY = _inputBounds.y + TextPadding;
+  const int16_t textY = _inputBounds.y + 26;
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(_title, textX, _inputBounds.y + TextPadding, 2);
   for (uint16_t i = 0; i < visible; i++) {
     uint16_t lineIndex = _scrollLine + i;
     if (lineIndex >= _lineCount) {
       break;
     }
-    String line = _text.substring(_lines[lineIndex].start, _lines[lineIndex].end);
+    String line = displayText(_text.substring(_lines[lineIndex].start, _lines[lineIndex].end));
     tft.drawString(line, textX, textY + i * LineHeight, 2);
   }
 
@@ -265,7 +287,7 @@ void TextInputScreen::drawInput() {
     if (beforeEnd > _lines[caretLine].end) {
       beforeEnd = _lines[caretLine].end;
     }
-    String before = _text.substring(lineStart, beforeEnd);
+    String before = displayText(_text.substring(lineStart, beforeEnd));
     int16_t caretX = textX + textWidth(before);
     int16_t caretY = textY + (caretLine - _scrollLine) * LineHeight;
     tft.drawFastVLine(caretX, caretY + 1, LineHeight - 3, CursorColor);
@@ -462,6 +484,19 @@ uint16_t TextInputScreen::visibleLineCount() const {
 
 uint16_t TextInputScreen::textWidth(const String &value) const {
   return _display.tft().textWidth(value, 2);
+}
+
+String TextInputScreen::displayText(const String &value) const {
+  if (!_maskText) {
+    return value;
+  }
+
+  String masked;
+  masked.reserve(value.length());
+  for (uint16_t i = 0; i < value.length(); i++) {
+    masked += value[i] == '\n' ? '\n' : '*';
+  }
+  return masked;
 }
 
 bool TextInputScreen::contains(const Rect &rect, int16_t x, int16_t y) const {

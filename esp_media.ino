@@ -14,6 +14,8 @@
 #include "TouchCalibrationScreen.h"
 #include "TextInputScreen.h"
 #include "VoiceRecorderScreen.h"
+#include "WiFiController.h"
+#include "WiFiScreen.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
@@ -51,6 +53,7 @@ SdCardController *sdCard = nullptr;
 TouchController *touch = nullptr;
 MicController *mic = nullptr;
 SpeakerController *speaker = nullptr;
+WiFiController *wifiController = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
@@ -61,6 +64,7 @@ SettingsScreen *settingsScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
+WiFiScreen *wifiScreen = nullptr;
 
 void updateTouch();
 
@@ -131,8 +135,12 @@ void setup() {
   );
   Serial.println(F("MAX98357A speaker configured for lazy startup."));
 
+  wifiController = new WiFiController();
+  wifiController->begin();
+  Serial.println(F("Wi-Fi controller ready."));
+
   navigator = new Navigator();
-  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard);
+  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController);
   splashScreen = new SplashScreen(*navigator, *touch, *display);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
@@ -140,6 +148,7 @@ void setup() {
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
+  wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -155,6 +164,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Settings, *settingsScreen)) {
     Serial.println(F("Navigator failed to register Settings screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::WiFi, *wifiScreen)) {
+    Serial.println(F("Navigator failed to register Wi-Fi screen."));
   }
   if (!navigator->registerScreen(ScreenId::TouchCalibration, *touchCalibrationScreen)) {
     Serial.println(F("Navigator failed to register Touch Calibration screen."));
@@ -175,6 +187,10 @@ void setup() {
 
 void loop() {
   updateTouch();
+
+  if (wifiController) {
+    wifiController->update(millis());
+  }
 
   if (navigator) {
     Screen *screen = navigator->activeScreen();
