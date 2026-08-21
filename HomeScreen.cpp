@@ -1,6 +1,7 @@
 #include "HomeScreen.h"
 
 #include "Navigator.h"
+#include "icons.h"
 
 #define COLOR_BATTERY_GREEN 0x2c89
 #define COLOR_BATTERY_YELLOW 0xa54a
@@ -133,19 +134,21 @@ void HomeScreen::drawClock(bool force) {
 }
 
 void HomeScreen::drawSdIcon() {
-  // sd card icon
-  // const int16_t x = _display.width() - 82;
-  // const int16_t y = 4;
-  // uint16_t color = _sdMounted ? TFT_WHITE : TFT_DARKGREY;
-  // tft.pushImage(x, y, 16, 16, sdCardIcon, color);
+  TFT_eSPI &tft = _display.tft();
+  const int16_t x = _display.width() - 82;
+  const int16_t y = 4;
+  uint16_t color = _sdMounted ? StatusActiveColor : StatusInactiveColor;
+  tft.fillRect(x, y, 16, 16, TFT_BLACK);
+  tft.drawXBitmap(x, y, ic_sd, 16, 16, color);
 }
 
 void HomeScreen::drawWifiIcon() {
-  // wifi icon
-  // const int16_t x = _display.width() - 58;
-  // const int16_t y = 4;
-  // uint16_t color = _wifiConnected ? TFT_WHITE : TFT_DARKGREY;
-  // tft.pushImage(x, y, 16, 16, wifiIcon, color);
+  TFT_eSPI &tft = _display.tft();
+  const int16_t x = _display.width() - 58;
+  const int16_t y = 4;
+  uint16_t color = _wifiConnected ? StatusActiveColor : StatusInactiveColor;
+  tft.fillRect(x, y, 16, 16, TFT_BLACK);
+  tft.drawXBitmap(x, y, ic_wifi, 16, 16, color);
 }
 
 void HomeScreen::drawBattery() {
