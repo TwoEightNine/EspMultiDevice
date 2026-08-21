@@ -46,7 +46,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
-- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, and baseline JPEG images.
+- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, and baseline JPEG images, with reusable `.cache/*.em16` RGB565 canvases.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 
 ## Screen Architecture

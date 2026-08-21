@@ -33,8 +33,13 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint16_t CloseTouchSize = 48;
+  static const uint16_t CloseTouchSize = 64;
   static const uint16_t MaxPaletteEntries = 256;
+  static const uint16_t CacheWidth = 480;
+  static const uint16_t CacheHeight = 320;
+  static const uint16_t CacheHeaderSize = 24;
+  static const uint32_t CachePixelBytes = (uint32_t)CacheWidth * CacheHeight * 2UL;
+  static const uint16_t CacheChunkBytes = 4096;
 
   enum class Compression : uint32_t {
     Rgb = 0,
@@ -55,8 +60,15 @@ private:
   SdCardController &_sdCard;
   fs::File _file;
   fs::File _decoderFile;
+  fs::File _cacheFile;
   String _path;
   String _error;
+  String _cachePath;
+  String _cacheTempPath;
+  uint32_t _sourceFileSize;
+  uint32_t _sourceWriteTime;
+  uint32_t _cacheOffset;
+  uint8_t _cacheChunk[CacheChunkBytes];
   ImageFormat _format;
   uint32_t _pixelOffset;
   uint32_t _sourceWidth;
@@ -91,6 +103,7 @@ private:
   uint8_t *_row0;
   uint8_t *_row1;
   bool _rendering;
+  bool _cacheWriting;
   bool _lastTouchDown;
   uint8_t _lastProgress;
 
@@ -114,6 +127,16 @@ private:
   bool readRasterHeader();
   bool prepareRender();
   bool decodeRasterImage();
+  String cachePathForSource() const;
+  bool loadCache();
+  bool cacheNeedsRotation() const;
+  void startCacheWrite();
+  void writeCacheChunk();
+  void finishCacheWrite(bool success);
+  bool writeCacheHeader(fs::File &file) const;
+  bool readCacheHeader(fs::File &file) const;
+  void writeLe16(uint8_t *buffer, uint16_t value) const;
+  void writeLe32(uint8_t *buffer, uint32_t value) const;
   bool renderRows(uint8_t maxRows);
   bool readSourceRow(uint32_t sourceY, uint8_t *target);
   bool readUncompressedRow(uint32_t sourceY, uint8_t *target);

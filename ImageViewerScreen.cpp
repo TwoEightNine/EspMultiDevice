@@ -21,6 +21,9 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
                                      SdCardController &sdCard)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
+    _sourceFileSize(0),
+    _sourceWriteTime(0),
+    _cacheOffset(0),
     _format(ImageFormat::Unknown),
     _pixelOffset(0),
     _sourceWidth(0),
@@ -53,6 +56,7 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _row0(nullptr),
     _row1(nullptr),
     _rendering(false),
+    _cacheWriting(false),
     _lastTouchDown(false),
     _lastProgress(0),
     _rleFileRow(0),
@@ -76,7 +80,25 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     return;
   }
   _file = SD.open(_path.c_str(), FILE_READ);
-  if (!_file || !readRasterHeader() || !prepareRender()) {
+  if (!_file) {
+    _error = F("Unable to open source image");
+    drawError();
+    return;
+  }
+  _sourceFileSize = (uint32_t)_file.size();
+  _sourceWriteTime = (uint32_t)_file.getLastWrite();
+  _cachePath = cachePathForSource();
+  _cacheTempPath = _cachePath + F(".tmp");
+  if (loadCache()) {
+    Serial.print(F("Image cache hit: "));
+    Serial.println(_cachePath);
+    draw();
+    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
+    releaseBuffers();
+    drawCloseIcon();
+    return;
+  }
+  if (!readRasterHeader() || !prepareRender()) {
     if (_error.length() == 0) _error = F("Unable to render image");
     drawError();
     return;
@@ -92,7 +114,8 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   _rendering = _format == ImageFormat::Bmp;
   if (!_rendering) {
     _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
-    releaseBuffers();
+    startCacheWrite();
+    if (!_cacheWriting) releaseBuffers();
     drawCloseIcon();
     return;
   }
@@ -118,6 +141,7 @@ void ImageViewerScreen::tick(uint32_t nowMs) {
     releaseBuffers();
     drawError();
   }
+  if (_cacheWriting) writeCacheChunk();
 }
 
 void ImageViewerScreen::handleTouch(const TouchPoint &point) {
@@ -135,9 +159,17 @@ void ImageViewerScreen::reset() {
   _decoderOwner = nullptr;
   if (_file) _file.close();
   if (_decoderFile) _decoderFile.close();
+  if (_cacheFile) _cacheFile.close();
+  if (_cacheWriting && _cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
+  _cacheWriting = false;
   releaseBuffers();
   _path = "";
   _error = "";
+  _cachePath = "";
+  _cacheTempPath = "";
+  _sourceFileSize = 0;
+  _sourceWriteTime = 0;
+  _cacheOffset = 0;
   _format = ImageFormat::Unknown;
   _pixelOffset = 0;
   _sourceWidth = 0;
@@ -166,10 +198,11 @@ void ImageViewerScreen::draw() {
 void ImageViewerScreen::drawCloseIcon() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.drawLine(4, 4, 19, 19, TFT_WHITE);
-  tft.drawLine(19, 4, 4, 19, TFT_WHITE);
-  tft.drawLine(5, 4, 20, 19, TFT_WHITE);
-  tft.drawLine(20, 4, 5, 19, TFT_WHITE);
+  tft.fillRoundRect(2, 2, 52, 52, 8, TFT_BLACK);
+  for (int16_t offset = 0; offset < 4; offset++) {
+    tft.drawLine(12 + offset, 12, 44 + offset, 44, TFT_WHITE);
+    tft.drawLine(44 + offset, 12, 12 + offset, 44, TFT_WHITE);
+  }
 }
 
 void ImageViewerScreen::drawError() {
@@ -444,6 +477,175 @@ bool ImageViewerScreen::readRasterHeader() {
   return false;
 }
 
+String ImageViewerScreen::cachePathForSource() const {
+  int slash = _path.lastIndexOf('/');
+  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
+  String name = slash < 0 ? _path : _path.substring(slash + 1);
+  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".em16");
+}
+
+bool ImageViewerScreen::readCacheHeader(fs::File &file) const {
+  if (!file || file.size() != CacheHeaderSize + CachePixelBytes) return false;
+  uint8_t header[CacheHeaderSize];
+  if (file.read(header, sizeof(header)) != sizeof(header)) return false;
+  if (header[0] != 'E' || header[1] != 'M' || header[2] != '1' || header[3] != '6' ||
+      header[4] != 1 || header[5] != 0 || readLe16(header + 8) != CacheWidth ||
+      readLe16(header + 10) != CacheHeight || readLe32(header + 12) != _sourceFileSize ||
+      readLe32(header + 16) != _sourceWriteTime || readLe32(header + 20) != CachePixelBytes) {
+    return false;
+  }
+  return true;
+}
+
+bool ImageViewerScreen::loadCache() {
+  if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
+  if (!SD.exists(_cachePath)) return false;
+  fs::File cache = SD.open(_cachePath.c_str(), FILE_READ);
+  if (!cache || !readCacheHeader(cache)) {
+    if (cache) cache.close();
+    return false;
+  }
+  _frameBuffer = (uint16_t *)ps_malloc(CachePixelBytes);
+  bool readOk = _frameBuffer != nullptr;
+  uint32_t offset = 0;
+  while (readOk && offset < CachePixelBytes) {
+    uint32_t remaining = CachePixelBytes - offset;
+    uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
+    if (cache.read(_cacheChunk, amount) != amount) {
+      readOk = false;
+      break;
+    }
+    if (!cacheNeedsRotation()) {
+      memcpy((uint8_t *)_frameBuffer + offset, _cacheChunk, amount);
+    } else {
+      uint32_t firstPixel = offset / 2;
+      uint32_t pixelCount = amount / 2;
+      for (uint32_t i = 0; i < pixelCount; i++) {
+        uint32_t cachePixel = firstPixel + i;
+        uint16_t color;
+        memcpy(&color, _cacheChunk + i * 2, sizeof(color));
+        uint32_t cacheX = cachePixel % CacheWidth;
+        uint32_t cacheY = cachePixel / CacheWidth;
+        uint32_t screenX = cacheY;
+        uint32_t screenY = CacheWidth - 1 - cacheX;
+        _frameBuffer[screenY * _display.width() + screenX] = color;
+      }
+    }
+    offset += amount;
+  }
+  if (!readOk) {
+    cache.close();
+    releaseBuffers();
+    return false;
+  }
+  cache.close();
+  return true;
+}
+
+bool ImageViewerScreen::writeCacheHeader(fs::File &file) const {
+  uint8_t header[CacheHeaderSize] = {};
+  header[0] = 'E'; header[1] = 'M'; header[2] = '1'; header[3] = '6';
+  header[4] = 1; // cache format version
+  header[5] = 0; // RGB565 little-endian
+  writeLe16(header + 8, CacheWidth);
+  writeLe16(header + 10, CacheHeight);
+  writeLe32(header + 12, _sourceFileSize);
+  writeLe32(header + 16, _sourceWriteTime);
+  writeLe32(header + 20, CachePixelBytes);
+  return file.write(header, sizeof(header)) == sizeof(header);
+}
+
+void ImageViewerScreen::startCacheWrite() {
+  if (_cacheWriting || !_frameBuffer || _cachePath.length() == 0) return;
+  if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) {
+    Serial.print(F("Image cache: skipped, display is "));
+    Serial.print(_display.width());
+    Serial.print('x');
+    Serial.println(_display.height());
+    return;
+  }
+  int slash = _cachePath.lastIndexOf('/');
+  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
+  Serial.print(F("Image cache: preparing "));
+  Serial.println(_cachePath);
+  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+    Serial.print(F("Image cache: cannot create "));
+    Serial.println(directory);
+    return;
+  }
+  SD.remove(_cacheTempPath);
+  _cacheFile = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  if (!_cacheFile || !writeCacheHeader(_cacheFile)) {
+    Serial.print(F("Image cache: cannot start "));
+    Serial.println(_cacheTempPath);
+    if (_cacheFile) _cacheFile.close();
+    SD.remove(_cacheTempPath);
+    return;
+  }
+  _cacheOffset = 0;
+  _cacheWriting = true;
+  Serial.print(F("Image cache: writing "));
+  Serial.println(_cacheTempPath);
+}
+
+void ImageViewerScreen::writeCacheChunk() {
+  if (!_cacheWriting || !_cacheFile || !_frameBuffer) return;
+  uint32_t remaining = CachePixelBytes - _cacheOffset;
+  uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
+  // Copy through internal RAM; SPI DMA cannot reliably source arbitrary PSRAM buffers.
+  if (!cacheNeedsRotation()) {
+    memcpy(_cacheChunk, (uint8_t *)_frameBuffer + _cacheOffset, amount);
+  } else {
+    uint32_t firstPixel = _cacheOffset / 2;
+    uint32_t pixelCount = amount / 2;
+    for (uint32_t i = 0; i < pixelCount; i++) {
+      uint32_t cachePixel = firstPixel + i;
+      uint32_t cacheX = cachePixel % CacheWidth;
+      uint32_t cacheY = cachePixel / CacheWidth;
+      uint32_t screenX = cacheY;
+      uint32_t screenY = CacheWidth - 1 - cacheX;
+      uint16_t color = _frameBuffer[screenY * _display.width() + screenX];
+      memcpy(_cacheChunk + i * 2, &color, sizeof(color));
+    }
+  }
+  size_t written = _cacheFile.write(_cacheChunk, amount);
+  if (written != amount) {
+    Serial.print(F("Image cache: write failed "));
+    Serial.println(_cacheTempPath);
+    finishCacheWrite(false);
+    return;
+  }
+  _cacheOffset += amount;
+  if (_cacheOffset == CachePixelBytes) finishCacheWrite(true);
+}
+
+bool ImageViewerScreen::cacheNeedsRotation() const {
+  return _display.width() == CacheHeight && _display.height() == CacheWidth;
+}
+
+void ImageViewerScreen::finishCacheWrite(bool success) {
+  if (_cacheFile) _cacheFile.close();
+  bool committed = false;
+  if (success) {
+    bool removedOld = !_cachePath.length() || !SD.exists(_cachePath) || SD.remove(_cachePath);
+    committed = removedOld && SD.rename(_cacheTempPath, _cachePath);
+  }
+  if (!committed) {
+    SD.remove(_cacheTempPath);
+    if (success) {
+      Serial.print(F("Image cache: commit failed "));
+      Serial.println(_cachePath);
+    }
+  }
+  _cacheWriting = false;
+  _cacheOffset = 0;
+  if (committed) {
+    Serial.print(F("Image cache ready: "));
+    Serial.println(_cachePath);
+  }
+  releaseBuffers();
+}
+
 bool ImageViewerScreen::prepareRender() {
   if (!_display.isReady() || _sourceWidth == 0 || _sourceHeight == 0) {
     _error = F("Invalid image size");
@@ -617,7 +819,8 @@ bool ImageViewerScreen::renderRows(uint8_t maxRows) {
   if (_nextDrawY < 0) {
     _rendering = false;
     _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
-    releaseBuffers();
+    startCacheWrite();
+    if (!_cacheWriting) releaseBuffers();
     drawCloseIcon();
   }
   return true;
@@ -804,4 +1007,16 @@ uint32_t ImageViewerScreen::readLe32(const uint8_t *buffer) const {
 
 int32_t ImageViewerScreen::readLe32Signed(const uint8_t *buffer) const {
   return (int32_t)readLe32(buffer);
+}
+
+void ImageViewerScreen::writeLe16(uint8_t *buffer, uint16_t value) const {
+  buffer[0] = (uint8_t)value;
+  buffer[1] = (uint8_t)(value >> 8);
+}
+
+void ImageViewerScreen::writeLe32(uint8_t *buffer, uint32_t value) const {
+  buffer[0] = (uint8_t)value;
+  buffer[1] = (uint8_t)(value >> 8);
+  buffer[2] = (uint8_t)(value >> 16);
+  buffer[3] = (uint8_t)(value >> 24);
 }
