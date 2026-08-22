@@ -20,17 +20,7 @@ void WiFiController::begin() {
   _error = "";
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-
-  String savedSsid = WiFi.SSID();
-  if (savedSsid.length() == 0) {
-    savedSsid = _ssid;
-  }
-  if (savedSsid.length() > 0) {
-    _ssid = savedSsid;
-    _state = WiFiConnectionState::Connecting;
-    _connectionStartedMs = millis();
-    WiFi.begin();
-  } else {
+  if (!reconnectToSavedNetwork(millis())) {
     _state = WiFiConnectionState::Disconnected;
     startScan();
   }
@@ -86,16 +76,7 @@ void WiFiController::setEnabled(bool enabled) {
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  String savedSsid = WiFi.SSID();
-  if (savedSsid.length() == 0) {
-    savedSsid = _ssid;
-  }
-  if (savedSsid.length() > 0) {
-    _ssid = savedSsid;
-    _state = WiFiConnectionState::Connecting;
-    _connectionStartedMs = millis();
-    WiFi.begin();
-  } else {
+  if (!reconnectToSavedNetwork(millis())) {
     _state = WiFiConnectionState::Disconnected;
     startScan();
   }
@@ -149,6 +130,8 @@ bool WiFiController::connect(const String &ssid, const String &password) {
   }
 
   WiFi.mode(WIFI_STA);
+  // Keep credentials in the ESP32 Wi-Fi configuration so they survive reboot.
+  WiFi.persistent(true);
   if (password.length() == 0) {
     WiFi.begin(ssid.c_str(), nullptr);
   } else {
@@ -281,6 +264,33 @@ void WiFiController::sortNetworks() {
     }
     _networks[j + 1] = value;
   }
+}
+
+String WiFiController::savedSsid() const {
+  wifi_config_t config = {};
+  if (esp_wifi_get_config(WIFI_IF_STA, &config) != ESP_OK ||
+      config.sta.ssid[0] == '\0') {
+    return "";
+  }
+
+  String ssid;
+  for (size_t i = 0; i < sizeof(config.sta.ssid) && config.sta.ssid[i] != '\0'; i++) {
+    ssid += static_cast<char>(config.sta.ssid[i]);
+  }
+  return ssid;
+}
+
+bool WiFiController::reconnectToSavedNetwork(uint32_t nowMs) {
+  String configuredSsid = savedSsid();
+  if (configuredSsid.length() == 0) {
+    return false;
+  }
+
+  _ssid = configuredSsid;
+  _state = WiFiConnectionState::Connecting;
+  _connectionStartedMs = nowMs;
+  WiFi.begin();
+  return true;
 }
 
 void WiFiController::setConnectedState() {

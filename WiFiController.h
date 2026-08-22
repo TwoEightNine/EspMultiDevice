@@ -66,6 +66,8 @@ private:
   void finishScan(int16_t result);
   void addScanNetwork(const String &ssid, int32_t rssi, uint8_t authMode);
   void sortNetworks();
+  String savedSsid() const;
+  bool reconnectToSavedNetwork(uint32_t nowMs);
   void setConnectedState();
   void setFailedState(const String &message);
 };
