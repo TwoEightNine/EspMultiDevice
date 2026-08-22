@@ -106,7 +106,7 @@ bool FilesScreen::isImageFile(const String &name) const {
   String suffix = name.substring(name.lastIndexOf('.'));
   suffix.toLowerCase();
   return suffix == F(".bmp") || suffix == F(".png") ||
-         suffix == F(".jpg") || suffix == F(".jpeg");
+         suffix == F(".jpg") || suffix == F(".jpeg") || suffix == F(".gif");
 }
 
 void FilesScreen::tick(uint32_t nowMs) {

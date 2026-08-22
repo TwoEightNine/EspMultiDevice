@@ -25,7 +25,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
-- Image Viewer supports BMP, PNG, JPG, and JPEG files with PSRAM-backed full-frame loading for a single final image presentation and runs SD SPI at 20 MHz.
+- Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are fully cached before playback, then preload a complete cycle into PSRAM when it fits; larger GIFs use a PSRAM ring buffer filled in the background.
 
 ## Files
 
@@ -49,7 +49,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
-- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, and baseline JPEG images, with reusable `.cache/*.em16` RGB565 canvases.
+- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
 
@@ -68,7 +68,7 @@ Screens get common UI services from the base `Screen` constructor: `Navigator`, 
 
 ## Image Decoder Libraries
 
-Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images and baseline JPEG images; animated PNG and progressive JPEG files are reported as unsupported.
+Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Animated PNG and progressive JPEG files remain unsupported.
 
 ## TFT_eSPI Setup
 
@@ -142,7 +142,7 @@ If the display has a pin labelled `LED`, `LED_A`, `A`, or similar, that is usual
 
 ## Default SD Card Wiring
 
-The sketch uses SPI mode, not SDMMC mode.
+The sketch uses SPI mode, not SDMMC mode. It attempts 40 MHz for faster GIF-frame cache reads and falls back automatically to 20 MHz when the card or wiring cannot mount reliably at the higher speed.
 
 | SD Module Pin | ESP32-S3 GPIO |
 | --- | --- |

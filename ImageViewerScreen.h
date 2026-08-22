@@ -16,6 +16,7 @@ using File = fs::File;
 
 #include <JPEGDEC.h>
 #include <PNGdec.h>
+#include "third_party/AnimatedGIF/AnimatedGIF.h"
 
 #include "Screen.h"
 #include "SdCardController.h"
@@ -38,8 +39,12 @@ private:
   static const uint16_t CacheWidth = 480;
   static const uint16_t CacheHeight = 320;
   static const uint16_t CacheHeaderSize = 24;
+  static const uint16_t AnimationCacheHeaderSize = 40;
+  static const uint32_t AnimationFrameHeaderSize = 4;
   static const uint32_t CachePixelBytes = (uint32_t)CacheWidth * CacheHeight * 2UL;
   static const uint16_t CacheChunkBytes = 4096;
+  static const uint32_t GifPsramReserveBytes = 512UL * 1024UL;
+  static const uint8_t GifPreloadChunksPerTick = 4;
 
   enum class Compression : uint32_t {
     Rgb = 0,
@@ -49,7 +54,7 @@ private:
     AlphaBitfields = 6
   };
 
-  enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg };
+  enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg, Gif };
 
   struct PaletteEntry {
     uint8_t r;
@@ -57,10 +62,13 @@ private:
     uint8_t b;
   };
 
+  enum class GifState : uint8_t { None, Building, Preloading, Playing };
+
   SdCardController &_sdCard;
   fs::File _file;
   fs::File _decoderFile;
   fs::File _cacheFile;
+  fs::File _gifCacheReadFile;
   String _path;
   String _error;
   String _cachePath;
@@ -104,6 +112,36 @@ private:
   uint8_t *_row1;
   bool _rendering;
   bool _cacheWriting;
+  GifState _gifState;
+  bool _gifDecoderOpen;
+  bool _gifBuildWritePending;
+  bool _gifBuildLastFrame;
+  uint32_t _gifBuildFrame;
+  uint32_t _gifBuildWriteOffset;
+  uint32_t _gifBuildDelay;
+  uint32_t _gifFrameCount;
+  uint32_t _gifPlaybackFrame;
+  uint32_t _gifPlaybackDelay;
+  uint32_t _gifNextDelay;
+  uint32_t _gifCyclesCompleted;
+  int32_t _gifLoopCount;
+  uint16_t *_gifPlaybackA;
+  uint16_t *_gifPlaybackB;
+  uint16_t *_gifResidentFrames;
+  uint32_t *_gifResidentDelays;
+  uint32_t *_gifResidentSequences;
+  uint32_t _gifResidentCapacity;
+  uint32_t _gifPreloadSlot;
+  uint32_t _gifPreloadSequence;
+  uint32_t _gifPreloadOffset;
+  uint32_t _gifNextLoadSequence;
+  uint32_t _gifPlaybackSequence;
+  bool _gifFullResident;
+  bool _gifPreloadActive;
+  bool _gifActiveIsA;
+  bool _gifNextLoaded;
+  uint32_t _gifNextFrameAt;
+  uint32_t _gifCanvasPixels;
   bool _lastTouchDown;
   uint8_t _lastProgress;
 
@@ -114,6 +152,7 @@ private:
 
   PNG _png;
   JPEGDEC _jpeg;
+  AnimatedGIF _gif;
   static ImageViewerScreen *_decoderOwner;
 
   void reset();
@@ -121,6 +160,8 @@ private:
   void drawCloseIcon();
   void drawError();
   void drawLoading(uint8_t percent);
+  void drawGifLoading(uint32_t frame);
+  void drawGifPreloading(uint32_t frame, uint32_t total);
   void updateDecodeProgress(uint8_t percent);
   const char *formatName() const;
   bool readHeader();
@@ -129,6 +170,32 @@ private:
   bool decodeRasterImage();
   String cachePathForSource() const;
   bool loadCache();
+  bool loadAnimationCache();
+  bool readAnimationCacheHeader(fs::File &file, uint32_t &frameCount, int32_t &loopCount,
+                                uint32_t &sourceWidth, uint32_t &sourceHeight) const;
+  bool startGifBuild();
+  bool buildGifFrame();
+  bool finishGifBuild();
+  bool startGifPlayback();
+  bool tickGifPlayback(uint32_t nowMs);
+  bool startGifPreload();
+  bool tickGifPreload();
+  bool beginGifResidentPlayback();
+  bool beginGifRingLoad(uint32_t sequence);
+  bool tickGifRingLoad();
+  bool startNextGifRingLoad();
+  bool canPlayGifSequence(uint32_t sequence) const;
+  uint32_t gifSourceFrameForSequence(uint32_t sequence) const;
+  uint16_t *gifResidentFrame(uint32_t slot) const;
+  bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
+                              uint16_t *destination, uint32_t &delay);
+  bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);
+  bool writeAnimationCacheHeader(fs::File &file, uint32_t frameCount, int32_t loopCount) const;
+  String animationCachePathForSource() const;
+  void releaseGifBuffers();
+  void releaseGifDecoder();
+  bool isGifSource();
+  void scaleGifFrame();
   bool cacheNeedsRotation() const;
   void startCacheWrite();
   void writeCacheChunk();
@@ -159,5 +226,12 @@ private:
   static int32_t pngSeek(PNGFILE *file, int32_t position);
   static int pngDraw(PNGDRAW *draw);
   static int jpegDraw(JPEGDRAW *draw);
+  static void *gifOpen(const char *name, int32_t *size);
+  static void gifClose(void *handle);
+  static int32_t gifRead(GIFFILE *file, uint8_t *buffer, int32_t length);
+  static int32_t gifSeek(GIFFILE *file, int32_t position);
+  static void gifDraw(GIFDRAW *draw);
+  static void *gifAlloc(uint32_t size);
+  static void gifFree(void *buffer);
   void storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color);
 };

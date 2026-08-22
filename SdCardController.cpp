@@ -183,15 +183,26 @@ bool SdCardController::mount() {
   configurePins();
   SPI.begin(_sckPin, _misoPin, _mosiPin, _csPin);
 
-  if (!SD.begin(_csPin, SPI, DefaultSpiFrequency)) {
+  bool mountedAtPreferredSpeed = SD.begin(_csPin, SPI, PreferredSpiFrequency);
+  if (!mountedAtPreferredSpeed) {
+    // Long jumper wires and low-cost SD modules are often unreliable at
+    // 40 MHz. Preserve compatibility by remounting at the former 20 MHz
+    // speed rather than leaving the card unavailable.
     SD.end();
-    _mounted = false;
-    if (_cardDetectPin < 0) {
-      _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
-      _autoRetrySuspended = true;
-      Serial.println(F("SD mount failed; auto retry suspended because no card-detect pin is configured."));
+    delay(2);
+    if (!SD.begin(_csPin, SPI, FallbackSpiFrequency)) {
+      SD.end();
+      _mounted = false;
+      if (_cardDetectPin < 0) {
+        _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
+        _autoRetrySuspended = true;
+        Serial.println(F("SD mount failed; auto retry suspended because no card-detect pin is configured."));
+      }
+      return false;
     }
-    return false;
+    Serial.println(F("SD mounted at 20 MHz fallback speed."));
+  } else {
+    Serial.println(F("SD mounted at 40 MHz."));
   }
 
   if (SD.cardType() == CARD_NONE) {
