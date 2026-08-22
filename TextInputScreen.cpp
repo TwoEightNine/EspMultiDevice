@@ -7,23 +7,27 @@
 namespace {
 const uint16_t InputBorderColor = TFT_DARKGREY;
 const uint16_t KeyColor = 0x39c7;
-const uint16_t KeyActionColor = TFT_DARKGREY;
+const uint16_t KeyActionColor = 0x5a69;
 const uint16_t KeyActiveColor = TFT_BLUE;
 const uint16_t KeyPressedColor = TFT_CYAN;
+const uint16_t DoneColor = 0x3666;
 const uint16_t CursorColor = TFT_WHITE;
 const int16_t OuterPadding = 6;
 const int16_t KeyGap = 2;
-const int16_t ControlWidth = 74;
-const int16_t ControlGap = 6;
 const int16_t KeyboardGap = 6;
 const int16_t TextPadding = 6;
+const int16_t AppBarHeight = 50;
+const int16_t GridColumns = 10;
 const int16_t KeyboardRowCount = 5;
+// Adjust this value to change the height of every keyboard row.
+const int16_t KeyboardRowHeight = 48;
+const uint16_t ShiftHoldMs = 500;
 
 const char *normalRows[] = {
+  "1234567890",
   "qwertyuiop",
   "asdfghjkl",
-  "zxcvbnm",
-  "1234567890"
+  "zxcvbnm"
 };
 
 const char *symbolRows[] = {
@@ -43,7 +47,10 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
     _maskText(false),
     _cursor(0),
     _shift(false),
+    _capsLock(false),
     _symbols(false),
+    _shiftPressPending(false),
+    _shiftPressMs(0),
     _lastTouchDown(false),
     _cursorVisible(true),
     _lastBlinkMs(0),
@@ -51,8 +58,9 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
     _pressedUntilMs(0),
     _scrollLine(0),
     _inputBounds{0, 0, 0, 0},
-    _cancelBounds{0, 0, 0, 0},
+    _closeBounds{0, 0, 0, 0},
     _doneBounds{0, 0, 0, 0},
+    _keyboardBounds{0, 0, 0, 0},
     _keyCount(0),
     _lineCount(0) {
 }
@@ -63,7 +71,10 @@ void TextInputScreen::onEnter() {
   _text = "";
   _cursor = 0;
   _shift = false;
+  _capsLock = false;
   _symbols = false;
+  _shiftPressPending = false;
+  _shiftPressMs = 0;
   _lastTouchDown = false;
   _cursorVisible = true;
   _lastBlinkMs = millis();
@@ -80,7 +91,10 @@ void TextInputScreen::onEnter(const ScreenData &data) {
   _text = "";
   _cursor = 0;
   _shift = false;
+  _capsLock = false;
   _symbols = false;
+  _shiftPressPending = false;
+  _shiftPressMs = 0;
   _lastTouchDown = false;
   _cursorVisible = true;
   _lastBlinkMs = millis();
@@ -92,6 +106,11 @@ void TextInputScreen::onEnter(const ScreenData &data) {
 
 void TextInputScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) {
+    if (_shiftPressPending) {
+      finishShiftPress();
+      layout();
+      drawKeyboardArea();
+    }
     _lastTouchDown = false;
     return;
   }
@@ -101,7 +120,7 @@ void TextInputScreen::handleTouch(const TouchPoint &point) {
   }
   _lastTouchDown = true;
 
-  if (contains(_cancelBounds, point.x, point.y)) {
+  if (contains(_closeBounds, point.x, point.y)) {
     _navigator.pop();
     return;
   }
@@ -123,19 +142,39 @@ void TextInputScreen::handleTouch(const TouchPoint &point) {
   if (index >= 0) {
     _pressedKey = index;
     _pressedUntilMs = millis() + KeyFeedbackMs;
+    bool oldSymbols = _symbols;
+    bool oldShift = _shift;
+    bool oldCapsLock = _capsLock;
+    uint32_t oldCursor = _cursor;
+    String oldText = _text;
     handleKey((uint8_t)index);
-    drawKeyboard();
-    drawInput();
+    if (_symbols != oldSymbols ||
+        _shift != oldShift ||
+        _capsLock != oldCapsLock) {
+      layout();
+      drawKeyboardArea();
+    } else {
+      drawKey((uint8_t)index);
+    }
+    if (_text != oldText || _cursor != oldCursor) {
+      drawInput();
+    }
   }
 }
 
 void TextInputScreen::tick(uint32_t nowMs) {
-  bool redrawInput = false;
+  if (_shiftPressPending && nowMs - _shiftPressMs >= ShiftHoldMs) {
+    _shiftPressPending = false;
+    _shift = false;
+    _capsLock = !_capsLock;
+    layout();
+    drawKeyboardArea();
+  }
 
   if (nowMs - _lastBlinkMs >= CursorBlinkMs) {
     _lastBlinkMs = nowMs;
     _cursorVisible = !_cursorVisible;
-    redrawInput = true;
+    drawInputCaretLine();
   }
 
   if (_pressedKey >= 0 && (int32_t)(nowMs - _pressedUntilMs) >= 0) {
@@ -144,9 +183,6 @@ void TextInputScreen::tick(uint32_t nowMs) {
     drawKey((uint8_t)oldPressedKey);
   }
 
-  if (redrawInput) {
-    drawInput();
-  }
 }
 
 void TextInputScreen::draw() {
@@ -156,73 +192,80 @@ void TextInputScreen::draw() {
 
   layout();
   _display.tft().fillScreen(TFT_BLACK);
-  drawControls();
+  drawAppBar();
+  drawInputFrame();
   drawInput();
-  drawKeyboard();
+  drawKeyboardArea();
 }
 
 void TextInputScreen::layout() {
   const int16_t width = _display.width();
   const int16_t height = _display.height();
-  const int16_t controlsX = width - OuterPadding - ControlWidth;
-  const int16_t inputWidth = controlsX - ControlGap - OuterPadding;
-  const int16_t inputHeight = 104;
-
-  _inputBounds = {OuterPadding, OuterPadding, inputWidth, inputHeight};
-  _cancelBounds = {controlsX, OuterPadding, ControlWidth, 44};
-  _doneBounds = {controlsX, OuterPadding + 44 + ControlGap, ControlWidth, 44};
-
-  const int16_t keyboardTop = _inputBounds.y + _inputBounds.h + KeyboardGap;
-  const int16_t keyboardHeight = height - keyboardTop - OuterPadding;
-  const int16_t rowHeight = (keyboardHeight - KeyGap * (KeyboardRowCount - 1)) /
-                            KeyboardRowCount;
   const int16_t usableWidth = width - OuterPadding * 2;
+  const int16_t keyboardHeight = KeyboardRowCount * KeyboardRowHeight +
+                                 KeyGap * (KeyboardRowCount - 1);
+  const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
+  const int16_t inputHeight = keyboardTop - KeyboardGap - AppBarHeight;
+  _inputBounds = {OuterPadding, AppBarHeight, usableWidth, inputHeight};
+  _closeBounds = {10, 8, 70, 38};
+  _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
   _keyCount = 0;
 
-  for (uint8_t row = 0; row < 4; row++) {
-    layoutCharacterRow(_symbols ? symbolRows[row] : normalRows[row],
-                       keyboardTop + row * (rowHeight + KeyGap), rowHeight);
+  const uint8_t characterRows = _symbols ? 4 : 3;
+  for (uint8_t row = 0; row < characterRows; row++) {
+    layoutCharacterRow(_symbols ? symbolRows[row] : normalRows[row], row);
   }
 
-  const int16_t actionY = keyboardTop + 4 * (rowHeight + KeyGap);
-  const int16_t shiftWidth = 48;
-  const int16_t symbolsWidth = 48;
-  const int16_t backspaceWidth = 64;
-  const int16_t enterWidth = 56;
-  const int16_t spaceWidth = usableWidth - shiftWidth - symbolsWidth -
-                             backspaceWidth - enterWidth - KeyGap * 4;
-  int16_t x = OuterPadding;
+  if (!_symbols) {
+    layoutSpannedKey("", 0, KeyAction::Shift, 3, 0, 1);
+    const char *bottomLetters = "zxcvbnm";
+    for (uint8_t column = 0; column < 7; column++) {
+      layoutCharacterKey(bottomLetters[column], 3, column + 1);
+    }
+    layoutSpannedKey("", '\n', KeyAction::Enter, 3, 8, 2);
+  }
 
-  addKey(_shift ? "SHIFT" : "Shift", 0, KeyAction::Shift,
-         x, actionY, shiftWidth, rowHeight);
-  x += shiftWidth + KeyGap;
-  addKey(_symbols ? "ABC" : "#+=", 0, KeyAction::Symbols,
-         x, actionY, symbolsWidth, rowHeight);
-  x += symbolsWidth + KeyGap;
-  addKey("Space", ' ', KeyAction::Space, x, actionY, spaceWidth, rowHeight);
-  x += spaceWidth + KeyGap;
-  addKey("<", 0, KeyAction::Backspace,
-         x, actionY, backspaceWidth, rowHeight);
-  x += backspaceWidth + KeyGap;
-  addKey("Enter", '\n', KeyAction::Enter, x, actionY, enterWidth, rowHeight);
+  layoutSpannedKey(_symbols ? "ABC" : "#!@", 0, KeyAction::Symbols, 4, 0, 2);
+  layoutSpannedKey("Space", ' ', KeyAction::Space, 4, 2, 6);
+  layoutSpannedKey("Done", 0, KeyAction::Done, 4, 8, 2);
+  _doneBounds = _keys[_keyCount - 1].bounds;
 }
 
-void TextInputScreen::layoutCharacterRow(const char *characters, int16_t y, int16_t h) {
+void TextInputScreen::layoutCharacterRow(const char *characters, uint8_t row) {
   const uint8_t count = strlen(characters);
   if (count == 0) {
     return;
   }
 
-  const int16_t width = _display.width() - OuterPadding * 2;
-  const int16_t keyWidth = (width - KeyGap * (count - 1)) / count;
-  int16_t x = OuterPadding;
   for (uint8_t i = 0; i < count; i++) {
-    char label[2] = {characters[i], '\0'};
-    addKey(label, characters[i], KeyAction::Character,
-           x, y, keyWidth, h);
-    x += keyWidth + KeyGap;
+    layoutCharacterKey(characters[i], row, i);
   }
+  if ((!_symbols && row == 2) || (_symbols && row == 3)) {
+    layoutSpannedKey("", 0, KeyAction::Backspace, row, count, 1);
+  }
+}
 
+void TextInputScreen::layoutCharacterKey(char value, uint8_t row, uint8_t column) {
+  char label[2] = {value, '\0'};
+  if (lettersUppercase() && value >= 'a' && value <= 'z') {
+    label[0] = (char)(value - 'a' + 'A');
+  }
+  layoutSpannedKey(label, value, KeyAction::Character, row, column, 1);
+}
+
+void TextInputScreen::layoutSpannedKey(const char *label,
+                                       char value,
+                                       KeyAction action,
+                                       uint8_t row,
+                                       uint8_t column,
+                                       uint8_t span) {
+  const int16_t unit = (_keyboardBounds.w - KeyGap * (GridColumns - 1)) /
+                       GridColumns;
+  const int16_t x = _keyboardBounds.x + column * (unit + KeyGap);
+  const int16_t y = _keyboardBounds.y + row * (KeyboardRowHeight + KeyGap);
+  const int16_t h = KeyboardRowHeight;
+  const int16_t w = unit * span + KeyGap * (span - 1);
+  addKey(label, value, action, x, y, w, h);
 }
 
 void TextInputScreen::addKey(const char *label,
@@ -244,12 +287,28 @@ void TextInputScreen::addKey(const char *label,
   key.action = action;
 }
 
-void TextInputScreen::drawInput() {
+void TextInputScreen::drawAppBar() {
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(0, 0, _display.width(), AppBarHeight, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawLine(20, 17, 42, 37, TFT_WHITE);
+  tft.drawLine(42, 17, 20, 37, TFT_WHITE);
+  tft.drawString(_title, 108, 16, 4);
+}
+
+void TextInputScreen::drawInputFrame() {
   TFT_eSPI &tft = _display.tft();
   tft.fillRoundRect(_inputBounds.x, _inputBounds.y,
                     _inputBounds.w, _inputBounds.h, 6, TFT_BLACK);
   tft.drawRoundRect(_inputBounds.x, _inputBounds.y,
                     _inputBounds.w, _inputBounds.h, 6, InputBorderColor);
+}
+
+void TextInputScreen::drawInput() {
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(_inputBounds.x + 1, _inputBounds.y + 1,
+               _inputBounds.w - 2, _inputBounds.h - 2, TFT_BLACK);
 
   buildVisualLines();
   const uint16_t visible = visibleLineCount();
@@ -267,10 +326,9 @@ void TextInputScreen::drawInput() {
   }
 
   const int16_t textX = _inputBounds.x + TextPadding;
-  const int16_t textY = _inputBounds.y + 26;
+  const int16_t textY = _inputBounds.y + TextPadding;
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(_title, textX, _inputBounds.y + TextPadding, 2);
   for (uint16_t i = 0; i < visible; i++) {
     uint16_t lineIndex = _scrollLine + i;
     if (lineIndex >= _lineCount) {
@@ -295,9 +353,38 @@ void TextInputScreen::drawInput() {
   tft.setTextDatum(TL_DATUM);
 }
 
-void TextInputScreen::drawControls() {
-  drawButton(_cancelBounds, "Cancel", false);
-  drawButton(_doneBounds, "Done", false);
+void TextInputScreen::drawInputCaretLine() {
+  if (_lineCount == 0) {
+    buildVisualLines();
+  }
+
+  const uint16_t visible = visibleLineCount();
+  const uint16_t caretLine = cursorLine();
+  if (caretLine < _scrollLine || caretLine >= _scrollLine + visible) {
+    return;
+  }
+
+  TFT_eSPI &tft = _display.tft();
+  const int16_t textX = _inputBounds.x + TextPadding;
+  const int16_t textY = _inputBounds.y + TextPadding +
+                        (caretLine - _scrollLine) * LineHeight;
+  tft.fillRect(_inputBounds.x + 1, textY, _inputBounds.w - 2, LineHeight, TFT_BLACK);
+  String line = displayText(_text.substring(_lines[caretLine].start,
+                                            _lines[caretLine].end));
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(line, textX, textY, 2);
+
+  if (_cursorVisible) {
+    uint32_t beforeEnd = _cursor;
+    if (beforeEnd > _lines[caretLine].end) {
+      beforeEnd = _lines[caretLine].end;
+    }
+    String before = displayText(_text.substring(_lines[caretLine].start, beforeEnd));
+    tft.drawFastVLine(textX + textWidth(before), textY + 1,
+                      LineHeight - 3, CursorColor);
+  }
+  tft.setTextDatum(TL_DATUM);
 }
 
 void TextInputScreen::drawKeyboard() {
@@ -306,40 +393,86 @@ void TextInputScreen::drawKeyboard() {
   }
 }
 
+void TextInputScreen::drawKeyboardArea() {
+  _display.tft().fillRect(_keyboardBounds.x, _keyboardBounds.y,
+                          _keyboardBounds.w, _keyboardBounds.h, TFT_BLACK);
+  drawKeyboard();
+}
+
 void TextInputScreen::drawKey(uint8_t index) {
   if (index >= _keyCount) {
     return;
   }
 
   const Key &key = _keys[index];
-  bool active = (key.action == KeyAction::Shift && _shift) ||
+  bool active = (key.action == KeyAction::Shift && (_shift || _capsLock)) ||
                 (key.action == KeyAction::Symbols && _symbols);
+  uint16_t baseColor = key.action == KeyAction::Character ? KeyColor : KeyActionColor;
+  if (key.action == KeyAction::Done) {
+    baseColor = DoneColor;
+  }
   uint16_t fill = active ? KeyActiveColor :
-                  (_pressedKey == (int8_t)index ? KeyPressedColor :
-                   (key.action == KeyAction::Character ? KeyColor : KeyActionColor));
+                  (_pressedKey == (int8_t)index ? KeyPressedColor : baseColor);
   uint16_t textColor = (active || _pressedKey == (int8_t)index) ? TFT_BLACK : TFT_WHITE;
 
   TFT_eSPI &tft = _display.tft();
   tft.fillRoundRect(key.bounds.x, key.bounds.y, key.bounds.w, key.bounds.h, 5, fill);
   tft.drawRoundRect(key.bounds.x, key.bounds.y, key.bounds.w, key.bounds.h, 5, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(textColor, fill);
-  tft.drawString(key.label,
-                 key.bounds.x + key.bounds.w / 2,
-                 key.bounds.y + key.bounds.h / 2,
-                 2);
-  tft.setTextDatum(TL_DATUM);
+  if (key.action == KeyAction::Backspace ||
+      key.action == KeyAction::Enter ||
+      key.action == KeyAction::Shift) {
+    drawKeyIcon(key, textColor);
+  } else {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(textColor, fill);
+    tft.drawString(key.label,
+                   key.bounds.x + key.bounds.w / 2,
+                   key.bounds.y + key.bounds.h / 2,
+                   2);
+    tft.setTextDatum(TL_DATUM);
+  }
 }
 
-void TextInputScreen::drawButton(const Rect &bounds, const char *label, bool active) {
+void TextInputScreen::drawKeyIcon(const Key &key, uint16_t color) {
   TFT_eSPI &tft = _display.tft();
-  uint16_t fill = active ? KeyActiveColor : KeyActionColor;
-  tft.fillRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, fill);
-  tft.drawRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, fill);
-  tft.drawString(label, bounds.x + bounds.w / 2, bounds.y + bounds.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  const int16_t centerX = key.bounds.x + key.bounds.w / 2;
+  const int16_t centerY = key.bounds.y + key.bounds.h / 2;
+
+  if (key.action == KeyAction::Backspace) {
+    const int16_t left = centerX - 13;
+    const int16_t right = centerX + 12;
+    for (int8_t offset = -1; offset <= 1; offset++) {
+      tft.drawLine(left + 6, centerY + offset, right, centerY + offset, color);
+    }
+    tft.drawLine(left + 6, centerY - 1, left, centerY, color);
+    tft.drawLine(left, centerY, left + 6, centerY + 1, color);
+    return;
+  }
+
+  if (key.action == KeyAction::Enter) {
+    const int16_t top = centerY - 11;
+    const int16_t bottom = centerY + 6;
+    const int16_t left = centerX - 12;
+    for (int8_t offset = -1; offset <= 1; offset++) {
+      tft.drawLine(centerX + offset, top, centerX + offset, bottom, color);
+      tft.drawLine(centerX + offset, bottom, left + offset, bottom, color);
+    }
+    tft.drawLine(left, bottom, left + 6, bottom - 5, color);
+    tft.drawLine(left, bottom, left + 6, bottom + 5, color);
+    return;
+  }
+
+  // Shift is a bold upward arrow. A dot below it marks Caps Lock.
+  const int16_t top = centerY - 11;
+  const int16_t bottom = centerY + 8;
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    tft.drawLine(centerX + offset, bottom, centerX + offset, top + 6, color);
+  }
+  tft.drawLine(centerX, top, centerX - 7, top + 7, color);
+  tft.drawLine(centerX, top, centerX + 7, top + 7, color);
+  if (_capsLock) {
+    tft.fillCircle(centerX, key.bounds.y + key.bounds.h - 6, 2, color);
+  }
 }
 
 void TextInputScreen::handleKey(uint8_t index) {
@@ -353,13 +486,13 @@ void TextInputScreen::handleKey(uint8_t index) {
       insertCharacter(key.value);
       break;
     case KeyAction::Shift:
-      _shift = !_shift;
+      _shiftPressPending = true;
+      _shiftPressMs = millis();
       break;
     case KeyAction::Symbols:
       _symbols = !_symbols;
       _shift = false;
-      layout();
-      drawKeyboard();
+      _shiftPressPending = false;
       break;
     case KeyAction::Space:
       insertCharacter(' ');
@@ -370,16 +503,35 @@ void TextInputScreen::handleKey(uint8_t index) {
     case KeyAction::Enter:
       insertCharacter('\n');
       break;
+    case KeyAction::Done:
+      _navigator.pop(ScreenResult::withText(_text));
+      break;
   }
 
   _cursorVisible = true;
   _lastBlinkMs = millis();
 }
 
-void TextInputScreen::insertCharacter(char value) {
-  if (_shift && value >= 'a' && value <= 'z') {
-    value = (char)(value - 'a' + 'A');
+void TextInputScreen::finishShiftPress() {
+  if (!_shiftPressPending) {
+    return;
+  }
+
+  _shiftPressPending = false;
+  if (_capsLock) {
+    _capsLock = false;
     _shift = false;
+  } else {
+    _shift = !_shift;
+  }
+}
+
+void TextInputScreen::insertCharacter(char value) {
+  if ((_shift || _capsLock) && value >= 'a' && value <= 'z') {
+    value = (char)(value - 'a' + 'A');
+    if (!_capsLock) {
+      _shift = false;
+    }
   }
 
   _text = _text.substring(0, _cursor) + String(value) + _text.substring(_cursor);
@@ -502,6 +654,10 @@ String TextInputScreen::displayText(const String &value) const {
 bool TextInputScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
   return x >= rect.x && x < rect.x + rect.w &&
          y >= rect.y && y < rect.y + rect.h;
+}
+
+bool TextInputScreen::lettersUppercase() const {
+  return !_symbols && (_shift || _capsLock);
 }
 
 int8_t TextInputScreen::keyAt(int16_t x, int16_t y) const {

@@ -28,7 +28,8 @@ private:
     Symbols,
     Space,
     Backspace,
-    Enter
+    Enter,
+    Done
   };
 
   struct Rect {
@@ -55,7 +56,10 @@ private:
   bool _maskText;
   uint32_t _cursor;
   bool _shift;
+  bool _capsLock;
   bool _symbols;
+  bool _shiftPressPending;
+  uint32_t _shiftPressMs;
   bool _lastTouchDown;
   bool _cursorVisible;
   uint32_t _lastBlinkMs;
@@ -64,20 +68,32 @@ private:
   int16_t _scrollLine;
 
   Rect _inputBounds;
-  Rect _cancelBounds;
+  Rect _closeBounds;
   Rect _doneBounds;
+  Rect _keyboardBounds;
   Key _keys[MaxKeys];
   uint8_t _keyCount;
   VisualLine _lines[MaxVisualLines];
   uint16_t _lineCount;
 
   void draw();
+  void drawAppBar();
+  void drawInputFrame();
   void drawInput();
-  void drawControls();
+  void drawInputCaretLine();
   void drawKeyboard();
+  void drawKeyboardArea();
   void drawKey(uint8_t index);
+  void drawKeyIcon(const Key &key, uint16_t color);
   void layout();
-  void layoutCharacterRow(const char *characters, int16_t y, int16_t h);
+  void layoutCharacterRow(const char *characters, uint8_t row);
+  void layoutCharacterKey(char value, uint8_t row, uint8_t column);
+  void layoutSpannedKey(const char *label,
+                        char value,
+                        KeyAction action,
+                        uint8_t row,
+                        uint8_t column,
+                        uint8_t span);
   void addKey(const char *label,
               char value,
               KeyAction action,
@@ -87,6 +103,7 @@ private:
               int16_t h);
 
   void handleKey(uint8_t index);
+  void finishShiftPress();
   void insertCharacter(char value);
   void deleteCharacterBeforeCursor();
   void placeCursor(int16_t x, int16_t y);
@@ -97,5 +114,5 @@ private:
   String displayText(const String &value) const;
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
   int8_t keyAt(int16_t x, int16_t y) const;
-  void drawButton(const Rect &bounds, const char *label, bool active);
+  bool lettersUppercase() const;
 };
