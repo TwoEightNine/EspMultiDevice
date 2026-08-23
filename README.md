@@ -23,7 +23,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
 - Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
-- Streams mono or stereo integer PCM WAV files through the Audio player screen.
+- Streams mono or stereo integer PCM WAV files and local MPEG Layer III MP3 files through the Audio player screen.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 - Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
@@ -52,7 +52,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
 - `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
-- `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV player with play/pause controls and read-only progress.
+- `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
 
@@ -71,11 +71,13 @@ Screens get common UI services from the base `Screen` constructor: `Navigator`, 
 
 ## Image Decoder Libraries
 
-Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Very large GIFs may still be rejected when their cooked decoder canvas cannot fit in currently available PSRAM. Animated PNG and progressive JPEG files remain unsupported.
+Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. MP3 decoding uses the bundled public-domain `third_party/minimp3` implementation, so it needs no Library Manager dependency. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Very large GIFs may still be rejected when their cooked decoder canvas cannot fit in currently available PSRAM. Animated PNG and progressive JPEG files remain unsupported.
 
 ## Image Cache Formats
 
 The viewer creates SD-card caches beside each source image in a `.cache` directory. For example, `/photos/beach.jpg` becomes `/photos/.cache/beach.jpg.em16`, and `/photos/waves.gif` becomes `/photos/.cache/waves.gif.emga`. A cache is first written as the same path with a `.tmp` suffix and then renamed only after it is complete. Invalid, incomplete, or obsolete caches are rebuilt automatically.
+
+The audio player similarly stores a tiny MP3-analysis sidecar. For example, `/music/song.mp3` becomes `/music/.cache/song.mp3.empa`. It records the validated audio bounds, format, and total decoded samples, allowing future plays to skip the full frame scan while continuing to decode the original compressed MP3 during playback. The cache is accepted only when the source size and last-modified timestamp match.
 
 ### `.em16` — static-image canvas cache
 

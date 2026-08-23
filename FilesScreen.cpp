@@ -116,7 +116,7 @@ bool FilesScreen::isAudioFile(const String &name) const {
   if (name.length() < 4) return false;
   String suffix = name.substring(name.lastIndexOf('.'));
   suffix.toLowerCase();
-  return suffix == F(".wav");
+  return suffix == F(".wav") || suffix == F(".mp3");
 }
 
 void FilesScreen::tick(uint32_t nowMs) {

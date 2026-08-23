@@ -1,3 +1,7 @@
+#define MINIMP3_ONLY_MP3
+#define MINIMP3_IMPLEMENTATION
+#include "third_party/minimp3/minimp3.h"
+
 #include "AudioPlayerScreen.h"
 
 #include "Navigator.h"
@@ -17,6 +21,18 @@ uint32_t readLe32(const uint8_t *buffer) {
     | ((uint32_t)buffer[3] << 24);
 }
 
+void writeLe16(uint8_t *buffer, uint16_t value) {
+  buffer[0] = (uint8_t)value;
+  buffer[1] = (uint8_t)(value >> 8);
+}
+
+void writeLe32(uint8_t *buffer, uint32_t value) {
+  buffer[0] = (uint8_t)value;
+  buffer[1] = (uint8_t)(value >> 8);
+  buffer[2] = (uint8_t)(value >> 16);
+  buffer[3] = (uint8_t)(value >> 24);
+}
+
 int32_t clamp16(int64_t value) {
   if (value < -32768) return -32768;
   if (value > 32767) return 32767;
@@ -30,6 +46,28 @@ bool isPcmSubFormat(const uint8_t *guid) {
   };
   return memcmp(guid, pcmGuid, sizeof(pcmGuid)) == 0;
 }
+
+uint32_t readBe32(const uint8_t *buffer) {
+  return ((uint32_t)buffer[0] << 24)
+    | ((uint32_t)buffer[1] << 16)
+    | ((uint32_t)buffer[2] << 8)
+    | (uint32_t)buffer[3];
+}
+
+uint32_t readSynchsafe32(const uint8_t *buffer) {
+  return ((uint32_t)(buffer[0] & 0x7f) << 21)
+    | ((uint32_t)(buffer[1] & 0x7f) << 14)
+    | ((uint32_t)(buffer[2] & 0x7f) << 7)
+    | (uint32_t)(buffer[3] & 0x7f);
+}
+
+const uint16_t Mpeg1Layer3Bitrates[] = {
+  0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320
+};
+
+const uint16_t Mpeg2Layer3Bitrates[] = {
+  0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160
+};
 }
 
 AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
@@ -41,18 +79,30 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
     _sdCard(sdCard),
     _speaker(speaker),
     _state(State::Ready),
+    _format(SourceFormat::None),
     _sdMounted(false),
     _lastTouchDown(false),
     _lastDrawMs(0),
     _finishAtMs(0),
     _dataOffset(0),
     _dataBytes(0),
+    _sourceFileSize(0),
+    _sourceWriteTime(0),
     _frameCount(0),
     _framePosition(0),
     _sampleRate(0),
     _channels(0),
     _bitsPerSample(0),
-    _blockAlign(0) {
+    _blockAlign(0),
+    _mp3Analyzing(false),
+    _mp3DataOffset(0),
+    _mp3AudioEnd(0),
+    _mp3AnalysisPosition(0),
+    _mp3InputOffset(0),
+    _mp3InputBytes(0),
+    _mp3PcmFrames(0),
+    _mp3PcmPosition(0) {
+  mp3dec_init(&_mp3Decoder);
 }
 
 void AudioPlayerScreen::onEnter(const ScreenData &data) {
@@ -67,7 +117,7 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
   } else if (!_sdMounted) {
     fail(F("SD card unavailable"));
   } else {
-    if (loadSource(_path)) {
+    if (loadSource(_path) && !_mp3Analyzing) {
       startPlayback();
     }
   }
@@ -102,6 +152,10 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
 
 void AudioPlayerScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.update());
+  if (_mp3Analyzing) {
+    analyzeMp3Step();
+    return;
+  }
   if (_state == State::Playing) {
     if (_framePosition >= _frameCount) {
       if ((int32_t)(nowMs - _finishAtMs) >= 0) finishPlayback();
@@ -121,16 +175,28 @@ void AudioPlayerScreen::reset() {
   _fileName = "";
   _error = "";
   _state = State::Ready;
+  _format = SourceFormat::None;
   _lastDrawMs = 0;
   _finishAtMs = 0;
   _dataOffset = 0;
   _dataBytes = 0;
+  _sourceFileSize = 0;
+  _sourceWriteTime = 0;
   _frameCount = 0;
   _framePosition = 0;
   _sampleRate = 0;
   _channels = 0;
   _bitsPerSample = 0;
   _blockAlign = 0;
+  _mp3Analyzing = false;
+  _mp3DataOffset = 0;
+  _mp3AudioEnd = 0;
+  _mp3AnalysisPosition = 0;
+  _mp3InputOffset = 0;
+  _mp3InputBytes = 0;
+  _mp3PcmFrames = 0;
+  _mp3PcmPosition = 0;
+  mp3dec_init(&_mp3Decoder);
 }
 
 bool AudioPlayerScreen::loadSource(const String &path) {
@@ -139,14 +205,33 @@ bool AudioPlayerScreen::loadSource(const String &path) {
   _state = State::Ready;
   _framePosition = 0;
   _finishAtMs = 0;
+  _format = formatForPath(path);
   _file = SD.open(path.c_str(), FILE_READ);
-  if (!_file) return fail(F("Unable to open WAV file"));
-  if (!parseWav()) {
+  if (!_file) return fail(F("Unable to open audio file"));
+  _sourceFileSize = (uint32_t)_file.size();
+  _sourceWriteTime = (uint32_t)_file.getLastWrite();
+  if (_format == SourceFormat::Wav && !parseWav()) {
     if (_file) _file.close();
     _state = State::Error;
     return false;
   }
+  if (_format == SourceFormat::Mp3 && !beginMp3Analysis()) {
+    if (_file) _file.close();
+    _state = State::Error;
+    return false;
+  }
+  if (_format == SourceFormat::None) return fail(F("Unsupported audio file"));
   return true;
+}
+
+AudioPlayerScreen::SourceFormat AudioPlayerScreen::formatForPath(const String &path) const {
+  int16_t dot = path.lastIndexOf('.');
+  if (dot < 0) return SourceFormat::None;
+  String suffix = path.substring(dot);
+  suffix.toLowerCase();
+  if (suffix == F(".wav")) return SourceFormat::Wav;
+  if (suffix == F(".mp3")) return SourceFormat::Mp3;
+  return SourceFormat::None;
 }
 
 bool AudioPlayerScreen::parseWav() {
@@ -234,6 +319,290 @@ bool AudioPlayerScreen::parseFormatChunk(uint32_t offset, uint32_t size) {
   return true;
 }
 
+bool AudioPlayerScreen::beginMp3Analysis() {
+  uint32_t fileSize = _sourceFileSize;
+  if (fileSize < 4 || !seekTo(0)) return fail(F("Invalid MP3 file"));
+
+  if (loadMp3Cache()) return true;
+
+  _mp3DataOffset = 0;
+  _mp3AudioEnd = fileSize;
+  uint8_t tag[10];
+  if (fileSize >= sizeof(tag) && readExact(tag, sizeof(tag)) && memcmp(tag, "ID3", 3) == 0) {
+    uint32_t tagSize = readSynchsafe32(tag + 6);
+    uint32_t footerBytes = (tag[5] & 0x10) ? 10 : 0;
+    if (tagSize > fileSize - sizeof(tag) || footerBytes > fileSize - sizeof(tag) - tagSize) {
+      return fail(F("Invalid MP3 ID3 tag"));
+    }
+    _mp3DataOffset = sizeof(tag) + tagSize + footerBytes;
+  }
+
+  if (fileSize >= 128 && seekTo(fileSize - 128)) {
+    uint8_t id3v1[3];
+    if (readExact(id3v1, sizeof(id3v1)) && memcmp(id3v1, "TAG", 3) == 0) {
+      _mp3AudioEnd -= 128;
+    }
+  }
+  if (_mp3DataOffset >= _mp3AudioEnd || _mp3AudioEnd - _mp3DataOffset < 4) {
+    return fail(F("MP3 has no audio frames"));
+  }
+
+  _frameCount = 0;
+  _framePosition = 0;
+  _sampleRate = 0;
+  _channels = 0;
+  _bitsPerSample = 16;
+  _mp3AnalysisPosition = _mp3DataOffset;
+  _mp3Analyzing = true;
+  return true;
+}
+
+String AudioPlayerScreen::mp3CachePath() const {
+  int slash = _path.lastIndexOf('/');
+  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
+  String name = slash < 0 ? _path : _path.substring(slash + 1);
+  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".empa");
+}
+
+bool AudioPlayerScreen::loadMp3Cache() {
+  String path = mp3CachePath();
+  if (!SD.exists(path)) return false;
+
+  fs::File cache = SD.open(path.c_str(), FILE_READ);
+  uint8_t header[Mp3CacheHeaderBytes];
+  bool readOk = cache && cache.size() == Mp3CacheHeaderBytes &&
+    cache.read(header, sizeof(header)) == sizeof(header);
+  if (cache) cache.close();
+  if (!readOk || header[0] != 'E' || header[1] != 'M' || header[2] != 'P' || header[3] != 'A' ||
+      header[4] != 1 || header[5] != 0 || readLe16(header + 6) != Mp3CacheHeaderBytes ||
+      readLe32(header + 8) != _sourceFileSize || readLe32(header + 12) != _sourceWriteTime) {
+    return false;
+  }
+
+  uint32_t dataOffset = readLe32(header + 16);
+  uint32_t audioEnd = readLe32(header + 20);
+  uint32_t frameCount = readLe32(header + 24);
+  uint32_t sampleRate = readLe32(header + 28);
+  uint16_t channels = readLe16(header + 32);
+  if (dataOffset >= audioEnd || audioEnd > _sourceFileSize || frameCount == 0 ||
+      sampleRate == 0 || (channels != 1 && channels != 2)) {
+    return false;
+  }
+
+  _mp3DataOffset = dataOffset;
+  _mp3AudioEnd = audioEnd;
+  uint32_t firstFrameBytes = 0;
+  uint16_t firstFrameSamples = 0;
+  uint32_t firstSampleRate = 0;
+  uint16_t firstChannels = 0;
+  if (!parseMp3FrameHeader(dataOffset, firstFrameBytes, firstFrameSamples, firstSampleRate, firstChannels) ||
+      firstSampleRate != sampleRate || firstChannels != channels || firstFrameSamples > frameCount) {
+    return false;
+  }
+
+  _frameCount = frameCount;
+  _framePosition = 0;
+  _sampleRate = sampleRate;
+  _channels = channels;
+  _bitsPerSample = 16;
+  _mp3Analyzing = false;
+  if (!resetMp3Decoder()) return false;
+  Serial.print(F("MP3 cache hit: "));
+  Serial.println(path);
+  return true;
+}
+
+void AudioPlayerScreen::writeMp3Cache() {
+  if (!_file || _frameCount == 0 || _sampleRate == 0 || (_channels != 1 && _channels != 2)) return;
+
+  String path = mp3CachePath();
+  int slash = path.lastIndexOf('/');
+  String directory = slash <= 0 ? F("/") : path.substring(0, slash);
+  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+    Serial.print(F("MP3 cache directory failed: "));
+    Serial.println(directory);
+    return;
+  }
+
+  String tempPath = path + F(".tmp");
+  SD.remove(tempPath);
+  fs::File cache = SD.open(tempPath.c_str(), FILE_WRITE);
+  uint8_t header[Mp3CacheHeaderBytes] = {};
+  header[0] = 'E'; header[1] = 'M'; header[2] = 'P'; header[3] = 'A';
+  header[4] = 1;
+  writeLe16(header + 6, Mp3CacheHeaderBytes);
+  writeLe32(header + 8, _sourceFileSize);
+  writeLe32(header + 12, _sourceWriteTime);
+  writeLe32(header + 16, _mp3DataOffset);
+  writeLe32(header + 20, _mp3AudioEnd);
+  writeLe32(header + 24, _frameCount);
+  writeLe32(header + 28, _sampleRate);
+  writeLe16(header + 32, _channels);
+  bool written = cache && cache.write(header, sizeof(header)) == sizeof(header);
+  if (cache) cache.close();
+  if (!written || (SD.exists(path) && !SD.remove(path)) || !SD.rename(tempPath, path)) {
+    SD.remove(tempPath);
+    Serial.print(F("MP3 cache write failed: "));
+    Serial.println(path);
+    return;
+  }
+  Serial.print(F("MP3 cache ready: "));
+  Serial.println(path);
+}
+
+void AudioPlayerScreen::analyzeMp3Step() {
+  if (!_mp3Analyzing || _state == State::Error) return;
+
+  for (uint8_t i = 0; i < Mp3AnalysisFramesPerTick; i++) {
+    if (_mp3AnalysisPosition == _mp3AudioEnd) {
+      _mp3Analyzing = false;
+      if (_frameCount == 0 || !resetMp3Decoder()) {
+        if (_state != State::Error) fail(F("MP3 decoder setup failed"));
+      } else {
+        writeMp3Cache();
+        startPlayback();
+      }
+      draw();
+      return;
+    }
+
+    uint32_t frameBytes = 0;
+    uint16_t frameSamples = 0;
+    uint32_t sampleRate = 0;
+    uint16_t channels = 0;
+    if (!parseMp3FrameHeader(_mp3AnalysisPosition, frameBytes, frameSamples, sampleRate, channels)) {
+      fail(F("Invalid MP3 frame"));
+      draw();
+      return;
+    }
+    if (_sampleRate == 0) {
+      _sampleRate = sampleRate;
+      _channels = channels;
+    } else if (_sampleRate != sampleRate || _channels != channels) {
+      fail(F("MP3 stream format changed"));
+      draw();
+      return;
+    }
+    if (_frameCount > UINT32_MAX - frameSamples) {
+      fail(F("MP3 is too long"));
+      draw();
+      return;
+    }
+    _frameCount += frameSamples;
+    _mp3AnalysisPosition += frameBytes;
+  }
+}
+
+bool AudioPlayerScreen::parseMp3FrameHeader(uint32_t position,
+                                             uint32_t &frameBytes,
+                                             uint16_t &frameSamples,
+                                             uint32_t &sampleRate,
+                                             uint16_t &channels) {
+  frameBytes = 0;
+  frameSamples = 0;
+  sampleRate = 0;
+  channels = 0;
+  if (position > _mp3AudioEnd || _mp3AudioEnd - position < 4 || !seekTo(position)) return false;
+
+  uint8_t bytes[4];
+  if (!readExact(bytes, sizeof(bytes))) return false;
+  uint32_t header = readBe32(bytes);
+  uint8_t version = (header >> 19) & 0x03;
+  uint8_t layer = (header >> 17) & 0x03;
+  uint8_t bitrateIndex = (header >> 12) & 0x0f;
+  uint8_t sampleRateIndex = (header >> 10) & 0x03;
+  bool padded = ((header >> 9) & 0x01) != 0;
+  uint8_t channelMode = (header >> 6) & 0x03;
+  if ((header >> 21) != 0x07ff || version == 1 || layer != 1 ||
+      bitrateIndex == 0 || bitrateIndex == 15 || sampleRateIndex == 3) {
+    return false;
+  }
+
+  static const uint32_t mpeg1Rates[] = { 44100, 48000, 32000 };
+  static const uint32_t mpeg2Rates[] = { 22050, 24000, 16000 };
+  static const uint32_t mpeg25Rates[] = { 11025, 12000, 8000 };
+  bool mpeg1 = version == 3;
+  sampleRate = mpeg1 ? mpeg1Rates[sampleRateIndex]
+                       : (version == 2 ? mpeg2Rates[sampleRateIndex] : mpeg25Rates[sampleRateIndex]);
+  uint16_t bitrate = mpeg1 ? Mpeg1Layer3Bitrates[bitrateIndex] : Mpeg2Layer3Bitrates[bitrateIndex];
+  frameSamples = mpeg1 ? 1152 : 576;
+  uint64_t size = ((uint64_t)(mpeg1 ? 144 : 72) * bitrate * 1000) / sampleRate + (padded ? 1 : 0);
+  if (size < 4 || size > _mp3AudioEnd - position) return false;
+  frameBytes = (uint32_t)size;
+  channels = channelMode == 3 ? 1 : 2;
+  return true;
+}
+
+bool AudioPlayerScreen::resetMp3Decoder() {
+  if (!_file || !seekTo(_mp3DataOffset)) return false;
+  _mp3InputOffset = 0;
+  _mp3InputBytes = 0;
+  _mp3PcmFrames = 0;
+  _mp3PcmPosition = 0;
+  mp3dec_init(&_mp3Decoder);
+  return true;
+}
+
+bool AudioPlayerScreen::refillMp3Input() {
+  if (!_file) return false;
+  if (_mp3InputOffset > 0 && _mp3InputBytes > 0) {
+    memmove(_mp3InputBuffer, _mp3InputBuffer + _mp3InputOffset, _mp3InputBytes);
+  }
+  _mp3InputOffset = 0;
+
+  while (_mp3InputBytes < Mp3InputBufferBytes && (uint32_t)_file.position() < _mp3AudioEnd) {
+    uint32_t remaining = _mp3AudioEnd - (uint32_t)_file.position();
+    size_t room = Mp3InputBufferBytes - _mp3InputBytes;
+    size_t request = remaining < room ? remaining : room;
+    size_t count = _file.read(_mp3InputBuffer + _mp3InputBytes, request);
+    if (count == 0) return false;
+    _mp3InputBytes += count;
+  }
+  return _mp3InputBytes > 0;
+}
+
+bool AudioPlayerScreen::decodeMp3Frame() {
+  while (true) {
+    if (!refillMp3Input()) {
+      if ((uint32_t)_file.position() >= _mp3AudioEnd && _mp3InputBytes == 0) return false;
+      fail(F("MP3 read failed"));
+      return false;
+    }
+
+    mp3dec_frame_info_t info;
+    memset(&info, 0, sizeof(info));
+    int samples = mp3dec_decode_frame(&_mp3Decoder,
+                                      _mp3InputBuffer + _mp3InputOffset,
+                                      _mp3InputBytes,
+                                      _mp3PcmBuffer,
+                                      &info);
+    if (info.frame_bytes < 0 || (uint32_t)info.frame_bytes > _mp3InputBytes) {
+      fail(F("MP3 decoder failed"));
+      return false;
+    }
+    if (info.frame_bytes > 0) {
+      _mp3InputOffset += info.frame_bytes;
+      _mp3InputBytes -= info.frame_bytes;
+    }
+    if (samples <= 0) {
+      if (info.frame_bytes == 0) {
+        fail(F("Truncated MP3 frame"));
+        return false;
+      }
+      fail(F("MP3 decode failed"));
+      return false;
+    }
+    if (info.layer != 3 || info.channels != _channels || (uint32_t)info.hz != _sampleRate ||
+        samples > Mp3MaxPcmFrames / info.channels) {
+      fail(F("Unsupported MP3 frame"));
+      return false;
+    }
+    _mp3PcmFrames = samples;
+    _mp3PcmPosition = 0;
+    return true;
+  }
+}
+
 bool AudioPlayerScreen::fail(const __FlashStringHelper *message) {
   stopSpeaker();
   if (_file) _file.close();
@@ -251,10 +620,18 @@ bool AudioPlayerScreen::seekTo(uint32_t position) {
 }
 
 bool AudioPlayerScreen::startPlayback() {
-  if (!_file || _state == State::Error || !_sdMounted) return false;
-  if (_state == State::Finished) _framePosition = 0;
+  if (!_file || _state == State::Error || !_sdMounted || _mp3Analyzing) return false;
+  if (_state == State::Finished) {
+    _framePosition = 0;
+    if (_format == SourceFormat::Mp3 && !resetMp3Decoder()) {
+      fail(F("Could not restart MP3"));
+      draw();
+      return false;
+    }
+  }
   _finishAtMs = 0;
-  if (!seekTo(_dataOffset + (uint64_t)_framePosition * _blockAlign)) {
+  if (_format == SourceFormat::Wav &&
+      !seekTo(_dataOffset + (uint64_t)_framePosition * _blockAlign)) {
     fail(F("Could not seek WAV data"));
     draw();
     return false;
@@ -301,6 +678,17 @@ void AudioPlayerScreen::stopSpeaker() {
 }
 
 void AudioPlayerScreen::streamChunk() {
+  if (_format == SourceFormat::Wav) {
+    streamWavChunk();
+  } else if (_format == SourceFormat::Mp3) {
+    streamMp3Chunk();
+  } else {
+    fail(F("Unsupported audio file"));
+    draw();
+  }
+}
+
+void AudioPlayerScreen::streamWavChunk() {
   if (!_file || _framePosition >= _frameCount) {
     finishPlayback();
     return;
@@ -344,6 +732,47 @@ void AudioPlayerScreen::streamChunk() {
   }
 }
 
+void AudioPlayerScreen::streamMp3Chunk() {
+  if (!_file || _framePosition >= _frameCount) {
+    finishPlayback();
+    return;
+  }
+  if (_mp3PcmPosition >= _mp3PcmFrames && !decodeMp3Frame()) {
+    if (_state != State::Error) {
+      if (_framePosition == _frameCount) {
+        _finishAtMs = millis() + 100;
+      } else {
+        fail(F("MP3 ended early"));
+        draw();
+      }
+    }
+    return;
+  }
+
+  uint16_t remaining = _mp3PcmFrames - _mp3PcmPosition;
+  uint16_t frames = remaining > OutputFrames ? OutputFrames : remaining;
+  for (uint16_t frame = 0; frame < frames; frame++) {
+    const mp3d_sample_t *source = _mp3PcmBuffer +
+      (uint32_t)(_mp3PcmPosition + frame) * _channels;
+    int32_t mono = source[0];
+    if (_channels == 2) mono = ((int32_t)source[0] + (int32_t)source[1]) / 2;
+    _outputBuffer[frame] = (int16_t)clamp16(mono);
+  }
+
+  size_t written = _speaker.writePcm16(_outputBuffer, frames, 100);
+  if (written > frames) written = frames;
+  _mp3PcmPosition += written;
+  _framePosition += written;
+  if (written == 0) {
+    stopSpeaker();
+    fail(F("Speaker write failed"));
+    draw();
+  } else if (_framePosition >= _frameCount) {
+    // Let the speaker's DMA queue drain before uninstalling the I2S driver.
+    _finishAtMs = millis() + 100;
+  }
+}
+
 int32_t AudioPlayerScreen::decodeSample(const uint8_t *sample) const {
   if (_bitsPerSample == 8) return ((int32_t)sample[0] - 128) << 8;
   if (_bitsPerSample == 16) {
@@ -371,7 +800,7 @@ void AudioPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   }
   if (event == SdCardEvent::Mounted) {
     _sdMounted = true;
-    if (_path.length() > 0) loadSource(_path);
+    if (_path.length() > 0 && loadSource(_path) && !_mp3Analyzing) startPlayback();
     draw();
   }
 }
@@ -405,17 +834,28 @@ void AudioPlayerScreen::drawDynamic(bool force) {
   if (!_display.isReady()) return;
   _lastDrawMs = millis();
   drawProgress();
+  drawStatus();
   if (force || _state == State::Error) {
     // The error text is drawn separately so normal progress refreshes do not erase it.
     if (_state == State::Error) drawError();
   }
 }
 
+void AudioPlayerScreen::drawStatus() {
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(16, 238, _display.width() - 32, 28, TFT_BLACK);
+  if (!_mp3Analyzing) return;
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(F("Loading MP3..."), _display.width() / 2, 250, 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
 void AudioPlayerScreen::drawPlayButton() {
   TFT_eSPI &tft = _display.tft();
   const int16_t cx = _display.width() / 2;
   const int16_t cy = 118;
-  bool enabled = _state != State::Error && _sdMounted;
+  bool enabled = _state != State::Error && _sdMounted && !_mp3Analyzing;
   uint16_t fill = enabled ? TFT_DARKGREY : TFT_BLACK;
   tft.fillCircle(cx, cy, 24, fill);
   tft.drawCircle(cx, cy, 24, enabled ? TFT_WHITE : TFT_DARKGREY);

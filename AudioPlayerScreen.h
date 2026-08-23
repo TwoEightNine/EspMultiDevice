@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <FS.h>
 
+#include "third_party/minimp3/minimp3.h"
+
 #include "Screen.h"
 #include "SdCardController.h"
 #include "SpeakerController.h"
@@ -29,7 +31,17 @@ private:
     Error
   };
 
+  enum class SourceFormat : uint8_t {
+    None,
+    Wav,
+    Mp3
+  };
+
   static const uint16_t SourceBufferBytes = 4096;
+  static const uint16_t Mp3InputBufferBytes = 4096;
+  static const uint16_t Mp3MaxPcmFrames = MINIMP3_MAX_SAMPLES_PER_FRAME;
+  static const uint8_t Mp3AnalysisFramesPerTick = 16;
+  static const uint16_t Mp3CacheHeaderBytes = 36;
   static const uint16_t OutputFrames = 256;
   static const int16_t BackTouchWidth = 80;
 
@@ -40,12 +52,15 @@ private:
   String _fileName;
   String _error;
   State _state;
+  SourceFormat _format;
   bool _sdMounted;
   bool _lastTouchDown;
   uint32_t _lastDrawMs;
   uint32_t _finishAtMs;
   uint32_t _dataOffset;
   uint32_t _dataBytes;
+  uint32_t _sourceFileSize;
+  uint32_t _sourceWriteTime;
   uint32_t _frameCount;
   uint32_t _framePosition;
   uint32_t _sampleRate;
@@ -55,10 +70,36 @@ private:
   uint8_t _sourceBuffer[SourceBufferBytes];
   int16_t _outputBuffer[OutputFrames];
 
+  bool _mp3Analyzing;
+  uint32_t _mp3DataOffset;
+  uint32_t _mp3AudioEnd;
+  uint32_t _mp3AnalysisPosition;
+  uint8_t _mp3InputBuffer[Mp3InputBufferBytes];
+  uint16_t _mp3InputOffset;
+  uint16_t _mp3InputBytes;
+  mp3dec_t _mp3Decoder;
+  mp3d_sample_t _mp3PcmBuffer[Mp3MaxPcmFrames];
+  uint16_t _mp3PcmFrames;
+  uint16_t _mp3PcmPosition;
+
   void reset();
   bool loadSource(const String &path);
+  SourceFormat formatForPath(const String &path) const;
   bool parseWav();
   bool parseFormatChunk(uint32_t offset, uint32_t size);
+  bool beginMp3Analysis();
+  bool loadMp3Cache();
+  void writeMp3Cache();
+  String mp3CachePath() const;
+  void analyzeMp3Step();
+  bool parseMp3FrameHeader(uint32_t position,
+                           uint32_t &frameBytes,
+                           uint16_t &frameSamples,
+                           uint32_t &sampleRate,
+                           uint16_t &channels);
+  bool resetMp3Decoder();
+  bool refillMp3Input();
+  bool decodeMp3Frame();
   bool fail(const __FlashStringHelper *message);
   bool readExact(uint8_t *buffer, size_t length);
   bool seekTo(uint32_t position);
@@ -67,6 +108,8 @@ private:
   void finishPlayback();
   void stopSpeaker();
   void streamChunk();
+  void streamWavChunk();
+  void streamMp3Chunk();
   int32_t decodeSample(const uint8_t *sample) const;
   void handleSdCardEvent(SdCardEvent event);
 
@@ -75,6 +118,7 @@ private:
   void drawDynamic(bool force);
   void drawPlayButton();
   void drawProgress();
+  void drawStatus();
   void drawError();
   String displayName(const String &path) const;
   String truncateLabel(const String &label, int16_t maxWidth);
