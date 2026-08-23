@@ -4,6 +4,7 @@
 
 #include "SdCardController.h"
 #include "Screen.h"
+#include "TimeController.h"
 #include "WiFiController.h"
 
 class HomeScreen : public Screen {
@@ -12,7 +13,8 @@ public:
              TouchController &touch,
              DisplayController &display,
              SdCardController &sdCard,
-             WiFiController &wifi);
+             WiFiController &wifi,
+             TimeController &time);
 
   void onEnter() override;
   void handleTouch(const TouchPoint &point) override;
@@ -46,11 +48,12 @@ private:
 
   SdCardController &_sdCard;
   WiFiController &_wifi;
+  TimeController &_time;
   bool _sdMounted;
   bool _wifiConnected;
   uint8_t _batteryPercent;
   bool _lastTouchDown;
-  uint32_t _lastClockMinute;
+  uint32_t _lastClockCheckMs;
   String _lastClockText;
   AppTile _apps[AppCount];
 
@@ -63,7 +66,7 @@ private:
   void drawBattery();
   void drawApps();
   void drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY);
-  String clockText(uint32_t nowMs) const;
+  String clockText(const struct tm &localTime) const;
   String truncateLabel(const String &label, int16_t maxWidth);
   void setSdState(bool mounted);
   void setWifiState(bool connected);

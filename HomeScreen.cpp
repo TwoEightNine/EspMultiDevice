@@ -8,7 +8,6 @@
 #define COLOR_BATTERY_RED 0xa1e5
 
 namespace {
-const uint32_t MillisPerMinute = 60000UL;
 const uint16_t StatusActiveColor = TFT_WHITE;
 const uint16_t StatusInactiveColor = TFT_DARKGREY;
 const uint16_t AppIconColor = TFT_WHITE;
@@ -18,15 +17,17 @@ HomeScreen::HomeScreen(Navigator &navigator,
                        TouchController &touch,
                        DisplayController &display,
                        SdCardController &sdCard,
-                       WiFiController &wifi)
+                       WiFiController &wifi,
+                       TimeController &time)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _wifi(wifi),
+    _time(time),
     _sdMounted(false),
     _wifiConnected(false),
     _batteryPercent(BatteryStubPercent),
     _lastTouchDown(false),
-    _lastClockMinute(0xffffffffUL),
+    _lastClockCheckMs(0xffffffffUL),
     _lastClockText("") {
   _apps[0] = { "Files", AppAction::Files, TFT_BLUE, nullptr, 0, 0, 0, 0 };
   _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
@@ -36,7 +37,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
 void HomeScreen::onEnter() {
   refreshSdState();
   _wifiConnected = _wifi.isConnected();
-  _lastClockMinute = 0xffffffffUL;
+  _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
   draw();
   // Retain the existing storage diagnostic, but keep it out of the home UI.
@@ -73,9 +74,9 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
 }
 
 void HomeScreen::tick(uint32_t nowMs) {
-  uint32_t minute = nowMs / MillisPerMinute;
-  if (minute != _lastClockMinute) {
+  if (_lastClockCheckMs == 0xffffffffUL || nowMs - _lastClockCheckMs >= 1000UL) {
     drawClock(false);
+    _lastClockCheckMs = nowMs;
   }
 
   handleSdCardEvent(_sdCard.update());
@@ -121,9 +122,9 @@ void HomeScreen::drawClock(bool force) {
     return;
   }
 
-  uint32_t minute = millis() / MillisPerMinute;
-  String text = clockText(millis());
-  if (!force && minute == _lastClockMinute && text == _lastClockText) {
+  struct tm local = {};
+  String text = _time.localTime(local) ? clockText(local) : "--:--";
+  if (!force && text == _lastClockText) {
     return;
   }
 
@@ -133,7 +134,6 @@ void HomeScreen::drawClock(bool force) {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(text, 8, StatusBarHeight / 2, 2);
   tft.setTextDatum(TL_DATUM);
-  _lastClockMinute = minute;
   _lastClockText = text;
 }
 
@@ -198,12 +198,9 @@ void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t center
   // tft.drawXBitmap(x, y, app.bitmap, IconBitmapSize, IconBitmapSize, AppIconColor, app.circleColor);
 }
 
-String HomeScreen::clockText(uint32_t nowMs) const {
-  uint32_t totalMinutes = nowMs / MillisPerMinute;
-  uint8_t hours = (totalMinutes / 60) % 24;
-  uint8_t minutes = totalMinutes % 60;
+String HomeScreen::clockText(const struct tm &localTime) const {
   char buffer[6];
-  snprintf(buffer, sizeof(buffer), "%02u:%02u", hours, minutes);
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", localTime.tm_hour, localTime.tm_min);
   return String(buffer);
 }
 

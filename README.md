@@ -42,6 +42,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `SdCardController.h`: SD card controller interface.
 - `SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
 - `WiFiController.h` / `WiFiController.cpp`: asynchronous Wi-Fi scan, connection, reconnect, and credential lifecycle.
+- `TimeController.h` / `TimeController.cpp`: Wi-Fi-gated asynchronous SNTP synchronization with a fixed UTC+4 local clock.
 - `MicController.h`: INMP441 I2S microphone controller interface.
 - `MicController.cpp`: microphone I2S setup, power-switch sensing, and PCM reads.
 - `SpeakerController.h`: MAX98357A I2S speaker controller interface.

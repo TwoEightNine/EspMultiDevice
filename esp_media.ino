@@ -11,6 +11,7 @@
 #include "SettingsScreen.h"
 #include "SpeakerController.h"
 #include "SpiBusLock.h"
+#include "TimeController.h"
 #include "TouchController.h"
 #include "TouchCalibrationScreen.h"
 #include "TextInputScreen.h"
@@ -55,6 +56,7 @@ TouchController *touch = nullptr;
 MicController *mic = nullptr;
 SpeakerController *speaker = nullptr;
 WiFiController *wifiController = nullptr;
+TimeController *timeController = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
@@ -171,8 +173,12 @@ void setup() {
   wifiController->begin();
   Serial.println(F("Wi-Fi controller ready."));
 
+  timeController = new TimeController(*wifiController);
+  timeController->begin();
+  Serial.println(F("Time controller ready."));
+
   navigator = new Navigator();
-  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController);
+  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
@@ -222,6 +228,10 @@ void loop() {
 
   if (wifiController) {
     wifiController->update(millis());
+  }
+
+  if (timeController) {
+    timeController->update(millis());
   }
 
   if (navigator) {
