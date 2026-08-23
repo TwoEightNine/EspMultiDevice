@@ -23,6 +23,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Supports an optional card-detect pin for more reliable hot-swap behavior.
 - Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
+- Streams mono or stereo integer PCM WAV files through the Audio player screen.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 - Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
@@ -51,6 +52,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
 - `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
+- `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV player with play/pause controls and read-only progress.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
 
@@ -65,7 +67,7 @@ The main loop talks only to the generic active `Screen` from `Navigator`:
 
 Screens get common UI services from the base `Screen` constructor: `Navigator`, `TouchController`, and `DisplayController`. Screens that need feature-specific services receive those controllers in their own constructors. For example, `HomeScreen` receives `SdCardController&` and owns SD status drawing, mount-change handling, and the read/write self-test display. `VoiceRecorderScreen` receives `SdCardController&`, `MicController&`, and `SpeakerController&`, then owns the recorder UI and audio file lifecycle.
 
-`Navigator::push` and `Navigator::replace` optionally accept a `ScreenData` payload, which is retained with the stack entry and delivered to the destination in `Screen::onEnter(const ScreenData&)`. A child can return a `ScreenResult` with `Navigator::pop(result)`; the resumed screen receives it through `Screen::onResult`. The Files screen uses this mechanism to pass an image path to `ImageViewerScreen`.
+`Navigator::push` and `Navigator::replace` optionally accept a `ScreenData` payload, which is retained with the stack entry and delivered to the destination in `Screen::onEnter(const ScreenData&)`. A child can return a `ScreenResult` with `Navigator::pop(result)`; the resumed screen receives it through `Screen::onResult`. The Files screen uses this mechanism to pass image and audio paths to their viewers.
 
 ## Image Decoder Libraries
 

@@ -10,6 +10,7 @@ namespace {
 const uint16_t FolderColor = TFT_YELLOW;
 const uint16_t FileColor = TFT_LIGHTGREY;
 const uint16_t ImageFileColor = TFT_GREEN;
+const uint16_t AudioFileColor = TFT_BLUE;
 const uint16_t ControlColor = TFT_LIGHTGREY;
 }
 
@@ -95,6 +96,8 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
         openDirectory(nextPath);
       } else if (isImageFile(name)) {
         _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(nextPath));
+      } else if (isAudioFile(name)) {
+        _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(nextPath));
       }
     }
     return;
@@ -107,6 +110,13 @@ bool FilesScreen::isImageFile(const String &name) const {
   suffix.toLowerCase();
   return suffix == F(".bmp") || suffix == F(".png") ||
          suffix == F(".jpg") || suffix == F(".jpeg") || suffix == F(".gif");
+}
+
+bool FilesScreen::isAudioFile(const String &name) const {
+  if (name.length() < 4) return false;
+  String suffix = name.substring(name.lastIndexOf('.'));
+  suffix.toLowerCase();
+  return suffix == F(".wav");
 }
 
 void FilesScreen::tick(uint32_t nowMs) {
@@ -193,7 +203,8 @@ void FilesScreen::drawListing() {
         tft.drawXBitmap(ListPadding + 2, y + 7, ic_dir, 16, 16, FolderColor);
       } else {
         // drawXBitmap paints only set bits, preserving the background beneath the mask.
-        uint16_t color = isImageFile(name) ? ImageFileColor : FileColor;
+        uint16_t color = isImageFile(name) ? ImageFileColor
+                           : (isAudioFile(name) ? AudioFileColor : FileColor);
         tft.drawXBitmap(ListPadding + 2, y + 7, ic_file, 16, 16, color);
       }
       tft.setTextDatum(ML_DATUM);

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "DisplayController.h"
+#include "AudioPlayerScreen.h"
 #include "FilesScreen.h"
 #include "HomeScreen.h"
 #include "ImageViewerScreen.h"
@@ -66,6 +67,7 @@ FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
+AudioPlayerScreen *audioPlayerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
 
@@ -185,6 +187,7 @@ void setup() {
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
+  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
 
@@ -211,6 +214,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::ImageViewer, *imageViewerScreen)) {
     Serial.println(F("Navigator failed to register Image Viewer screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::AudioPlayer, *audioPlayerScreen)) {
+    Serial.println(F("Navigator failed to register Audio Player screen."));
   }
   if (!navigator->registerScreen(ScreenId::TextInput, *textInputScreen)) {
     Serial.println(F("Navigator failed to register Text Input screen."));
