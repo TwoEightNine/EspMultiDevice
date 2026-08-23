@@ -8,6 +8,8 @@
 
 #include <SD.h>
 #include <esp32-hal-psram.h>
+#include <esp_heap_caps.h>
+#include "SpiBusLock.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +18,10 @@ namespace {
 const uint32_t InvalidSourceRow = 0xffffffffUL;
 const uint32_t MaxSupportedDibSize = 124;
 const uint32_t GifCacheMagic = 0x41474d45UL; // "EMGA" little-endian
-const uint8_t GifCacheVersion = 1;
+// Version 1 used the same display-ready pixels, but its large-animation path
+// never enabled the second-core ring loader. Bump the cache version so old
+// files are rebuilt with the corrected playback contract.
+const uint8_t GifCacheVersion = 4;
 }
 
 ImageViewerScreen *ImageViewerScreen::_decoderOwner = nullptr;
@@ -78,10 +83,15 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _gifLoopCount(-1),
     _gifPlaybackA(nullptr),
     _gifPlaybackB(nullptr),
+    _gifBufferedFrame(0),
+    _gifBufferedOffset(0),
+    _gifBufferedLoading(false),
     _gifResidentFrames(nullptr),
     _gifResidentDelays(nullptr),
     _gifResidentSequences(nullptr),
+    _gifResidentStates(nullptr),
     _gifResidentCapacity(0),
+    _gifPreloadTarget(0),
     _gifPreloadSlot(0),
     _gifPreloadSequence(0),
     _gifPreloadOffset(0),
@@ -89,6 +99,16 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _gifPlaybackSequence(0),
     _gifFullResident(false),
     _gifPreloadActive(false),
+    _gifLoadRequests(nullptr),
+    _gifLoadResults(nullptr),
+    _gifLoaderStopped(nullptr),
+    _gifLoaderTask(nullptr),
+    _gifLoaderStop(false),
+    _gifLoaderError(false),
+    _gifLoadedFrames(0),
+    _gifUnderruns(0),
+    _gifDroppedFrames(0),
+    _gifWaitingForFrame(false),
     _gifActiveIsA(true),
     _gifNextLoaded(false),
     _gifNextFrameAt(0),
@@ -252,6 +272,7 @@ void ImageViewerScreen::reset() {
   bool removeGifTemp = _gifState == GifState::Building;
   _rendering = false;
   _gifState = GifState::None;
+  stopGifLoader();
   _decoderOwner = nullptr;
   releaseGifDecoder();
   if (_file) _file.close();
@@ -278,9 +299,13 @@ void ImageViewerScreen::reset() {
   _gifPlaybackFrame = 0;
   _gifPlaybackDelay = 0;
   _gifNextDelay = 0;
+  _gifBufferedFrame = 0;
+  _gifBufferedOffset = 0;
+  _gifBufferedLoading = false;
   _gifCyclesCompleted = 0;
   _gifLoopCount = -1;
   _gifResidentCapacity = 0;
+  _gifPreloadTarget = 0;
   _gifPreloadSlot = 0;
   _gifPreloadSequence = 0;
   _gifPreloadOffset = 0;
@@ -288,6 +313,12 @@ void ImageViewerScreen::reset() {
   _gifPlaybackSequence = 0;
   _gifFullResident = false;
   _gifPreloadActive = false;
+  _gifLoaderStop = false;
+  _gifLoaderError = false;
+  _gifLoadedFrames = 0;
+  _gifUnderruns = 0;
+  _gifDroppedFrames = 0;
+  _gifWaitingForFrame = false;
   _gifActiveIsA = true;
   _gifNextLoaded = false;
   _gifNextFrameAt = 0;
@@ -703,7 +734,7 @@ bool ImageViewerScreen::writeAnimationCacheHeader(fs::File &file,
   uint8_t header[AnimationCacheHeaderSize] = {};
   writeLe32(header + 0, GifCacheMagic);
   header[4] = GifCacheVersion;
-  header[5] = 0; // RGB565 little-endian
+  header[5] = 2; // packed RGB444 pixels
   writeLe16(header + 8, CacheWidth);
   writeLe16(header + 10, CacheHeight);
   writeLe32(header + 12, _sourceFileSize);
@@ -712,7 +743,8 @@ bool ImageViewerScreen::writeAnimationCacheHeader(fs::File &file,
   writeLe32(header + 24, _sourceHeight);
   writeLe32(header + 28, frameCount);
   writeLe32(header + 32, (uint32_t)loopCount);
-  writeLe32(header + 36, CachePixelBytes);
+  writeLe16(header + 36, _drawWidth);
+  writeLe16(header + 38, _drawHeight);
   return file.write(header, sizeof(header)) == sizeof(header);
 }
 
@@ -720,22 +752,28 @@ bool ImageViewerScreen::readAnimationCacheHeader(fs::File &file,
                                                   uint32_t &frameCount,
                                                   int32_t &loopCount,
                                                   uint32_t &sourceWidth,
-                                                  uint32_t &sourceHeight) const {
+                                                  uint32_t &sourceHeight,
+                                                  uint16_t &drawWidth,
+                                                  uint16_t &drawHeight) const {
   if (!file || file.size() < AnimationCacheHeaderSize) return false;
   uint8_t header[AnimationCacheHeaderSize];
   if (!file.seek(0) || file.read(header, sizeof(header)) != sizeof(header)) return false;
   if (readLe32(header + 0) != GifCacheMagic || header[4] != GifCacheVersion ||
-      header[5] != 0 || readLe16(header + 8) != CacheWidth ||
+      header[5] != 2 || readLe16(header + 8) != CacheWidth ||
       readLe16(header + 10) != CacheHeight ||
       readLe32(header + 12) != _sourceFileSize ||
-      readLe32(header + 16) != _sourceWriteTime ||
-      readLe32(header + 36) != CachePixelBytes) return false;
+      readLe32(header + 16) != _sourceWriteTime) return false;
   sourceWidth = readLe32(header + 20);
   sourceHeight = readLe32(header + 24);
   frameCount = readLe32(header + 28);
   loopCount = (int32_t)readLe32(header + 32);
-  if (sourceWidth == 0 || sourceHeight == 0 || frameCount == 0) return false;
-  uint64_t recordBytes = (uint64_t)AnimationFrameHeaderSize + CachePixelBytes;
+  drawWidth = readLe16(header + 36);
+  drawHeight = readLe16(header + 38);
+  if (sourceWidth == 0 || sourceHeight == 0 || frameCount == 0 ||
+      drawWidth == 0 || drawHeight == 0 ||
+      drawWidth > GifPhotoMaxWidth || drawHeight > GifPhotoMaxHeight) return false;
+  uint64_t pixels = (uint64_t)drawWidth * drawHeight;
+  uint64_t recordBytes = AnimationFrameHeaderSize + (pixels * 3 + 1) / 2;
   uint64_t expected = AnimationCacheHeaderSize + recordBytes * frameCount;
   return expected == file.size();
 }
@@ -745,14 +783,20 @@ bool ImageViewerScreen::loadAnimationCache() {
   fs::File cache = SD.open(_cachePath.c_str(), FILE_READ);
   if (!cache) return false;
   uint32_t frameCount = 0, sourceWidth = 0, sourceHeight = 0;
+  uint16_t drawWidth = 0, drawHeight = 0;
   int32_t loopCount = -1;
-  bool valid = readAnimationCacheHeader(cache, frameCount, loopCount, sourceWidth, sourceHeight);
+  bool valid = readAnimationCacheHeader(cache, frameCount, loopCount, sourceWidth, sourceHeight,
+                                        drawWidth, drawHeight);
   if (!valid) {
     cache.close();
     return false;
   }
   _sourceWidth = sourceWidth;
   _sourceHeight = sourceHeight;
+  _drawWidth = drawWidth;
+  _drawHeight = drawHeight;
+  _left = (int16_t)((_display.width() - _drawWidth) / 2);
+  _top = (int16_t)((_display.height() - _drawHeight) / 2);
   _gifFrameCount = frameCount;
   _gifLoopCount = loopCount;
   _gifCacheReadFile = cache;
@@ -800,7 +844,7 @@ bool ImageViewerScreen::startGifBuild() {
 bool ImageViewerScreen::buildGifFrame() {
   if (!_cacheFile || !_gifDecoderOpen || !_frameBuffer) return false;
   if (_gifBuildWritePending) {
-    uint32_t recordBytes = AnimationFrameHeaderSize + CachePixelBytes;
+    uint32_t recordBytes = gifFrameRecordBytes();
     uint32_t remaining = recordBytes - _gifBuildWriteOffset;
     uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
     if (_gifBuildWriteOffset < AnimationFrameHeaderSize) {
@@ -809,20 +853,32 @@ bool ImageViewerScreen::buildGifFrame() {
       uint16_t available = AnimationFrameHeaderSize - _gifBuildWriteOffset;
       if (amount > available) amount = available;
       memcpy(_cacheChunk, delay + _gifBuildWriteOffset, amount);
-    } else if (!cacheNeedsRotation()) {
-      uint32_t pixelOffset = _gifBuildWriteOffset - AnimationFrameHeaderSize;
-      memcpy(_cacheChunk, (uint8_t *)_frameBuffer + pixelOffset, amount);
     } else {
-      uint32_t firstPixel = (_gifBuildWriteOffset - AnimationFrameHeaderSize) / 2;
-      uint32_t pixelCount = amount / 2;
-      for (uint32_t i = 0; i < pixelCount; i++) {
-        uint32_t cachePixel = firstPixel + i;
-        uint32_t cacheX = cachePixel % CacheWidth;
-        uint32_t cacheY = cachePixel / CacheWidth;
-        uint32_t screenX = cacheY;
-        uint32_t screenY = CacheWidth - 1 - cacheX;
-        uint16_t color = _frameBuffer[screenY * _display.width() + screenX];
-        memcpy(_cacheChunk + i * 2, &color, sizeof(color));
+      uint32_t payloadOffset = _gifBuildWriteOffset - AnimationFrameHeaderSize;
+      for (uint16_t i = 0; i < amount; i++) {
+        uint32_t position = payloadOffset + i;
+        uint32_t pair = position / 3;
+        uint32_t firstPixel = pair * 2;
+        uint16_t x0 = (uint16_t)(firstPixel % _drawWidth);
+        uint16_t y0 = (uint16_t)(firstPixel / _drawWidth);
+        uint16_t first = _frameBuffer[(size_t)(_top + y0) * _display.width() + _left + x0];
+        uint16_t rgb444a = (uint16_t)((first & 0xf000) >> 4) |
+                           (uint16_t)((first & 0x0780) >> 3) |
+                           (uint16_t)((first & 0x001e) >> 1);
+        uint16_t rgb444b = 0;
+        if (firstPixel + 1 < (uint32_t)_drawWidth * _drawHeight) {
+          uint16_t x1 = (uint16_t)((firstPixel + 1) % _drawWidth);
+          uint16_t y1 = (uint16_t)((firstPixel + 1) / _drawWidth);
+          uint16_t second = _frameBuffer[(size_t)(_top + y1) * _display.width() + _left + x1];
+          rgb444b = (uint16_t)((second & 0xf000) >> 4) |
+                    (uint16_t)((second & 0x0780) >> 3) |
+                    (uint16_t)((second & 0x001e) >> 1);
+        }
+        switch (position % 3) {
+          case 0: _cacheChunk[i] = (uint8_t)(rgb444a >> 4); break;
+          case 1: _cacheChunk[i] = (uint8_t)((rgb444a << 4) | (rgb444b >> 8)); break;
+          default: _cacheChunk[i] = (uint8_t)rgb444b; break;
+        }
       }
     }
     if (_cacheFile.write(_cacheChunk, amount) != amount) {
@@ -833,7 +889,14 @@ bool ImageViewerScreen::buildGifFrame() {
     if (_gifBuildWriteOffset == recordBytes) {
       _gifBuildWritePending = false;
       _gifBuildFrame++;
-      drawGifLoading(_gifBuildFrame);
+      uint8_t percent = 0;
+      if (_sourceFileSize != 0 && _decoderFile) {
+        uint32_t sourcePosition = (uint32_t)_decoderFile.position();
+        uint32_t calculated = (uint32_t)(((uint64_t)sourcePosition * 100UL) / _sourceFileSize);
+        percent = (uint8_t)(calculated > 99 ? 99 : calculated);
+      }
+      if (_gifBuildLastFrame) percent = 100;
+      drawGifLoading(percent);
       if (_gifBuildLastFrame) return finishGifBuild();
     }
     return true;
@@ -845,7 +908,7 @@ bool ImageViewerScreen::buildGifFrame() {
     _error = String(F("GIF decode error ")) + _gif.getLastError();
     return false;
   }
-  _gifBuildDelay = (uint32_t)(delay < 1 ? 1 : delay);
+  _gifBuildDelay = (uint32_t)(delay < (int)GifMinimumDelayMs ? GifMinimumDelayMs : delay);
   scaleGifFrame();
   _gifBuildLastFrame = result == 0;
   _gifBuildWriteOffset = 0;
@@ -881,7 +944,7 @@ bool ImageViewerScreen::finishGifBuild() {
   return true;
 }
 
-void ImageViewerScreen::drawGifLoading(uint32_t frame) {
+void ImageViewerScreen::drawGifLoading(uint8_t percent) {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
@@ -889,14 +952,14 @@ void ImageViewerScreen::drawGifLoading(uint32_t frame) {
   tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Caching GIF"), centerX, centerY - 12, 2);
+  tft.drawString(F("Converting GIF"), centerX, centerY - 12, 2);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(String(F("Frame ")) + frame, centerX, centerY + 14, 2);
+  tft.drawString(String(percent) + F("%"), centerX, centerY + 14, 2);
   tft.setTextDatum(TL_DATUM);
   drawCloseIcon();
 }
 
-void ImageViewerScreen::drawGifPreloading(uint32_t frame, uint32_t total) {
+void ImageViewerScreen::drawGifPreloading(uint8_t percent) {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
@@ -904,9 +967,9 @@ void ImageViewerScreen::drawGifPreloading(uint32_t frame, uint32_t total) {
   tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Loading GIF into PSRAM"), centerX, centerY - 12, 2);
+  tft.drawString(F("Loading"), centerX, centerY - 12, 2);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(String(F("Frame ")) + frame + F(" / ") + total, centerX, centerY + 14, 2);
+  tft.drawString(String(percent) + F("%"), centerX, centerY + 14, 2);
   tft.setTextDatum(TL_DATUM);
   drawCloseIcon();
 }
@@ -966,6 +1029,28 @@ bool ImageViewerScreen::readGifCacheFrame(uint32_t frameIndex,
   return true;
 }
 
+void ImageViewerScreen::copyGifCacheChunk(uint16_t *destination,
+                                           uint32_t pixelOffset,
+                                           const uint8_t *chunk,
+                                           uint16_t amount) {
+  if (!cacheNeedsRotation()) {
+    memcpy((uint8_t *)destination + pixelOffset, chunk, amount);
+    return;
+  }
+  uint32_t firstPixel = pixelOffset / 2;
+  uint32_t pixelCount = amount / 2;
+  for (uint32_t i = 0; i < pixelCount; i++) {
+    uint32_t cachePixel = firstPixel + i;
+    uint32_t cacheX = cachePixel % CacheWidth;
+    uint32_t cacheY = cachePixel / CacheWidth;
+    uint32_t screenX = cacheY;
+    uint32_t screenY = CacheWidth - 1 - cacheX;
+    uint16_t color;
+    memcpy(&color, chunk + i * 2, sizeof(color));
+    destination[screenY * _display.width() + screenX] = color;
+  }
+}
+
 bool ImageViewerScreen::readGifCacheFrameChunk(uint32_t frameIndex,
                                                 uint32_t pixelOffset,
                                                 uint16_t *destination,
@@ -973,7 +1058,7 @@ bool ImageViewerScreen::readGifCacheFrameChunk(uint32_t frameIndex,
   if (!_gifCacheReadFile || !destination || frameIndex >= _gifFrameCount ||
       pixelOffset >= CachePixelBytes) return false;
   uint64_t recordOffset = AnimationCacheHeaderSize +
-    (uint64_t)frameIndex * (AnimationFrameHeaderSize + CachePixelBytes);
+    (uint64_t)frameIndex * gifFrameRecordBytes();
   if (pixelOffset == 0) {
     if (recordOffset > 0xffffffffULL || !_gifCacheReadFile.seek((uint32_t)recordOffset)) return false;
     uint8_t delayBytes[AnimationFrameHeaderSize];
@@ -985,28 +1070,272 @@ bool ImageViewerScreen::readGifCacheFrameChunk(uint32_t frameIndex,
   uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
   if (pixelFileOffset > 0xffffffffULL || !_gifCacheReadFile.seek((uint32_t)pixelFileOffset) ||
       _gifCacheReadFile.read(_cacheChunk, amount) != amount) return false;
-  if (!cacheNeedsRotation()) {
-    memcpy((uint8_t *)destination + pixelOffset, _cacheChunk, amount);
-  } else {
-    uint32_t firstPixel = pixelOffset / 2;
-    uint32_t pixelCount = amount / 2;
-    for (uint32_t i = 0; i < pixelCount; i++) {
-      uint32_t cachePixel = firstPixel + i;
-      uint32_t cacheX = cachePixel % CacheWidth;
-      uint32_t cacheY = cachePixel / CacheWidth;
-      uint32_t screenX = cacheY;
-      uint32_t screenY = CacheWidth - 1 - cacheX;
-      uint16_t color;
-      memcpy(&color, _cacheChunk + i * 2, sizeof(color));
-      destination[screenY * _display.width() + screenX] = color;
+  copyGifCacheChunk(destination, pixelOffset, _cacheChunk, amount);
+  return true;
+}
+
+bool ImageViewerScreen::startGifLoader() {
+  if (_gifLoaderTask || _gifResidentCapacity == 0) return false;
+  _gifLoadRequests = xQueueCreate(_gifResidentCapacity, sizeof(GifLoadRequest));
+  _gifLoadResults = xQueueCreate(_gifResidentCapacity + 1, sizeof(GifLoadResult));
+  _gifLoaderStopped = xSemaphoreCreateBinary();
+  if (!_gifLoadRequests || !_gifLoadResults || !_gifLoaderStopped) {
+    stopGifLoader();
+    return false;
+  }
+  _gifLoaderStop = false;
+  _gifLoaderError = false;
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+  const BaseType_t loaderCore = 0;
+#else
+  const BaseType_t loaderCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
+#endif
+  if (xTaskCreatePinnedToCore(gifLoaderTask, "gifLoader", 4096, this,
+                              tskIDLE_PRIORITY + 1, &_gifLoaderTask,
+                              loaderCore) != pdPASS) {
+    stopGifLoader();
+    return false;
+  }
+  Serial.print(F("GIF loader core: "));
+  Serial.println(loaderCore);
+  return true;
+}
+
+void ImageViewerScreen::stopGifLoader() {
+  if (_gifLoaderTask) {
+    _gifLoaderStop = true;
+    // The worker checks this at least every queue timeout and releases its
+    // file before acknowledging. Never free a PSRAM slot before that point.
+    while (xSemaphoreTake(_gifLoaderStopped, pdMS_TO_TICKS(25)) != pdTRUE) {
+      vTaskDelay(1);
     }
+    _gifLoaderTask = nullptr;
+  }
+  if (_gifLoadRequests) vQueueDelete(_gifLoadRequests);
+  if (_gifLoadResults) vQueueDelete(_gifLoadResults);
+  if (_gifLoaderStopped) vSemaphoreDelete(_gifLoaderStopped);
+  _gifLoadRequests = nullptr;
+  _gifLoadResults = nullptr;
+  _gifLoaderStopped = nullptr;
+  _gifLoaderStop = false;
+}
+
+bool ImageViewerScreen::enqueueGifLoad(uint32_t sequence) {
+  if (!_gifLoadRequests || !_gifResidentStates || !canPlayGifSequence(sequence)) return false;
+  uint32_t slot = sequence % _gifResidentCapacity;
+  if (_gifResidentStates[slot] != (uint8_t)GifSlotState::Free) return false;
+  GifLoadRequest request = { slot, sequence };
+  _gifResidentStates[slot] = (uint8_t)GifSlotState::Loading;
+  _gifResidentSequences[slot] = sequence;
+  if (xQueueSend(_gifLoadRequests, &request, 0) != pdTRUE) {
+    _gifResidentStates[slot] = (uint8_t)GifSlotState::Free;
+    _gifResidentSequences[slot] = 0xffffffffUL;
+    return false;
   }
   return true;
+}
+
+bool ImageViewerScreen::collectGifLoadResults() {
+  if (!_gifLoadResults) return false;
+  GifLoadResult result;
+  while (xQueueReceive(_gifLoadResults, &result, 0) == pdTRUE) {
+    if (!result.success) {
+      _gifLoaderError = true;
+      _error = F("GIF background cache read failed");
+      return false;
+    }
+    if (result.slot >= _gifResidentCapacity || !_gifResidentStates) continue;
+    if (_gifResidentStates[result.slot] == (uint8_t)GifSlotState::Loading &&
+        _gifResidentSequences[result.slot] == result.sequence) {
+      _gifResidentDelays[result.slot] = result.delay;
+      _gifResidentStates[result.slot] = (uint8_t)GifSlotState::Ready;
+      _gifLoadedFrames++;
+    }
+  }
+  return !_gifLoaderError;
+}
+
+bool ImageViewerScreen::allGifPreloadSlotsReady() const {
+  if (!_gifResidentStates) return false;
+  for (uint32_t i = 0; i < _gifResidentCapacity; i++) {
+    if (_gifResidentStates[i] != (uint8_t)GifSlotState::Ready) return false;
+  }
+  return true;
+}
+
+bool ImageViewerScreen::loadGifFrameOnWorker(fs::File &cache,
+                                              uint8_t *chunk,
+                                              const GifLoadRequest &request,
+                                              GifLoadResult &result) {
+  result = { request.slot, request.sequence, 0, false };
+  uint16_t *destination = gifResidentFrame(request.slot);
+  uint32_t frameIndex = gifSourceFrameForSequence(request.sequence);
+  if (!destination || frameIndex >= _gifFrameCount) return false;
+  uint64_t recordOffset = AnimationCacheHeaderSize +
+    (uint64_t)frameIndex * gifFrameRecordBytes();
+  if (recordOffset > 0xffffffffULL || !SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
+  bool ok = cache.seek((uint32_t)recordOffset);
+  uint8_t delayBytes[AnimationFrameHeaderSize];
+  if (ok) ok = cache.read(delayBytes, sizeof(delayBytes)) == sizeof(delayBytes);
+  SpiBusLock::unlock();
+  if (!ok) return false;
+  result.delay = readLe32(delayBytes);
+
+  memset(destination, 0, (size_t)_display.width() * _display.height() * sizeof(uint16_t));
+  uint32_t startedAt = millis();
+  uint8_t packed[3];
+  uint8_t packedCount = 0;
+  uint32_t pixel = 0;
+  for (uint32_t offset = 0; offset < gifRgb444Bytes(); ) {
+    if (_gifLoaderStop) return false;
+    uint32_t remaining = gifRgb444Bytes() - offset;
+    uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
+    // The cursor is positioned immediately after the delay header. Reading
+    // sequentially avoids 75 FAT seeks per 480x320 frame.
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
+    ok = cache.read(chunk, amount) == amount;
+    SpiBusLock::unlock();
+    if (!ok) return false;
+    for (uint16_t i = 0; i < amount; i++) {
+      packed[packedCount++] = chunk[i];
+      if (packedCount != 3) continue;
+      uint16_t colors[2] = {
+        (uint16_t)((packed[0] << 4) | (packed[1] >> 4)),
+        (uint16_t)(((packed[1] & 0x0f) << 8) | packed[2])
+      };
+      for (uint8_t which = 0; which < 2 && pixel < (uint32_t)_drawWidth * _drawHeight; which++, pixel++) {
+        uint16_t rgb444 = colors[which];
+        uint16_t rgb565 = (uint16_t)(((rgb444 & 0x0f00) << 4) |
+                                     ((rgb444 & 0x00f0) << 3) |
+                                     ((rgb444 & 0x000f) << 1));
+        uint16_t x = (uint16_t)(pixel % _drawWidth);
+        uint16_t y = (uint16_t)(pixel / _drawWidth);
+        destination[(size_t)(_top + y) * _display.width() + _left + x] = rgb565;
+      }
+      packedCount = 0;
+    }
+    offset += amount;
+    taskYIELD();
+  }
+  if (packedCount == 2 && pixel < (uint32_t)_drawWidth * _drawHeight) {
+    uint16_t rgb444 = (uint16_t)((packed[0] << 4) | (packed[1] >> 4));
+    uint16_t rgb565 = (uint16_t)(((rgb444 & 0x0f00) << 4) |
+                                 ((rgb444 & 0x00f0) << 3) |
+                                 ((rgb444 & 0x000f) << 1));
+    uint16_t x = (uint16_t)(pixel % _drawWidth);
+    uint16_t y = (uint16_t)(pixel / _drawWidth);
+    destination[(size_t)(_top + y) * _display.width() + _left + x] = rgb565;
+  }
+  (void)startedAt;
+  result.success = true;
+  return true;
+}
+
+void ImageViewerScreen::gifLoaderTask(void *context) {
+  ImageViewerScreen *viewer = static_cast<ImageViewerScreen *>(context);
+  uint8_t *chunk = (uint8_t *)heap_caps_malloc(CacheChunkBytes,
+                                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  fs::File cache;
+  bool opened = chunk != nullptr && SpiBusLock::lock(pdMS_TO_TICKS(100));
+  if (opened) {
+    cache = SD.open(viewer->_cachePath.c_str(), FILE_READ);
+    SpiBusLock::unlock();
+    opened = (bool)cache;
+  }
+  while (!viewer->_gifLoaderStop) {
+    GifLoadRequest request;
+    if (xQueueReceive(viewer->_gifLoadRequests, &request, pdMS_TO_TICKS(20)) != pdTRUE) continue;
+    GifLoadResult result = { request.slot, request.sequence, 0, false };
+    bool ok = opened && viewer->loadGifFrameOnWorker(cache, chunk, request, result);
+    result.success = ok;
+    xQueueSend(viewer->_gifLoadResults, &result, portMAX_DELAY);
+  }
+  if (cache) {
+    if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      cache.close();
+      SpiBusLock::unlock();
+    }
+  }
+  if (chunk) heap_caps_free(chunk);
+  xSemaphoreGive(viewer->_gifLoaderStopped);
+  vTaskDelete(nullptr);
 }
 
 uint16_t *ImageViewerScreen::gifResidentFrame(uint32_t slot) const {
   if (!_gifResidentFrames || slot >= _gifResidentCapacity) return nullptr;
   return _gifResidentFrames + (size_t)slot * (CachePixelBytes / sizeof(uint16_t));
+}
+
+uint32_t ImageViewerScreen::gifRgb444Bytes() const {
+  return ((uint32_t)_drawWidth * _drawHeight * 3UL + 1UL) / 2UL;
+}
+
+uint32_t ImageViewerScreen::gifFrameRecordBytes() const {
+  return AnimationFrameHeaderSize + gifRgb444Bytes();
+}
+
+void ImageViewerScreen::prepareGifDrawRect() {
+  uint32_t limitWidth = _display.width() < GifPhotoMaxWidth ? _display.width() : GifPhotoMaxWidth;
+  uint32_t limitHeight = _display.height() < GifPhotoMaxHeight ? _display.height() : GifPhotoMaxHeight;
+  if (_sourceWidth <= limitWidth && _sourceHeight <= limitHeight) {
+    _drawWidth = (uint16_t)_sourceWidth;
+    _drawHeight = (uint16_t)_sourceHeight;
+  } else if ((uint64_t)limitWidth * _sourceHeight <= (uint64_t)limitHeight * _sourceWidth) {
+    _drawWidth = (uint16_t)limitWidth;
+    _drawHeight = (uint16_t)(((uint64_t)limitWidth * _sourceHeight) / _sourceWidth);
+  } else {
+    _drawHeight = (uint16_t)limitHeight;
+    _drawWidth = (uint16_t)(((uint64_t)limitHeight * _sourceWidth) / _sourceHeight);
+  }
+}
+
+void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
+                                        const uint16_t *previous,
+                                        bool forceFull) {
+  if (!frame || !_display.isReady()) return;
+  const uint16_t width = _display.width();
+  const uint16_t height = _display.height();
+  // A rotated cached canvas does not have contiguous display tiles. Use the
+  // proven full-frame path in that uncommon orientation.
+  if (forceFull || !previous || cacheNeedsRotation() ||
+      width != CacheWidth || height != CacheHeight) {
+    _display.tft().pushImage(0, 0, width, height, const_cast<uint16_t *>(frame));
+    return;
+  }
+
+  const uint16_t columns = width / GifTileSize;
+  const uint16_t rows = height / GifTileSize;
+  uint16_t changed = 0;
+  for (uint16_t tileY = 0; tileY < rows; tileY++) {
+    for (uint16_t tileX = 0; tileX < columns; tileX++) {
+      bool different = false;
+      const uint16_t x = tileX * GifTileSize;
+      const uint16_t y = tileY * GifTileSize;
+      for (uint16_t row = 0; row < GifTileSize && !different; row++) {
+        const uint16_t *currentRow = frame + (size_t)(y + row) * width + x;
+        const uint16_t *previousRow = previous + (size_t)(y + row) * width + x;
+        if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
+      }
+      if (different && ++changed > (uint16_t)((columns * rows) / 2)) {
+        _display.tft().pushImage(0, 0, width, height, const_cast<uint16_t *>(frame));
+        return;
+      }
+    }
+  }
+  for (uint16_t tileY = 0; tileY < rows; tileY++) {
+    for (uint16_t tileX = 0; tileX < columns; tileX++) {
+      const uint16_t x = tileX * GifTileSize;
+      const uint16_t y = tileY * GifTileSize;
+      bool different = false;
+      for (uint16_t row = 0; row < GifTileSize; row++) {
+        const uint16_t *currentRow = frame + (size_t)(y + row) * width + x;
+        const uint16_t *previousRow = previous + (size_t)(y + row) * width + x;
+        memcpy(_gifTileBuffer + row * GifTileSize, currentRow, GifTileSize * sizeof(uint16_t));
+        if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
+      }
+      if (different) _display.tft().pushImage(x, y, GifTileSize, GifTileSize, _gifTileBuffer);
+    }
+  }
 }
 
 uint32_t ImageViewerScreen::gifSourceFrameForSequence(uint32_t sequence) const {
@@ -1055,8 +1384,26 @@ bool ImageViewerScreen::tickGifRingLoad() {
 }
 
 bool ImageViewerScreen::startNextGifRingLoad() {
-  if (_gifFullResident || _gifPreloadActive || !canPlayGifSequence(_gifNextLoadSequence)) return true;
+  if (_gifFullResident || !canPlayGifSequence(_gifNextLoadSequence)) return true;
+  if (_gifLoaderTask) {
+    uint32_t slot = _gifNextLoadSequence % _gifResidentCapacity;
+    if (_gifNextLoadSequence < _gifResidentCapacity) {
+      if (!_gifResidentStates || _gifResidentStates[slot] != (uint8_t)GifSlotState::Free) return true;
+      return enqueueGifLoad(_gifNextLoadSequence++);
+    }
+    uint32_t previousSequence = _gifNextLoadSequence - _gifResidentCapacity;
+    if (!_gifResidentStates || _gifResidentStates[slot] != (uint8_t)GifSlotState::Free ||
+        _gifResidentSequences[slot] != previousSequence) return true;
+    return enqueueGifLoad(_gifNextLoadSequence++);
+  }
+  if (_gifPreloadActive) return true;
   uint32_t slot = _gifNextLoadSequence % _gifResidentCapacity;
+  if (_gifNextLoadSequence < _gifResidentCapacity) {
+    if (_gifResidentSequences[slot] != 0xffffffffUL) return true;
+    if (!beginGifRingLoad(_gifNextLoadSequence)) return false;
+    _gifNextLoadSequence++;
+    return true;
+  }
   uint32_t previousSequence = _gifNextLoadSequence - _gifResidentCapacity;
   if (_gifResidentSequences[slot] != previousSequence || previousSequence >= _gifPlaybackSequence) return true;
   if (!beginGifRingLoad(_gifNextLoadSequence)) return false;
@@ -1089,35 +1436,70 @@ bool ImageViewerScreen::startGifPreload() {
   }
   _gifResidentDelays = (uint32_t *)malloc((size_t)capacity * sizeof(uint32_t));
   _gifResidentSequences = (uint32_t *)malloc((size_t)capacity * sizeof(uint32_t));
-  if (!_gifResidentDelays || !_gifResidentSequences) {
+  _gifResidentStates = (uint8_t *)malloc(capacity);
+  if (!_gifResidentDelays || !_gifResidentSequences || !_gifResidentStates) {
     releaseGifBuffers();
     return false;
   }
-  for (uint32_t i = 0; i < capacity; i++) _gifResidentSequences[i] = 0xffffffffUL;
+  for (uint32_t i = 0; i < capacity; i++) {
+    _gifResidentSequences[i] = 0xffffffffUL;
+    _gifResidentStates[i] = (uint8_t)GifSlotState::Free;
+  }
   _gifResidentCapacity = capacity;
   _gifFullResident = capacity == _gifFrameCount;
-  _gifNextLoadSequence = capacity;
+  _gifPreloadTarget = _gifFullResident ? capacity :
+    (capacity < GifInitialPreloadFrames ? capacity : GifInitialPreloadFrames);
+  _gifNextLoadSequence = _gifPreloadTarget;
   Serial.print(F("GIF PSRAM preload: "));
   Serial.print(capacity);
   Serial.print(F(" frame(s), "));
   Serial.println(_gifFullResident ? F("full cycle") : F("ring buffer"));
-  if (!beginGifRingLoad(0)) {
-    releaseGifBuffers();
-    return false;
-  }
   _gifState = GifState::Preloading;
   // Cache hits enter directly from FilesScreen, so clear the full display
   // before drawing the small preload overlay.
   draw();
-  drawGifPreloading(0, capacity);
+  drawGifPreloading(0);
+  if (EnableBackgroundGifLoader) {
+    if (!startGifLoader()) {
+      releaseGifBuffers();
+      return false;
+    }
+    if (_gifCacheReadFile) _gifCacheReadFile.close();
+    _lastProgress = 0;
+    uint32_t initialFrames = _gifFullResident ? capacity : _gifPreloadTarget;
+    for (uint32_t sequence = 0; sequence < initialFrames; sequence++) {
+      if (!enqueueGifLoad(sequence)) {
+        releaseGifBuffers();
+        return false;
+      }
+    }
+  }
+  if (!EnableBackgroundGifLoader && !beginGifRingLoad(0)) {
+    releaseGifBuffers();
+    return false;
+  }
   return true;
 }
 
 bool ImageViewerScreen::tickGifPreload() {
+  if (_gifLoaderTask) {
+    if (!collectGifLoadResults()) return false;
+    uint32_t ready = 0;
+    for (uint32_t i = 0; i < _gifResidentCapacity; i++) {
+      if (_gifResidentStates[i] == (uint8_t)GifSlotState::Ready) ready++;
+    }
+    if (ready != _lastProgress) {
+      _lastProgress = (uint8_t)ready;
+      uint32_t progress = _gifPreloadTarget == 0 ? 100 : (ready * 100UL) / _gifPreloadTarget;
+      drawGifPreloading((uint8_t)(progress > 100 ? 100 : progress));
+    }
+    return ready >= _gifPreloadTarget ? beginGifResidentPlayback() : true;
+  }
   if (!tickGifRingLoad()) return false;
   if (_gifPreloadActive) return true;
   uint32_t completed = _gifPreloadSequence + 1;
-  drawGifPreloading(completed, _gifResidentCapacity);
+  uint32_t progress = _gifResidentCapacity == 0 ? 100 : (completed * 100UL) / _gifResidentCapacity;
+  drawGifPreloading((uint8_t)(progress > 100 ? 100 : progress));
   if (completed < _gifResidentCapacity) return beginGifRingLoad(completed);
   return beginGifResidentPlayback();
 }
@@ -1127,10 +1509,13 @@ bool ImageViewerScreen::beginGifResidentPlayback() {
   _gifPlaybackSequence = 0;
   _gifPlaybackFrame = 0;
   _gifPlaybackDelay = _gifResidentDelays[0];
+  if (_gifResidentStates) _gifResidentStates[0] = (uint8_t)GifSlotState::Displaying;
   draw();
-  _display.tft().pushImage(0, 0, _display.width(), _display.height(), gifResidentFrame(0));
+  uint32_t presentStartedAt = millis();
+  presentGifFrame(gifResidentFrame(0), nullptr, true);
+  (void)presentStartedAt;
   drawCloseIcon();
-  _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : 1);
+  _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs);
   _gifCyclesCompleted = 0;
   _gifState = GifState::Playing;
   if (_gifFullResident && _gifCacheReadFile) _gifCacheReadFile.close();
@@ -1148,44 +1533,49 @@ bool ImageViewerScreen::startGifPlayback() {
     _error = F("GIF viewer requires PSRAM");
     return false;
   }
-  // Prefer a PSRAM-resident window. A complete cycle is loaded whenever it
-  // fits; otherwise a ring is filled incrementally while frames are shown.
+  // A three-slot ring is the minimum safe configuration: displayed, next,
+  // and worker-owned. Do not fall back to synchronous two-frame SD reads;
+  // they are the source of visible playback freezes.
   if (startGifPreload()) return true;
-  _gifPlaybackA = (uint16_t *)ps_malloc(CachePixelBytes);
-  _gifPlaybackB = _gifFrameCount > 1 ? (uint16_t *)ps_malloc(CachePixelBytes) : nullptr;
-  if (!_gifPlaybackA || (_gifFrameCount > 1 && !_gifPlaybackB)) {
-    _error = F("GIF playback needs more PSRAM");
-    releaseGifBuffers();
-    return false;
-  }
-  uint32_t firstDelay = 0;
-  if (!readGifCacheFrame(0, _gifPlaybackA, firstDelay)) {
-    releaseGifBuffers();
-    return false;
-  }
-  _gifPlaybackFrame = 0;
-  _gifPlaybackDelay = firstDelay;
-  _gifActiveIsA = true;
+  _error = F("GIF playback needs 3 PSRAM frames");
+  return false;
+}
+
+void ImageViewerScreen::beginGifTwoFrameLoad(uint32_t frameIndex) {
+  _gifBufferedFrame = frameIndex;
+  _gifBufferedOffset = 0;
+  _gifBufferedLoading = true;
   _gifNextLoaded = false;
-  if (_gifFrameCount > 1) {
-    if (!readGifCacheFrame(1, _gifPlaybackB, _gifNextDelay)) {
-      releaseGifBuffers();
+  _gifNextDelay = 0;
+}
+
+bool ImageViewerScreen::tickGifTwoFrameLoad() {
+  if (!_gifBufferedLoading) return true;
+  uint16_t *destination = _gifActiveIsA ? _gifPlaybackB : _gifPlaybackA;
+  if (!destination || _gifBufferedFrame >= _gifFrameCount) return false;
+  uint8_t chunks = GifPreloadChunksPerTick;
+  while (chunks-- && _gifBufferedOffset < CachePixelBytes) {
+    if (!readGifCacheFrameChunk(_gifBufferedFrame, _gifBufferedOffset,
+                                destination, _gifNextDelay)) {
       return false;
     }
+    uint32_t remaining = CachePixelBytes - _gifBufferedOffset;
+    _gifBufferedOffset += remaining > CacheChunkBytes ? CacheChunkBytes : remaining;
+  }
+  if (_gifBufferedOffset == CachePixelBytes) {
+    _gifBufferedLoading = false;
     _gifNextLoaded = true;
   }
-  draw();
-  _display.tft().pushImage(0, 0, _display.width(), _display.height(), _gifPlaybackA);
-  drawCloseIcon();
-  _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : 1);
-  _gifCyclesCompleted = 0;
-  _gifState = GifState::Playing;
   return true;
 }
 
 bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
   if (_gifResidentFrames) {
-    if (!tickGifRingLoad() || !startNextGifRingLoad()) return false;
+    if (_gifLoaderTask) {
+      if (!collectGifLoadResults() || !startNextGifRingLoad()) return false;
+    } else if (!tickGifRingLoad() || !startNextGifRingLoad()) {
+      return false;
+    }
     if ((int32_t)(nowMs - _gifNextFrameAt) < 0) return true;
     uint32_t nextSequence = _gifPlaybackSequence + 1;
     if (!canPlayGifSequence(nextSequence)) {
@@ -1194,19 +1584,48 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
     }
     uint32_t slot = _gifFullResident ? gifSourceFrameForSequence(nextSequence) :
       nextSequence % _gifResidentCapacity;
-    if (!_gifFullResident && _gifResidentSequences[slot] != nextSequence) {
-      return true; // keep the current frame until buffered
+    bool nextFrameReady = _gifLoaderTask
+      ? (_gifResidentStates &&
+         _gifResidentStates[slot] == (uint8_t)GifSlotState::Ready &&
+         _gifResidentSequences[slot] == nextSequence)
+      : _gifResidentSequences[slot] == nextSequence;
+    if (!_gifFullResident && !nextFrameReady) {
+      if (!_gifWaitingForFrame) {
+        _gifWaitingForFrame = true;
+        _gifUnderruns++;
+        Serial.print(F("GIF ring underrun: "));
+        Serial.println(_gifUnderruns);
+      }
+      // Keep the timeline moving. When the worker catches up the next tick
+      // can present the queued frame instead of stretching every following
+      // GIF delay by the underrun duration.
+      _gifDroppedFrames++;
+      _gifNextFrameAt += _gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs;
+      Serial.print(F("GIF dropped frames: "));
+      Serial.println(_gifDroppedFrames);
+      return true;
     }
     uint16_t *next = gifResidentFrame(slot);
     if (!next) return false;
+    uint32_t previousSequence = _gifPlaybackSequence;
+    uint32_t previousSlot = _gifFullResident ? gifSourceFrameForSequence(previousSequence) :
+      previousSequence % _gifResidentCapacity;
     _gifPlaybackSequence = nextSequence;
     _gifPlaybackFrame = gifSourceFrameForSequence(nextSequence);
     _gifPlaybackDelay = _gifResidentDelays[slot];
-    _display.tft().pushImage(0, 0, _display.width(), _display.height(), next);
+    _gifWaitingForFrame = false;
+    if (_gifResidentStates) {
+      _gifResidentStates[slot] = (uint8_t)GifSlotState::Displaying;
+      if (!_gifFullResident) _gifResidentStates[previousSlot] = (uint8_t)GifSlotState::Free;
+    }
+    uint32_t presentStartedAt = millis();
+    presentGifFrame(next, gifResidentFrame(previousSlot), false);
+    (void)presentStartedAt;
     drawCloseIcon();
-    _gifNextFrameAt = nowMs + (_gifPlaybackDelay ? _gifPlaybackDelay : 1);
+    _gifNextFrameAt += _gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs;
     return startNextGifRingLoad();
   }
+  if (!tickGifTwoFrameLoad()) return false;
   if ((int32_t)(nowMs - _gifNextFrameAt) < 0) return true;
   if (_gifFrameCount == 1) {
     if (_gifLoopCount < 0) {
@@ -1222,30 +1641,25 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
     _gifNextFrameAt = nowMs + (_gifPlaybackDelay ? _gifPlaybackDelay : 1);
     return true;
   }
-  if (!_gifNextLoaded) return false;
+  // Keep the current image visible until the next frame has been read in
+  // bounded chunks. This avoids a 307 KB blocking SD read in one screen tick.
+  if (!_gifNextLoaded) return true;
   uint16_t *active = _gifActiveIsA ? _gifPlaybackB : _gifPlaybackA;
-  uint16_t *spare = _gifActiveIsA ? _gifPlaybackA : _gifPlaybackB;
   _gifActiveIsA = !_gifActiveIsA;
-  uint32_t displayedFrame = _gifPlaybackFrame + 1 < _gifFrameCount
-    ? _gifPlaybackFrame + 1 : 0;
+  uint32_t displayedFrame = _gifBufferedFrame;
   _gifPlaybackFrame = displayedFrame;
   _gifPlaybackDelay = _gifNextDelay;
   _display.tft().pushImage(0, 0, _display.width(), _display.height(), active);
   drawCloseIcon();
 
   if (displayedFrame + 1 < _gifFrameCount) {
-    if (!readGifCacheFrame(displayedFrame + 1, spare, _gifNextDelay)) return false;
-    _gifNextLoaded = true;
+    beginGifTwoFrameLoad(displayedFrame + 1);
   } else {
     bool repeat = _gifLoopCount == 0 ||
       (_gifLoopCount > 0 && _gifCyclesCompleted < (uint32_t)_gifLoopCount);
     if (repeat) {
       _gifCyclesCompleted++;
-      if (!readGifCacheFrame(0, spare, _gifNextDelay)) return false;
-      // The next buffer is frame zero; keep the active index at the last
-      // frame so the normal increment path selects zero when it is shown.
-      _gifPlaybackFrame = _gifFrameCount - 1;
-      _gifNextLoaded = true;
+      beginGifTwoFrameLoad(0);
     } else {
       _gifNextLoaded = false;
       _gifState = GifState::None;
@@ -1257,17 +1671,24 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
 }
 
 void ImageViewerScreen::releaseGifBuffers() {
+  stopGifLoader();
   if (_gifPlaybackA) free(_gifPlaybackA);
   if (_gifPlaybackB) free(_gifPlaybackB);
   if (_gifResidentFrames) free(_gifResidentFrames);
   if (_gifResidentDelays) free(_gifResidentDelays);
   if (_gifResidentSequences) free(_gifResidentSequences);
+  if (_gifResidentStates) free(_gifResidentStates);
   _gifPlaybackA = nullptr;
   _gifPlaybackB = nullptr;
+  _gifBufferedFrame = 0;
+  _gifBufferedOffset = 0;
+  _gifBufferedLoading = false;
   _gifResidentFrames = nullptr;
   _gifResidentDelays = nullptr;
   _gifResidentSequences = nullptr;
+  _gifResidentStates = nullptr;
   _gifResidentCapacity = 0;
+  _gifPreloadTarget = 0;
   _gifPreloadSlot = 0;
   _gifPreloadSequence = 0;
   _gifPreloadOffset = 0;
@@ -1275,6 +1696,11 @@ void ImageViewerScreen::releaseGifBuffers() {
   _gifPlaybackSequence = 0;
   _gifFullResident = false;
   _gifPreloadActive = false;
+  _gifLoaderError = false;
+  _gifLoadedFrames = 0;
+  _gifUnderruns = 0;
+  _gifDroppedFrames = 0;
+  _gifWaitingForFrame = false;
   _gifNextLoaded = false;
 }
 
@@ -1405,7 +1831,9 @@ bool ImageViewerScreen::prepareRender() {
   }
   uint32_t screenWidth = _display.width();
   uint32_t screenHeight = _display.height();
-  if ((uint64_t)screenWidth * _sourceHeight <= (uint64_t)screenHeight * _sourceWidth) {
+  if (_format == ImageFormat::Gif) {
+    prepareGifDrawRect();
+  } else if ((uint64_t)screenWidth * _sourceHeight <= (uint64_t)screenHeight * _sourceWidth) {
     _drawWidth = screenWidth;
     _drawHeight = (uint16_t)(((uint64_t)screenWidth * _sourceHeight) / _sourceWidth);
   } else {

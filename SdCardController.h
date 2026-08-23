@@ -27,8 +27,10 @@ public:
   bool runReadWriteTest(const char *path = "/sd_rw_test.txt");
 
 private:
-  static const uint32_t PreferredSpiFrequency = 40000000;
-  static const uint32_t FallbackSpiFrequency = 20000000;
+  // Long sequential animation-cache reads exposed marginal signal integrity
+  // on otherwise mountable cards at 40 MHz. Keep the bus at the ESP32 SD
+  // library's conservative, proven rate for reliable playback.
+  static const uint32_t SpiFrequency = 40000000;
   static const uint32_t MountRetryIntervalMs = 1000;
   static const uint32_t NoDetectRetryIntervalMs = 30000;
   static const uint32_t HealthCheckIntervalMs = 500;

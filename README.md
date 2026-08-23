@@ -25,7 +25,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
-- Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are fully cached before playback, then preload a complete cycle into PSRAM when it fits; larger GIFs use a PSRAM ring buffer filled in the background.
+- Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
 
 ## Files
 
@@ -68,7 +68,32 @@ Screens get common UI services from the base `Screen` constructor: `Navigator`, 
 
 ## Image Decoder Libraries
 
-Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Animated PNG and progressive JPEG files remain unsupported.
+Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Very large GIFs may still be rejected when their cooked decoder canvas cannot fit in currently available PSRAM. Animated PNG and progressive JPEG files remain unsupported.
+
+## Image Cache Formats
+
+The viewer creates SD-card caches beside each source image in a `.cache` directory. For example, `/photos/beach.jpg` becomes `/photos/.cache/beach.jpg.em16`, and `/photos/waves.gif` becomes `/photos/.cache/waves.gif.emga`. A cache is first written as the same path with a `.tmp` suffix and then renamed only after it is complete. Invalid, incomplete, or obsolete caches are rebuilt automatically.
+
+### `.em16` — static-image canvas cache
+
+`.em16` is used for BMP, PNG, and JPEG images. It is an `EM16` version-1 file with a 24-byte little-endian header followed by a fixed 480 × 320 RGB565 canvas (307,200 bytes).
+
+- Header fields: magic (`EM16`), version, pixel encoding (`0` = little-endian RGB565), canvas width and height, source-file byte size, source last-modified time, and pixel-payload size.
+- The canvas contains the viewer's aspect-fit render, including its black letterbox area, so cache playback needs no image decoding.
+- A cache is accepted only when its source size, modification time, cache geometry, payload size, and file length all match the current viewer.
+
+### `.emga` — animated-GIF frame cache
+
+`.emga` is used only for GIFs. The current format is `EMGA` version 4 with a 40-byte little-endian header and fixed-size records for each frame. Older `.emga` versions are deliberately invalidated and regenerated.
+
+- Header fields: magic (`EMGA`), version, pixel encoding (`2` = packed RGB444), 480 × 320 display geometry, source-file byte size, source last-modified time, source GIF width and height, frame count, loop count, and the cached draw width and height.
+- Every frame record begins with a 32-bit little-endian display delay in milliseconds. The remaining bytes are two 12-bit RGB444 pixels packed into three bytes (the final odd pixel uses two bytes). This preserves 4,096 colors while using 25% less SD storage and read bandwidth than RGB565.
+- GIFs are centered in a maximum 320 × 240 viewport. Sources larger than that are downscaled; smaller sources retain their native size and are never upscaled.
+- During playback, the loader on the other CPU core reads and expands RGB444 records into RGB565 slots in a PSRAM ring. The TFT receives those RGB565 pixels, while the SD cache stays compact enough to sustain the shared SD/touch SPI bus.
+
+## ESP32-S3 N16R8 Playback Profile
+
+Select an ESP32-S3 board profile with 16 MiB flash, 8 MiB PSRAM, and a 240 MHz CPU. Startup logs the detected CPU, flash, PSRAM total, free PSRAM, and the largest allocatable PSRAM block. GIF playback requires at least three 480x320 RGB565 PSRAM frames plus a 512 KiB reserve; lower-memory profiles show an image-viewer error rather than falling back to synchronous SD reads.
 
 ## TFT_eSPI Setup
 
@@ -142,7 +167,7 @@ If the display has a pin labelled `LED`, `LED_A`, `A`, or similar, that is usual
 
 ## Default SD Card Wiring
 
-The sketch uses SPI mode, not SDMMC mode. It attempts 40 MHz for faster GIF-frame cache reads and falls back automatically to 20 MHz when the card or wiring cannot mount reliably at the higher speed.
+The sketch uses SPI mode, not SDMMC mode. It runs the shared SD/touch bus at a conservative 20 MHz because long animation reads were not reliable at 40 MHz with the current wiring. The GIF loader reads 16 KiB sequential blocks on the second core and releases the SPI lock between blocks for touch polling.
 
 | SD Module Pin | ESP32-S3 GPIO |
 | --- | --- |

@@ -2,6 +2,10 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 // JPEGDEC 1.8.x declares its filesystem overload with an unqualified File.
 // ESP32's FS core keeps File in namespace fs, so provide the expected alias
@@ -40,11 +44,21 @@ private:
   static const uint16_t CacheHeight = 320;
   static const uint16_t CacheHeaderSize = 24;
   static const uint16_t AnimationCacheHeaderSize = 40;
+  // GIF cache records use packed RGB444 pixels. They are expanded into the
+  // RGB565 PSRAM ring by the worker without palette shimmer.
   static const uint32_t AnimationFrameHeaderSize = 4;
+  static const uint16_t GifPhotoMaxWidth = 320;
+  static const uint16_t GifPhotoMaxHeight = 240;
   static const uint32_t CachePixelBytes = (uint32_t)CacheWidth * CacheHeight * 2UL;
-  static const uint16_t CacheChunkBytes = 4096;
+  // A 16 KiB internal-RAM staging buffer amortizes FAT/SPI overhead while
+  // leaving the shared touch bus responsive between transfers.
+  static const uint16_t CacheChunkBytes = 16384;
   static const uint32_t GifPsramReserveBytes = 512UL * 1024UL;
-  static const uint8_t GifPreloadChunksPerTick = 4;
+  static const uint8_t GifPreloadChunksPerTick = 2;
+  static const uint8_t GifInitialPreloadFrames = 3;
+  static const uint32_t GifMinimumDelayMs = 100;
+  static const bool EnableBackgroundGifLoader = true;
+  static const uint16_t GifTileSize = 16;
 
   enum class Compression : uint32_t {
     Rgb = 0,
@@ -63,6 +77,19 @@ private:
   };
 
   enum class GifState : uint8_t { None, Building, Preloading, Playing };
+  enum class GifSlotState : uint8_t { Free, Loading, Ready, Displaying };
+
+  struct GifLoadRequest {
+    uint32_t slot;
+    uint32_t sequence;
+  };
+
+  struct GifLoadResult {
+    uint32_t slot;
+    uint32_t sequence;
+    uint32_t delay;
+    bool success;
+  };
 
   SdCardController &_sdCard;
   fs::File _file;
@@ -127,10 +154,15 @@ private:
   int32_t _gifLoopCount;
   uint16_t *_gifPlaybackA;
   uint16_t *_gifPlaybackB;
+  uint32_t _gifBufferedFrame;
+  uint32_t _gifBufferedOffset;
+  bool _gifBufferedLoading;
   uint16_t *_gifResidentFrames;
   uint32_t *_gifResidentDelays;
   uint32_t *_gifResidentSequences;
+  uint8_t *_gifResidentStates;
   uint32_t _gifResidentCapacity;
+  uint32_t _gifPreloadTarget;
   uint32_t _gifPreloadSlot;
   uint32_t _gifPreloadSequence;
   uint32_t _gifPreloadOffset;
@@ -138,10 +170,21 @@ private:
   uint32_t _gifPlaybackSequence;
   bool _gifFullResident;
   bool _gifPreloadActive;
+  QueueHandle_t _gifLoadRequests;
+  QueueHandle_t _gifLoadResults;
+  SemaphoreHandle_t _gifLoaderStopped;
+  TaskHandle_t _gifLoaderTask;
+  volatile bool _gifLoaderStop;
+  bool _gifLoaderError;
+  uint32_t _gifLoadedFrames;
+  uint32_t _gifUnderruns;
+  uint32_t _gifDroppedFrames;
+  bool _gifWaitingForFrame;
   bool _gifActiveIsA;
   bool _gifNextLoaded;
   uint32_t _gifNextFrameAt;
   uint32_t _gifCanvasPixels;
+  uint16_t _gifTileBuffer[GifTileSize * GifTileSize];
   bool _lastTouchDown;
   uint8_t _lastProgress;
 
@@ -160,8 +203,8 @@ private:
   void drawCloseIcon();
   void drawError();
   void drawLoading(uint8_t percent);
-  void drawGifLoading(uint32_t frame);
-  void drawGifPreloading(uint32_t frame, uint32_t total);
+  void drawGifLoading(uint8_t percent);
+  void drawGifPreloading(uint8_t percent);
   void updateDecodeProgress(uint8_t percent);
   const char *formatName() const;
   bool readHeader();
@@ -172,21 +215,37 @@ private:
   bool loadCache();
   bool loadAnimationCache();
   bool readAnimationCacheHeader(fs::File &file, uint32_t &frameCount, int32_t &loopCount,
-                                uint32_t &sourceWidth, uint32_t &sourceHeight) const;
+                                uint32_t &sourceWidth, uint32_t &sourceHeight,
+                                uint16_t &drawWidth, uint16_t &drawHeight) const;
   bool startGifBuild();
   bool buildGifFrame();
   bool finishGifBuild();
   bool startGifPlayback();
   bool tickGifPlayback(uint32_t nowMs);
+  void beginGifTwoFrameLoad(uint32_t frameIndex);
+  bool tickGifTwoFrameLoad();
   bool startGifPreload();
   bool tickGifPreload();
   bool beginGifResidentPlayback();
+  bool startGifLoader();
+  void stopGifLoader();
+  bool enqueueGifLoad(uint32_t sequence);
+  bool collectGifLoadResults();
+  bool allGifPreloadSlotsReady() const;
+  bool loadGifFrameOnWorker(fs::File &cache, uint8_t *chunk,
+                            const GifLoadRequest &request, GifLoadResult &result);
+  void copyGifCacheChunk(uint16_t *destination, uint32_t pixelOffset,
+                         const uint8_t *chunk, uint16_t amount);
   bool beginGifRingLoad(uint32_t sequence);
   bool tickGifRingLoad();
   bool startNextGifRingLoad();
   bool canPlayGifSequence(uint32_t sequence) const;
   uint32_t gifSourceFrameForSequence(uint32_t sequence) const;
   uint16_t *gifResidentFrame(uint32_t slot) const;
+  uint32_t gifRgb444Bytes() const;
+  uint32_t gifFrameRecordBytes() const;
+  void prepareGifDrawRect();
+  void presentGifFrame(const uint16_t *frame, const uint16_t *previous, bool forceFull);
   bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
                               uint16_t *destination, uint32_t &delay);
   bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);
@@ -233,5 +292,6 @@ private:
   static void gifDraw(GIFDRAW *draw);
   static void *gifAlloc(uint32_t size);
   static void gifFree(void *buffer);
+  static void gifLoaderTask(void *context);
   void storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color);
 };

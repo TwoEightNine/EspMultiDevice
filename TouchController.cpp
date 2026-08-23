@@ -1,4 +1,5 @@
 #include "TouchController.h"
+#include "SpiBusLock.h"
 
 #include <FS.h>
 #include <SD.h>
@@ -193,6 +194,9 @@ bool TouchController::readPoint(TouchPoint &point, bool holdingTouch) {
     return false;
   }
 
+  // The GIF loader may read SD data on the other core. Keep the shared SD /
+  // touch SPI wires exclusive for this short touch transaction.
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(8))) return false;
   SPI.beginTransaction(_spiSettings);
   digitalWrite(_csPin, LOW);
 
@@ -235,6 +239,7 @@ bool TouchController::readPoint(TouchPoint &point, bool holdingTouch) {
 
   digitalWrite(_csPin, HIGH);
   SPI.endTransaction();
+  SpiBusLock::unlock();
 
   return point.touched;
 }

@@ -10,6 +10,7 @@
 #include "SdCardController.h"
 #include "SettingsScreen.h"
 #include "SpeakerController.h"
+#include "SpiBusLock.h"
 #include "TouchController.h"
 #include "TouchCalibrationScreen.h"
 #include "TextInputScreen.h"
@@ -98,6 +99,23 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
 
   Serial.println(F("ESP Media starting..."));
+  Serial.print(F("CPU MHz: "));
+  Serial.println(getCpuFrequencyMhz());
+  Serial.print(F("Flash bytes: "));
+  Serial.println(ESP.getFlashChipSize());
+  Serial.print(F("PSRAM total/free/max: "));
+  Serial.print(ESP.getPsramSize());
+  Serial.print('/');
+  Serial.print(ESP.getFreePsram());
+  Serial.print('/');
+  Serial.println(ESP.getMaxAllocPsram());
+  if (ESP.getPsramSize() < 8UL * 1024UL * 1024UL) {
+    Serial.println(F("Warning: GIF ring playback expects 8 MiB PSRAM (N16R8 build profile)."));
+  }
+
+  if (!SpiBusLock::begin()) {
+    Serial.println(F("Shared SPI lock unavailable."));
+  }
 
   display = new DisplayController();
   display->begin(DISPLAY_ROTATION);
