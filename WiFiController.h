@@ -31,7 +31,7 @@ public:
   void begin();
   void update(uint32_t nowMs);
 
-  void setEnabled(bool enabled);
+  void setEnabled(bool enabled, bool scanWhenDisconnected = true);
   bool isEnabled() const;
   bool isConnected() const;
   bool isScanning() const;

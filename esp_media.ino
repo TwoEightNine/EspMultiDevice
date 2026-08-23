@@ -96,7 +96,6 @@ void updateTouch() {
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
-  delay(500);
 
   Serial.println(F("ESP Media starting..."));
 
@@ -156,7 +155,7 @@ void setup() {
 
   navigator = new Navigator();
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController);
-  splashScreen = new SplashScreen(*navigator, *touch, *display);
+  splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);

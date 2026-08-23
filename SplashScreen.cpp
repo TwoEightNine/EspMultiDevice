@@ -1,18 +1,20 @@
 #include "SplashScreen.h"
 #include "Navigator.h"
+#include "WiFiController.h"
 #include "logo.h"
 
 #define SPLASH_DURATION_MS 3000
 
 SplashScreen::SplashScreen(Navigator &navigator,
                        TouchController &touch,
-                       DisplayController &display)
-  : Screen(navigator, touch, display) {
+                       DisplayController &display,
+                       WiFiController &wifi)
+  : Screen(navigator, touch, display),
+    _wifi(wifi) {
 }
 
 void SplashScreen::onEnter() {
     enteredMillis = millis();
-    _display.clear();
     uint16_t startX = (_display.width() - logo_WIDTH) / 2;
     uint16_t startY = (_display.height() - logo_HEIGHT) / 2;
     _display.tft().pushImage(startX, startY, logo_WIDTH, logo_HEIGHT, logo);
@@ -47,5 +49,8 @@ void SplashScreen::tick(uint32_t nowMs) {
     } else if (enteredMillis != 0) {
         enteredMillis = 0;
         _navigator.replace(ScreenId::Home);
+        // Reconnect to saved credentials after Home/SD startup, without an
+        // unsolicited scan on an unconfigured device.
+        _wifi.setEnabled(true, false);
     }
 }

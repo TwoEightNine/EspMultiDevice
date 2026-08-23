@@ -3,8 +3,12 @@
 bool DisplayController::begin(uint8_t rotation, int backlightPin, bool backlightActiveHigh) {
   configureBacklight(backlightPin, backlightActiveHigh);
   _tft.init();
+  // Keep the always-lit panel blank while the first framebuffer is written.
+  _tft.writecommand(TFT_DISPOFF);
   _tft.setRotation(rotation);
   _tft.setSwapBytes(true);
+  _tft.fillScreen(TFT_BLACK);
+  _tft.writecommand(TFT_DISPON);
   _ready = true;
   return _ready;
 }

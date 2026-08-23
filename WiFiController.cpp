@@ -15,15 +15,14 @@ WiFiController::WiFiController()
 }
 
 void WiFiController::begin() {
-  _enabled = true;
-  _reconnectAllowed = true;
+  // Keep the radio off during display/storage startup; the splash screen
+  // enables it after Home has finished its first render.
+  _enabled = false;
+  _reconnectAllowed = false;
+  _scanInProgress = false;
   _error = "";
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  if (!reconnectToSavedNetwork(millis())) {
-    _state = WiFiConnectionState::Disconnected;
-    startScan();
-  }
+  _state = WiFiConnectionState::Disabled;
+  WiFi.mode(WIFI_OFF);
 }
 
 void WiFiController::update(uint32_t nowMs) {
@@ -57,7 +56,7 @@ void WiFiController::update(uint32_t nowMs) {
   }
 }
 
-void WiFiController::setEnabled(bool enabled) {
+void WiFiController::setEnabled(bool enabled, bool scanWhenDisconnected) {
   if (_enabled == enabled) {
     return;
   }
@@ -78,7 +77,9 @@ void WiFiController::setEnabled(bool enabled) {
   WiFi.setAutoReconnect(true);
   if (!reconnectToSavedNetwork(millis())) {
     _state = WiFiConnectionState::Disconnected;
-    startScan();
+    if (scanWhenDisconnected) {
+      startScan();
+    }
   }
 }
 
