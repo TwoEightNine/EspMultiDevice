@@ -18,11 +18,13 @@
 namespace {
 const int16_t HeaderHeight = UiKit::AppBarHeight;
 const int16_t ControlsHeight = 42;
-const uint8_t VisibleRecentSites = 3;
-const int16_t TextRowHeight = 18;
-const int16_t ImageRowHeight = 20;
+const int16_t TextRowHeight = 22;
+const int16_t ImageRowHeight = TextRowHeight;
 const int16_t DocumentPadding = 7;
 const int16_t DocumentSidePadding = 8;
+const int16_t StartOpenButtonTop = HeaderHeight + 8;
+const int16_t StartOpenButtonHeight = 32;
+const int16_t RecentListTop = StartOpenButtonTop + StartOpenButtonHeight + 24;
 const uint16_t DefaultTextColor = TFT_WHITE;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
@@ -39,6 +41,43 @@ String trimCopy(const String &value) {
 bool startsWithIgnoreCase(const String &value, const char *prefix) {
   size_t length = strlen(prefix);
   return value.length() >= length && value.substring(0, length).equalsIgnoreCase(prefix);
+}
+
+void drawFooterArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                     bool vertical, bool forward, uint16_t color) {
+  const int16_t shaft = 10;
+  const int16_t wing = 7;
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    if (vertical) {
+      int16_t pointY = centerY + (forward ? wing : -wing);
+      int16_t tailY = centerY - (forward ? wing : -wing);
+      tft.drawLine(centerX + offset, tailY, centerX + offset, pointY, color);
+      tft.drawLine(centerX + offset, pointY, centerX - wing + offset, pointY - (forward ? wing : -wing), color);
+      tft.drawLine(centerX + offset, pointY, centerX + wing + offset, pointY - (forward ? wing : -wing), color);
+    } else {
+      int16_t pointX = centerX + (forward ? wing : -wing);
+      int16_t tailX = centerX - shaft;
+      if (!forward) tailX = centerX + shaft;
+      tft.drawLine(tailX, centerY + offset, pointX, centerY + offset, color);
+      tft.drawLine(pointX, centerY + offset, pointX - (forward ? wing : -wing), centerY - wing + offset, color);
+      tft.drawLine(pointX, centerY + offset, pointX - (forward ? wing : -wing), centerY + wing + offset, color);
+    }
+  }
+}
+
+void drawFooterHome(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  const int16_t left = centerX - 10;
+  const int16_t right = centerX + 10;
+  const int16_t roof = centerY - 9;
+  const int16_t base = centerY + 10;
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    tft.drawLine(left + offset, centerY - 1, centerX + offset, roof, color);
+    tft.drawLine(centerX + offset, roof, right + offset, centerY - 1, color);
+    tft.drawLine(left + offset, centerY - 1, left + offset, base, color);
+    tft.drawLine(right + offset, centerY - 1, right + offset, base, color);
+    tft.drawLine(left + offset, base, right + offset, base, color);
+  }
+  tft.fillRect(centerX - 2, centerY + 3, 5, 8, color);
 }
 
 uint64_t parseHttpDate(const String &source) {
@@ -91,6 +130,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _plainClient(),
     _secureClient(),
     _linkCount(0),
+    _historyCount(0),
     _recentCount(0),
     _cookieCount(0),
     _loaded(false),
@@ -108,8 +148,8 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _pendingSpace(false),
     _renderedCharacters(0),
     _closeBounds{0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize},
-    _startBounds{0, 0, 0, 0},
-    _newBounds{0, 0, 0, 0},
+    _backBounds{0, 0, 0, 0},
+    _homeBounds{0, 0, 0, 0},
     _openBounds{0, 0, 0, 0},
     _previousBounds{0, 0, 0, 0},
     _nextBounds{0, 0, 0, 0} {
@@ -129,7 +169,7 @@ void BrowserScreen::onEnter() {
 
 void BrowserScreen::onResult(const ScreenResult &result) {
   if (result.kind == ScreenResultKind::Text && result.text.length() > 0) {
-    openUrl(result.text);
+    openUrl(result.text, true, true);
   }
 }
 
@@ -145,14 +185,18 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _navigator.pop();
     return;
   }
-  if (contains(_startBounds, point.x, point.y)) {
+  if (contains(_backBounds, point.x, point.y) && _historyCount > 0) {
+    goBack();
+    return;
+  }
+  if (contains(_homeBounds, point.x, point.y)) {
     _showStart = true;
     _page = 0;
     _message = "";
     draw();
     return;
   }
-  if (contains(_newBounds, point.x, point.y) || (_showStart && contains(_openBounds, point.x, point.y))) {
+  if (_showStart && contains(_openBounds, point.x, point.y)) {
     openUrlInput();
     return;
   }
@@ -167,8 +211,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (_showStart) {
-    const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
-    for (uint8_t i = 0; i < visible; i++) {
+    for (uint8_t i = 0; i < MaxRecentSites; i++) {
       if (contains(_recentBounds[i], point.x, point.y)) {
         openUrl(_recentSites[i].url);
         return;
@@ -186,18 +229,21 @@ void BrowserScreen::layout() {
   const int16_t height = _display.height();
   const int16_t buttonWidth = width / 4;
   _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
-  _startBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
-  _newBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
-  _openBounds = {70, 76, (int16_t)(width - 140), 32};
+  _backBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
+  _homeBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
+  _openBounds = {70, StartOpenButtonTop, (int16_t)(width - 140), StartOpenButtonHeight};
   _previousBounds = {(int16_t)(buttonWidth * 2), (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _nextBounds = {(int16_t)(buttonWidth * 3), (int16_t)(height - ControlsHeight),
                  (int16_t)(width - buttonWidth * 3), ControlsHeight};
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _recentBounds[i] = {0, 0, 0, 0};
   }
-  const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
+  const int16_t footerTop = height - ControlsHeight;
+  const uint8_t capacity = footerTop > RecentListTop
+    ? (uint8_t)((footerTop - RecentListTop) / UiKit::ListCellHeight) : 0;
+  const uint8_t visible = _recentCount < capacity ? _recentCount : capacity;
   for (uint8_t i = 0; i < visible; i++) {
-    _recentBounds[i] = {0, (int16_t)(128 + i * UiKit::ListCellHeight),
+    _recentBounds[i] = {0, (int16_t)(RecentListTop + i * UiKit::ListCellHeight),
                         width, UiKit::ListCellHeight};
   }
 }
@@ -222,21 +268,20 @@ void BrowserScreen::drawStartPage() {
   TFT_eSPI &tft = _display.tft();
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Start page", _display.width() / 2, 66, 4);
-  tft.fillRoundRect(70, 76, _display.width() - 140, 32, 5, TFT_BLUE);
+  tft.fillRoundRect(_openBounds.x, _openBounds.y, _openBounds.w, _openBounds.h, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  tft.drawString("Open a new page", _display.width() / 2, 92, 2);
+  tft.drawString("Open URL", _display.width() / 2, StartOpenButtonTop + StartOpenButtonHeight / 2, 2);
   tft.setTextDatum(TL_DATUM);
 
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString("Recent sites", 10, 112, 2);
+  tft.drawString("Recent sites", 10, RecentListTop - 18, 2);
   if (_recentCount == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("No recent sites yet", 10, 142, 2);
+    tft.drawString("No recent sites yet", 10, RecentListTop + 10, 2);
     return;
   }
-  const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
-  for (uint8_t i = 0; i < visible; i++) {
+  for (uint8_t i = 0; i < MaxRecentSites; i++) {
+    if (_recentBounds[i].w == 0) break;
     const RecentSite &site = _recentSites[i];
     const Rect &bounds = _recentBounds[i];
     String label = site.title.length() ? site.title : site.url;
@@ -280,12 +325,24 @@ void BrowserScreen::drawDocument() {
     } else {
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
         const VisualRun &run = row.runs[runIndex];
+        const int16_t x = DocumentSidePadding + run.x;
+        if (run.image) {
+          uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
+          tft.drawRect(x, y, run.width, ImageRowHeight, color);
+          tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
+          tft.setFreeFont(&FreeSans9pt7b);
+          tft.setTextColor(color, TFT_BLACK);
+          tft.setTextDatum(ML_DATUM);
+          tft.drawString(run.text, x + 22, y + ImageRowHeight / 2);
+          tft.setTextDatum(TL_DATUM);
+          continue;
+        }
         applyFont(run.style);
         tft.setTextColor(run.style.color, TFT_BLACK);
         tft.setTextDatum(TL_DATUM);
-        tft.drawString(run.text, DocumentSidePadding + run.x, y);
+        tft.drawString(run.text, x, y);
         if (run.style.underline && run.width > 0) {
-          tft.drawFastHLine(DocumentSidePadding + run.x, y + TextRowHeight - 2, run.width, run.style.color);
+          tft.drawFastHLine(x, y + TextRowHeight - 2, run.width, run.style.color);
         }
       }
     }
@@ -296,17 +353,19 @@ void BrowserScreen::drawDocument() {
 
 void BrowserScreen::drawControls() {
   TFT_eSPI &tft = _display.tft();
-  const Rect buttons[] = {_startBounds, _newBounds, _previousBounds, _nextBounds};
-  const char *labels[] = {"Start", "New URL", "Prev", "Next"};
+  const Rect buttons[] = {_backBounds, _homeBounds, _previousBounds, _nextBounds};
   for (uint8_t i = 0; i < 4; i++) {
-    bool active = i < 2 || (!_showStart && ((i == 2 && _page > 0) ||
+    bool active = i == 1 || (i == 0 && _historyCount > 0) || (!_showStart && ((i == 2 && _page > 0) ||
       (i == 3 && hasNextPage())));
     uint16_t color = active ? 0x2965 : TFT_DARKGREY;
     const Rect &button = buttons[i];
     tft.fillRect(button.x, button.y, button.w - 1, button.h, color);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(active ? TFT_WHITE : 0x8410, color);
-    tft.drawString(labels[i], button.x + button.w / 2, button.y + button.h / 2, 2);
+    uint16_t iconColor = active ? TFT_WHITE : 0x8410;
+    const int16_t centerX = button.x + button.w / 2;
+    const int16_t centerY = button.y + button.h / 2;
+    if (i == 0) drawFooterArrow(tft, centerX, centerY, false, false, iconColor);
+    else if (i == 1) drawFooterHome(tft, centerX, centerY, iconColor);
+    else drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -346,7 +405,8 @@ void BrowserScreen::openUrlInput() {
   _navigator.push(ScreenId::TextInput, ScreenData::textInput("Open URL", false));
 }
 
-void BrowserScreen::openUrl(const String &value) {
+bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRecent) {
+  const bool hadDocument = !_showStart && _currentUrl.length() > 0;
   String url;
   String error;
   if (!normalizeUrl(value, url, error)) {
@@ -355,7 +415,7 @@ void BrowserScreen::openUrl(const String &value) {
     _rowCount = 0;
     _pageCount = 0;
     draw();
-    return;
+    return false;
   }
   if (!_wifi.isConnected()) {
     _showStart = false;
@@ -363,7 +423,7 @@ void BrowserScreen::openUrl(const String &value) {
     _rowCount = 0;
     _pageCount = 0;
     draw();
-    return;
+    return false;
   }
 
   _showStart = false;
@@ -383,8 +443,9 @@ void BrowserScreen::openUrl(const String &value) {
     _currentUrl = url;
     _message = error;
     draw();
-    return;
+    return false;
   }
+  if (addToHistory && hadDocument) addHistory(_currentUrl);
   _currentUrl = finalUrl;
   _message = "";
   if (downloadedPath.length()) {
@@ -393,15 +454,15 @@ void BrowserScreen::openUrl(const String &value) {
     renderPlainText(group == FileFormats::Group::Audio
       ? "Downloaded audio opened in player."
       : "Downloaded image opened in viewer.", group == FileFormats::Group::Audio ? "Audio download" : "Image download");
-    addRecent(_currentUrl, _title);
+    if (addToRecent) addRecent(_currentUrl, _title);
     saveState();
     if (group == FileFormats::Group::Image &&
-        _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(downloadedPath))) return;
+        _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(downloadedPath))) return true;
     if (group == FileFormats::Group::Audio &&
-        _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(downloadedPath))) return;
+        _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(downloadedPath))) return true;
     _message = "Could not open downloaded file";
     draw();
-    return;
+    return true;
   }
   if (contentType.indexOf("text/html") >= 0 || contentType.indexOf("application/xhtml") >= 0 ||
       contentType.length() == 0) {
@@ -412,9 +473,16 @@ void BrowserScreen::openUrl(const String &value) {
     renderPlainText("[Unsupported content: " + (contentType.length() ? contentType : String("unknown type")) + "]",
                     "Unsupported content");
   }
-  addRecent(_currentUrl, _title);
+  if (addToRecent) addRecent(_currentUrl, _title);
   saveState();
   draw();
+  return true;
+}
+
+void BrowserScreen::goBack() {
+  if (_historyCount == 0) return;
+  const String target = _historyUrls[_historyCount - 1];
+  if (openUrl(target, false)) _historyCount--;
 }
 
 bool BrowserScreen::normalizeUrl(const String &value, String &normalized, String &error) const {
@@ -1067,12 +1135,14 @@ void BrowserScreen::renderDocument(const String &html) {
     else if (!inScript && !inStyle && !inTitle) {
       if (closing) {
         if (isBlockTag(tag)) appendBreak();
+        if (tag == "td" || tag == "th") _pendingSpace = true;
         popStyle(tag);
       } else if (tag == "br") {
         appendBreak();
       } else if (tag == "img") {
         String alt = decodeEntities(attributeValue(attributes, "alt"));
-        appendImage(alt.length() ? alt : "image", _currentStyle.link, _currentStyle.linkIndex);
+        appendImage(alt.length() ? alt : "image", _currentStyle.link, _currentStyle.linkIndex,
+                    isFullWidthImage(attributes));
       } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
                  tag == "embed" || tag == "canvas") {
         appendStub(tag);
@@ -1080,6 +1150,7 @@ void BrowserScreen::renderDocument(const String &html) {
         appendStub("form control");
       } else {
         if (isBlockTag(tag)) appendBreak();
+        if ((tag == "td" || tag == "th") && _rowCount) _pendingSpace = true;
         if (!selfClosing) pushStyle(tag, styledForTag(tag, attributes));
       }
     }
@@ -1136,7 +1207,14 @@ void BrowserScreen::appendBreak() {
   }
 }
 
-void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex) {
+void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth) {
+  TextStyle style = _currentStyle;
+  style.link = linked;
+  style.linkIndex = linkIndex;
+  if (!fullWidth) {
+    appendInlineImage(label, style);
+    return;
+  }
   appendBreak();
   if (_rowCount >= MaxRows) return;
   VisualRow &row = _rows[_rowCount++];
@@ -1146,6 +1224,44 @@ void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIn
   row.imageLinkIndex = linkIndex;
   row.contentWidth = 0;
   row.runCount = 0;
+}
+
+void BrowserScreen::appendInlineImage(const String &label, const TextStyle &style) {
+  const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
+  String displayLabel = shortImageLabel(label, maxWidth - 26);
+  int16_t width = imageWidth(displayLabel);
+  beginTextRow();
+  if (_rowCount == 0) return;
+
+  VisualRow *row = &_rows[_rowCount - 1];
+  if (_pendingSpace && row->contentWidth > 0) {
+    const int16_t spaceWidth = textWidth(" ", style);
+    if (row->contentWidth + spaceWidth + width > maxWidth || row->runCount + 2 > MaxRunsPerRow) {
+      row->contentWidth = _display.width();
+      beginTextRow();
+      if (_rowCount == 0) return;
+      row = &_rows[_rowCount - 1];
+    } else {
+      appendRun(" ", style);
+      row = &_rows[_rowCount - 1];
+    }
+  }
+  _pendingSpace = false;
+
+  if ((row->contentWidth > 0 && row->contentWidth + width > maxWidth) ||
+      row->runCount >= MaxRunsPerRow) {
+    row->contentWidth = _display.width();
+    beginTextRow();
+    if (_rowCount == 0) return;
+    row = &_rows[_rowCount - 1];
+  }
+  VisualRun &run = row->runs[row->runCount++];
+  run.image = true;
+  run.text = displayLabel;
+  run.style = style;
+  run.x = row->contentWidth;
+  run.width = width;
+  row->contentWidth += width;
 }
 
 void BrowserScreen::appendStub(const String &label) {
@@ -1201,12 +1317,14 @@ void BrowserScreen::appendRun(const String &text, const TextStyle &style) {
   if (text.length() == 0 || _rowCount == 0) return;
   VisualRow &row = _rows[_rowCount - 1];
   int16_t width = textWidth(text, style);
-  if (row.runCount && stylesEqual(row.runs[row.runCount - 1].style, style)) {
+  if (row.runCount && !row.runs[row.runCount - 1].image &&
+      stylesEqual(row.runs[row.runCount - 1].style, style)) {
     VisualRun &run = row.runs[row.runCount - 1];
     run.text += text;
     run.width += width;
   } else if (row.runCount < MaxRunsPerRow) {
     VisualRun &run = row.runs[row.runCount++];
+    run.image = false;
     run.text = text;
     run.style = style;
     run.x = row.contentWidth;
@@ -1531,6 +1649,16 @@ String BrowserScreen::shortText(const String &value, int16_t maxWidth) const {
   return result + "...";
 }
 
+String BrowserScreen::shortImageLabel(const String &value, int16_t maxWidth) const {
+  TextStyle style{DefaultTextColor, false, false, false, false, 0};
+  if (textWidth(value, style) <= maxWidth) return value;
+  String result = value;
+  while (result.length() > 3 && textWidth(result + "...", style) > maxWidth) {
+    result.remove(result.length() - 1);
+  }
+  return result.length() == value.length() ? result : result + "...";
+}
+
 String BrowserScreen::lower(const String &value) const {
   String result = value;
   result.toLowerCase();
@@ -1541,7 +1669,44 @@ bool BrowserScreen::isBlockTag(const String &tag) const {
   return tag == "p" || tag == "div" || tag == "section" || tag == "article" || tag == "header" ||
          tag == "footer" || tag == "main" || tag == "nav" || tag == "h1" || tag == "h2" || tag == "h3" ||
          tag == "h4" || tag == "h5" || tag == "h6" || tag == "ul" || tag == "ol" || tag == "li" ||
-         tag == "table" || tag == "tr" || tag == "td" || tag == "th" || tag == "blockquote" || tag == "hr";
+         tag == "table" || tag == "tr" || tag == "blockquote" || tag == "hr";
+}
+
+bool BrowserScreen::isFullWidthImage(const String &attributes) const {
+  String width = lower(trimCopy(attributeValue(attributes, "width")));
+  if (width == "100%") return true;
+  String inlineStyle = attributeValue(attributes, "style");
+  int start = 0;
+  while (start < (int)inlineStyle.length()) {
+    int end = inlineStyle.indexOf(';', start);
+    String declaration = trimCopy(inlineStyle.substring(start, end < 0 ? inlineStyle.length() : end));
+    int colon = declaration.indexOf(':');
+    if (colon > 0) {
+      String property = lower(trimCopy(declaration.substring(0, colon)));
+      String value = lower(trimCopy(declaration.substring(colon + 1)));
+      if ((property == "width" && value == "100%") ||
+          (property == "display" && (value == "block" || value.startsWith("block ")))) return true;
+    }
+    if (end < 0) break;
+    start = end + 1;
+  }
+  return false;
+}
+
+int16_t BrowserScreen::imageWidth(const String &label) const {
+  TextStyle style{DefaultTextColor, false, false, false, false, 0};
+  return 26 + textWidth(label, style);
+}
+
+void BrowserScreen::addHistory(const String &url) {
+  if (url.length() == 0) return;
+  if (_historyCount >= MaxHistory) {
+    for (uint8_t index = 1; index < MaxHistory; index++) {
+      _historyUrls[index - 1] = _historyUrls[index];
+    }
+    _historyCount = MaxHistory - 1;
+  }
+  _historyUrls[_historyCount++] = url;
 }
 
 void BrowserScreen::addRecent(const String &url, const String &title) {

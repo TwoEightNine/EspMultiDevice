@@ -26,8 +26,9 @@ private:
   static const uint8_t MaxRecentSites = 8;
   static const uint8_t MaxCookies = 16;
   static const uint16_t MaxRows = 192;
-  static const uint8_t MaxRunsPerRow = 10;
+  static const uint8_t MaxRunsPerRow = 16;
   static const uint8_t MaxLinks = 64;
+  static const uint8_t MaxHistory = 8;
   static const uint8_t MaxStyleDepth = 16;
   static const uint8_t MaxPages = 32;
   // Keep enough of large legacy pages to reach their body while retaining a
@@ -84,6 +85,7 @@ private:
   };
 
   struct VisualRun {
+    bool image;
     String text;
     TextStyle style;
     int16_t x;
@@ -110,7 +112,9 @@ private:
   WiFiClient _plainClient;
   WiFiClientSecure _secureClient;
   String _linkUrls[MaxLinks];
+  String _historyUrls[MaxHistory];
   uint8_t _linkCount;
+  uint8_t _historyCount;
   RecentSite _recentSites[MaxRecentSites];
   Cookie _cookies[MaxCookies];
   uint8_t _recentCount;
@@ -133,8 +137,8 @@ private:
   bool _pendingSpace;
   uint16_t _renderedCharacters;
   Rect _closeBounds;
-  Rect _startBounds;
-  Rect _newBounds;
+  Rect _backBounds;
+  Rect _homeBounds;
   Rect _openBounds;
   Rect _previousBounds;
   Rect _nextBounds;
@@ -149,7 +153,8 @@ private:
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
   String documentLinkAt(int16_t x, int16_t y) const;
   void openUrlInput();
-  void openUrl(const String &value);
+  bool openUrl(const String &value, bool addToHistory = true, bool addToRecent = false);
+  void goBack();
 
   bool normalizeUrl(const String &value, String &normalized, String &error) const;
   bool parseUrl(const String &value, Url &url) const;
@@ -175,10 +180,11 @@ private:
   void resetRenderedRows();
   void appendText(const String &text);
   void appendBreak();
-  void appendImage(const String &label, bool linked, uint8_t linkIndex);
+  void appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth);
   void appendStub(const String &label);
   void appendWord(const String &word, const TextStyle &style);
   void appendRun(const String &text, const TextStyle &style);
+  void appendInlineImage(const String &label, const TextStyle &style);
   void beginTextRow();
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
@@ -196,8 +202,12 @@ private:
   String decodeEntities(const String &value) const;
   String transliterateCyrillic(const String &value) const;
   String shortText(const String &value, int16_t maxWidth) const;
+  String shortImageLabel(const String &value, int16_t maxWidth) const;
   String lower(const String &value) const;
   bool isBlockTag(const String &tag) const;
+  bool isFullWidthImage(const String &attributes) const;
+  int16_t imageWidth(const String &label) const;
+  void addHistory(const String &url);
   void addRecent(const String &url, const String &title);
 
   void loadState();
