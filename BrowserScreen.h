@@ -3,6 +3,10 @@
 #include <Arduino.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include "FileFormats.h"
 #include "Screen.h"
@@ -21,6 +25,7 @@ public:
   void onEnter() override;
   void onResult(const ScreenResult &result) override;
   void handleTouch(const TouchPoint &point) override;
+  void tick(uint32_t nowMs) override;
 
 private:
   static const uint8_t MaxRecentSites = 8;
@@ -31,6 +36,11 @@ private:
   static const uint8_t MaxHistory = 8;
   static const uint8_t MaxStyleDepth = 16;
   static const uint8_t MaxPages = 32;
+  // A thumbnail is kept only while there is enough memory for it. The row
+  // limit still bounds metadata and placeholders for pathological pages.
+  static const uint16_t MaxEmbeddedImages = MaxRows;
+  static const uint8_t ImageJobQueueLength = 4;
+  static const uint16_t ImageUrlMaxLength = 384;
   // Keep enough of large legacy pages to reach their body while retaining a
   // bounded allocation on the ESP32.
   static const uint32_t MaxBodyBytes = 512UL * 1024UL;
@@ -88,6 +98,7 @@ private:
     bool image;
     String text;
     TextStyle style;
+    int16_t imageIndex;
     int16_t x;
     int16_t width;
   };
@@ -97,9 +108,33 @@ private:
     String imageLabel;
     bool imageLink;
     uint8_t imageLinkIndex;
+    int16_t imageIndex;
     int16_t contentWidth;
     uint8_t runCount;
     VisualRun runs[MaxRunsPerRow];
+  };
+
+  struct EmbeddedImage {
+    uint16_t *pixels;
+    uint8_t width;
+    uint8_t height;
+    String url;
+    uint32_t generation;
+    uint8_t state;
+  };
+
+  struct ImageJob {
+    uint16_t imageIndex;
+    uint32_t generation;
+    char url[ImageUrlMaxLength];
+  };
+
+  struct ImageResult {
+    uint16_t imageIndex;
+    uint32_t generation;
+    uint16_t *pixels;
+    uint8_t width;
+    uint8_t height;
   };
 
   struct StyleFrame {
@@ -128,6 +163,15 @@ private:
   String _message;
   String _titleBuffer;
   VisualRow _rows[MaxRows];
+  EmbeddedImage _embeddedImages[MaxEmbeddedImages];
+  uint16_t _embeddedImageCount;
+  uint16_t _nextImageToQueue;
+  uint32_t _imageGeneration;
+  volatile uint32_t _activeImageGeneration;
+  QueueHandle_t _imageJobs;
+  QueueHandle_t _imageResults;
+  TaskHandle_t _imageWorker;
+  SemaphoreHandle_t _httpMutex;
   uint16_t _rowCount;
   uint16_t _pageStarts[MaxPages];
   uint8_t _pageCount;
@@ -148,6 +192,7 @@ private:
   void drawHeader();
   void drawStartPage();
   void drawDocument();
+  void redrawDocument();
   void drawControls();
   void layout();
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
@@ -159,14 +204,15 @@ private:
   bool normalizeUrl(const String &value, String &normalized, String &error) const;
   bool parseUrl(const String &value, Url &url) const;
   bool fetch(const String &initialUrl, String &finalUrl, String &body, String &contentType,
-             String &downloadedPath, String &error);
+             String &downloadedPath, String &error, uint32_t downloadLimit = MaxDownloadBytes);
   bool requestOne(const Url &url, HttpResponse &response, WiFiClient *&client, String &error);
   bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs) const;
   int readByte(WiFiClient &client, uint32_t timeoutMs) const;
   bool readBody(WiFiClient &client, bool chunked, int32_t contentLength,
                 String &body, String &error) const;
   bool readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
-                        FileFormats::Format format, String &downloadedPath, String &error);
+                        FileFormats::Format format, String &downloadedPath, String &error,
+                        uint32_t downloadLimit);
   FileFormats::Format downloadableFormatForResponse(const String &contentType, const Url &url) const;
   bool isSupportedDownloadFile(const String &path, FileFormats::Format expected) const;
   String resolveUrl(const Url &base, const String &reference) const;
@@ -180,12 +226,22 @@ private:
   void resetRenderedRows();
   void appendText(const String &text);
   void appendBreak();
-  void appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth);
+  void appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth,
+                   int16_t imageIndex = -1);
   void appendStub(const String &label);
   void appendWord(const String &word, const TextStyle &style);
   void appendRun(const String &text, const TextStyle &style);
-  void appendInlineImage(const String &label, const TextStyle &style);
+  void appendInlineImage(const String &label, const TextStyle &style, int16_t imageIndex);
   void beginTextRow();
+  int16_t rowHeight(const VisualRow &row) const;
+  void drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) const;
+  int16_t fetchEmbeddedImage(const String &source);
+  void releaseEmbeddedImages();
+  void updateImageLayout();
+  void pumpImageJobs();
+  void collectImageResults();
+  bool fetchEmbeddedImageOnWorker(const String &url, uint16_t *&pixels, uint8_t &width, uint8_t &height);
+  static void imageWorkerTask(void *context);
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
   bool hasNextPage() const;

@@ -7,6 +7,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <esp32-hal-psram.h>
+
+// JPEGDEC's filesystem overload refers to File without its fs namespace.
+using File = fs::File;
+#include <JPEGDEC.h>
+#include <PNGdec.h>
+#include "third_party/AnimatedGIF/AnimatedGIF.h"
 
 #include "Navigator.h"
 #include "SdCardController.h"
@@ -19,9 +26,11 @@ namespace {
 const int16_t HeaderHeight = UiKit::AppBarHeight;
 const int16_t ControlsHeight = 42;
 const int16_t TextRowHeight = 22;
-const int16_t ImageRowHeight = TextRowHeight;
 const int16_t DocumentPadding = 7;
 const int16_t DocumentSidePadding = 8;
+const uint8_t ThumbnailMaxWidth = 150;
+const uint8_t ThumbnailMaxHeight = 150;
+const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
 const int16_t StartOpenButtonTop = HeaderHeight + 8;
 const int16_t StartOpenButtonHeight = 32;
 const int16_t RecentListTop = StartOpenButtonTop + StartOpenButtonHeight + 24;
@@ -117,6 +126,280 @@ uint64_t parseHttpDate(const String &source) {
   days += day - 1;
   return days * 86400ULL + hour * 3600UL + minute * 60UL + second;
 }
+
+// Decoding happens only while a document is loading, so a single callback
+// owner is sufficient. The decoder writes a tiny RGB565 surface rather than
+// allocating a full-size source canvas.
+class ThumbnailDecoder {
+public:
+  bool decode(const String &path, FileFormats::Format format, uint16_t *&pixels,
+              uint8_t &width, uint8_t &height) {
+    pixels = nullptr;
+    width = 0;
+    height = 0;
+    if (format == FileFormats::Format::Jpeg) return decodeJpeg(path, pixels, width, height);
+    if (format == FileFormats::Format::Png) return decodePng(path, pixels, width, height);
+    if (format == FileFormats::Format::Gif) return decodeGif(path, pixels, width, height);
+    return false;
+  }
+
+private:
+  static ThumbnailDecoder *_owner;
+  JPEGDEC _jpeg;
+  PNG _png;
+  AnimatedGIF *_gif = nullptr;
+  File _file;
+  uint16_t *_pixels = nullptr;
+  uint8_t _width = 0;
+  uint8_t _height = 0;
+  uint16_t _sourceWidth = 0;
+  uint16_t _sourceHeight = 0;
+  uint16_t _decodedWidth = 0;
+  uint16_t _decodedHeight = 0;
+
+  bool prepare(uint16_t sourceWidth, uint16_t sourceHeight, uint16_t decodedWidth,
+               uint16_t decodedHeight, uint16_t *&pixels, uint8_t &width, uint8_t &height) {
+    if (!sourceWidth || !sourceHeight || !decodedWidth || !decodedHeight) return false;
+    uint32_t scaledWidth = sourceWidth;
+    uint32_t scaledHeight = sourceHeight;
+    if (scaledWidth > ThumbnailMaxWidth) {
+      scaledHeight = (scaledHeight * ThumbnailMaxWidth) / scaledWidth;
+      scaledWidth = ThumbnailMaxWidth;
+    }
+    if (scaledHeight > ThumbnailMaxHeight) {
+      scaledWidth = (scaledWidth * ThumbnailMaxHeight) / scaledHeight;
+      scaledHeight = ThumbnailMaxHeight;
+    }
+    if (scaledWidth == 0) scaledWidth = 1;
+    if (scaledHeight == 0) scaledHeight = 1;
+    const size_t byteCount = (size_t)scaledWidth * scaledHeight * sizeof(uint16_t);
+    // Page previews may accumulate while the worker continues through an
+    // image-heavy page. Keep their backing storage out of scarce internal
+    // RAM on PSRAM-equipped ESP32-S3 boards.
+    _pixels = static_cast<uint16_t *>(psramFound() ? ps_malloc(byteCount) : malloc(byteCount));
+    if (!_pixels) return false;
+    memset(_pixels, 0, byteCount);
+    _width = (uint8_t)scaledWidth;
+    _height = (uint8_t)scaledHeight;
+    _sourceWidth = sourceWidth;
+    _sourceHeight = sourceHeight;
+    _decodedWidth = decodedWidth;
+    _decodedHeight = decodedHeight;
+    pixels = _pixels;
+    width = _width;
+    height = _height;
+    return true;
+  }
+
+  void discard() {
+    if (_file) _file.close();
+    if (_gif) {
+      _gif->close();
+      delete _gif;
+      _gif = nullptr;
+    }
+    if (_pixels) free(_pixels);
+    _pixels = nullptr;
+    _width = _height = 0;
+  }
+
+  bool decodeJpeg(const String &path, uint16_t *&pixels, uint8_t &width, uint8_t &height) {
+    _file = SD.open(path.c_str(), FILE_READ);
+    if (!_file) return false;
+    _owner = this;
+    if (_jpeg.open(_file, jpegDraw) != 1 || _jpeg.getJPEGType() != JPEG_MODE_BASELINE) {
+      _jpeg.close();
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    const uint16_t sourceWidth = _jpeg.getWidth();
+    const uint16_t sourceHeight = _jpeg.getHeight();
+    uint8_t scale = 1;
+    while (scale < 8 && (sourceWidth / scale > ThumbnailMaxWidth * 2 ||
+                         sourceHeight / scale > ThumbnailMaxHeight * 2)) scale *= 2;
+    const uint16_t decodedWidth = (sourceWidth + scale - 1) / scale;
+    const uint16_t decodedHeight = (sourceHeight + scale - 1) / scale;
+    if (!prepare(sourceWidth, sourceHeight, decodedWidth, decodedHeight, pixels, width, height)) {
+      _jpeg.close();
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    int options = scale == 8 ? JPEG_SCALE_EIGHTH : scale == 4 ? JPEG_SCALE_QUARTER :
+                  scale == 2 ? JPEG_SCALE_HALF : 0;
+    const bool ok = _jpeg.decode(0, 0, options) == 1;
+    _jpeg.close();
+    _owner = nullptr;
+    if (ok) {
+      if (_file) _file.close();
+      _pixels = nullptr;  // caller owns the completed thumbnail.
+      return true;
+    }
+    discard();
+    pixels = nullptr;
+    width = height = 0;
+    return false;
+  }
+
+  bool decodePng(const String &path, uint16_t *&pixels, uint8_t &width, uint8_t &height) {
+    _owner = this;
+    if (_png.open(path.c_str(), pngOpen, pngClose, pngRead, pngSeek, pngDraw) != PNG_SUCCESS ||
+        _png.isInterlaced()) {
+      _png.close();
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    if (!prepare((uint16_t)_png.getWidth(), (uint16_t)_png.getHeight(),
+                 (uint16_t)_png.getWidth(), (uint16_t)_png.getHeight(), pixels, width, height)) {
+      _png.close();
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    const bool ok = _png.decode(this, PNG_CHECK_CRC) == PNG_SUCCESS;
+    _png.close();
+    _owner = nullptr;
+    if (ok) {
+      if (_file) _file.close();
+      _pixels = nullptr;
+      return true;
+    }
+    discard();
+    pixels = nullptr;
+    width = height = 0;
+    return false;
+  }
+
+  bool decodeGif(const String &path, uint16_t *&pixels, uint8_t &width, uint8_t &height) {
+    _gif = new AnimatedGIF();
+    if (!_gif) return false;
+    _gif->begin(GIF_PALETTE_RGB565_LE);
+    _owner = this;
+    if (!_gif->open(path.c_str(), gifOpen, gifClose, gifRead, gifSeek, gifDraw)) {
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    if (!prepare(_gif->getCanvasWidth(), _gif->getCanvasHeight(),
+                 _gif->getCanvasWidth(), _gif->getCanvasHeight(), pixels, width, height)) {
+      _owner = nullptr;
+      discard();
+      return false;
+    }
+    int delay = 0;
+    const int result = _gif->playFrame(false, &delay, nullptr);
+    const bool ok = result >= 0 && _gif->getLastError() == GIF_SUCCESS;
+    _owner = nullptr;
+    if (ok) {
+      _gif->close();
+      delete _gif;
+      _gif = nullptr;
+      if (_file) _file.close();
+      _pixels = nullptr;
+      return true;
+    }
+    discard();
+    pixels = nullptr;
+    width = height = 0;
+    return false;
+  }
+
+  void store(uint16_t sourceX, uint16_t sourceY, uint16_t color, bool decodedCoordinates) {
+    if (!_pixels) return;
+    const uint16_t sourceWidth = decodedCoordinates ? _decodedWidth : _sourceWidth;
+    const uint16_t sourceHeight = decodedCoordinates ? _decodedHeight : _sourceHeight;
+    if (!sourceWidth || !sourceHeight) return;
+    const uint8_t x = (uint32_t)sourceX * _width / sourceWidth;
+    const uint8_t y = (uint32_t)sourceY * _height / sourceHeight;
+    if (x < _width && y < _height) _pixels[(uint16_t)y * _width + x] = color;
+  }
+
+  static int jpegDraw(JPEGDRAW *draw) {
+    if (!_owner || !draw || !draw->pPixels) return 0;
+    for (int y = 0; y < draw->iHeight; y++) {
+      for (int x = 0; x < draw->iWidthUsed; x++) {
+        _owner->store(draw->x + x, draw->y + y, draw->pPixels[y * draw->iWidth + x], true);
+      }
+    }
+    return 1;
+  }
+
+  static void *pngOpen(const char *name, int32_t *size) {
+    if (!_owner) return nullptr;
+    _owner->_file = SD.open(name, FILE_READ);
+    if (!_owner->_file) return nullptr;
+    *size = (int32_t)_owner->_file.size();
+    return &_owner->_file;
+  }
+
+  static void pngClose(void *handle) {
+    File *file = static_cast<File *>(handle);
+    if (file) file->close();
+  }
+
+  static int32_t pngRead(PNGFILE *file, uint8_t *buffer, int32_t length) {
+    if (!file || !file->fHandle) return 0;
+    return static_cast<File *>(file->fHandle)->read(buffer, length);
+  }
+
+  static int32_t pngSeek(PNGFILE *file, int32_t position) {
+    if (!file || !file->fHandle || position < 0) return 0;
+    return static_cast<File *>(file->fHandle)->seek(position) ? position : 0;
+  }
+
+  static int pngDraw(PNGDRAW *draw) {
+    if (!_owner || !draw) return 0;
+    uint16_t *line = static_cast<uint16_t *>(malloc((size_t)draw->iWidth * sizeof(uint16_t)));
+    if (!line) return 0;
+    _owner->_png.getLineAsRGB565(draw, line, PNG_RGB565_LITTLE_ENDIAN, 0);
+    for (int x = 0; x < draw->iWidth; x++) _owner->store(x, draw->y, line[x], false);
+    free(line);
+    return 1;
+  }
+
+  static void *gifOpen(const char *name, int32_t *size) {
+    return pngOpen(name, size);
+  }
+
+  static void gifClose(void *handle) {
+    pngClose(handle);
+  }
+
+  static int32_t gifRead(GIFFILE *file, uint8_t *buffer, int32_t length) {
+    if (!file || !file->fHandle) return 0;
+    return static_cast<File *>(file->fHandle)->read(buffer, length);
+  }
+
+  static int32_t gifSeek(GIFFILE *file, int32_t position) {
+    if (!file || !file->fHandle || position < 0) return 0;
+    if (!static_cast<File *>(file->fHandle)->seek(position)) return 0;
+    file->iPos = position;
+    return position;
+  }
+
+  static void gifDraw(GIFDRAW *draw) {
+    if (!_owner || !draw || !draw->pPixels || !draw->pPalette) return;
+    for (int x = 0; x < draw->iWidth; x++) {
+      const uint8_t paletteIndex = draw->pPixels[x];
+      if (draw->ucHasTransparency && paletteIndex == draw->ucTransparent) continue;
+      _owner->store(draw->iX + x, draw->iY + draw->y, draw->pPalette[paletteIndex], false);
+    }
+  }
+};
+
+ThumbnailDecoder *ThumbnailDecoder::_owner = nullptr;
+
+class HttpLock {
+public:
+  explicit HttpLock(SemaphoreHandle_t lock) : _lock(lock), _locked(lock && xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE) {}
+  ~HttpLock() { if (_locked) xSemaphoreGive(_lock); }
+  bool locked() const { return _locked; }
+private:
+  SemaphoreHandle_t _lock;
+  bool _locked;
+};
 }
 
 BrowserScreen::BrowserScreen(Navigator &navigator,
@@ -142,6 +425,14 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _message(),
     _titleBuffer(),
     _rowCount(0),
+    _embeddedImageCount(0),
+    _nextImageToQueue(0),
+    _imageGeneration(1),
+    _activeImageGeneration(0),
+    _imageJobs(xQueueCreate(ImageJobQueueLength, sizeof(ImageJob))),
+    _imageResults(xQueueCreate(ImageJobQueueLength, sizeof(ImageResult))),
+    _imageWorker(nullptr),
+    _httpMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
     _currentStyle{DefaultTextColor, false, false, false, false, 0},
     _styleDepth(0),
@@ -153,8 +444,20 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _openBounds{0, 0, 0, 0},
     _previousBounds{0, 0, 0, 0},
     _nextBounds{0, 0, 0, 0} {
+  for (uint16_t i = 0; i < MaxEmbeddedImages; i++) {
+    _embeddedImages[i] = {nullptr, 0, 0, "", 0, 0};
+  }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _recentBounds[i] = {0, 0, 0, 0};
+  }
+  if (_imageJobs && _imageResults) {
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+    const BaseType_t workerCore = 0;
+#else
+    const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
+#endif
+    xTaskCreatePinnedToCore(imageWorkerTask, "browser-images", 16384, this, tskIDLE_PRIORITY + 1,
+                            &_imageWorker, workerCore);
   }
 }
 
@@ -171,6 +474,12 @@ void BrowserScreen::onResult(const ScreenResult &result) {
   if (result.kind == ScreenResultKind::Text && result.text.length() > 0) {
     openUrl(result.text, true, true);
   }
+}
+
+void BrowserScreen::tick(uint32_t nowMs) {
+  (void)nowMs;
+  collectImageResults();
+  pumpImageJobs();
 }
 
 void BrowserScreen::handleTouch(const TouchPoint &point) {
@@ -311,30 +620,39 @@ void BrowserScreen::drawDocument() {
     const VisualRow &row = _rows[index];
     if (row.image) {
       uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
-      tft.drawRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, ImageRowHeight, color);
-      tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
-      tft.setFreeFont(&FreeSans9pt7b);
-      tft.setTextColor(color, TFT_BLACK);
-      tft.setTextDatum(ML_DATUM);
-      String label = row.imageLabel;
-      const int16_t labelWidth = _display.width() - DocumentSidePadding - 24;
-      while (label.length() > 3 && tft.textWidth(label + "...") > labelWidth) label.remove(label.length() - 1);
-      if (label != row.imageLabel) label += "...";
-      tft.drawString(label, DocumentSidePadding + 22, y + ImageRowHeight / 2);
-      tft.setTextDatum(TL_DATUM);
+      const int16_t height = rowHeight(row);
+      if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
+        const EmbeddedImage &image = _embeddedImages[row.imageIndex];
+        if (row.imageLink) tft.drawRect(DocumentSidePadding, y, image.width + 2, image.height + 2, color);
+        drawThumbnail(row.imageIndex, DocumentSidePadding + (row.imageLink ? 1 : 0), y + (row.imageLink ? 1 : 0));
+      } else {
+        const int16_t width = imageWidth(row.imageLabel);
+        if (row.imageLink) tft.drawRect(DocumentSidePadding, y, width, TextRowHeight, color);
+        tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
+        tft.setFreeFont(&FreeSans9pt7b);
+        tft.setTextColor(color, TFT_BLACK);
+        tft.setTextDatum(ML_DATUM);
+        tft.drawString(shortImageLabel(row.imageLabel, width - 26), DocumentSidePadding + 22, y + TextRowHeight / 2);
+        tft.setTextDatum(TL_DATUM);
+      }
     } else {
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
         const VisualRun &run = row.runs[runIndex];
         const int16_t x = DocumentSidePadding + run.x;
         if (run.image) {
           uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
-          tft.drawRect(x, y, run.width, ImageRowHeight, color);
-          tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
-          tft.setFreeFont(&FreeSans9pt7b);
-          tft.setTextColor(color, TFT_BLACK);
-          tft.setTextDatum(ML_DATUM);
-          tft.drawString(run.text, x + 22, y + ImageRowHeight / 2);
-          tft.setTextDatum(TL_DATUM);
+          if (run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
+            if (run.style.linkIndex) tft.drawRect(x, y, run.width, _embeddedImages[run.imageIndex].height + 2, color);
+            drawThumbnail(run.imageIndex, x + (run.style.linkIndex ? 1 : 0), y + (run.style.linkIndex ? 1 : 0));
+          } else {
+            if (run.style.linkIndex) tft.drawRect(x, y, run.width, TextRowHeight, color);
+            tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
+            tft.setFreeFont(&FreeSans9pt7b);
+            tft.setTextColor(color, TFT_BLACK);
+            tft.setTextDatum(ML_DATUM);
+            tft.drawString(run.text, x + 22, y + TextRowHeight / 2);
+            tft.setTextDatum(TL_DATUM);
+          }
           continue;
         }
         applyFont(run.style);
@@ -346,9 +664,16 @@ void BrowserScreen::drawDocument() {
         }
       }
     }
-    y += row.image ? ImageRowHeight : TextRowHeight;
+    y += rowHeight(row);
   }
   tft.setFreeFont();
+}
+
+void BrowserScreen::redrawDocument() {
+  if (!_display.isReady()) return;
+  _display.tft().fillRect(0, HeaderHeight, _display.width(),
+                          _display.height() - HeaderHeight - ControlsHeight, TFT_BLACK);
+  drawDocument();
 }
 
 void BrowserScreen::drawControls() {
@@ -381,10 +706,14 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
   int16_t rowY = HeaderHeight + DocumentPadding;
   for (uint16_t index = start; index < end; index++) {
     const VisualRow &row = _rows[index];
-    const int16_t rowHeight = row.image ? ImageRowHeight : TextRowHeight;
-    if (y >= rowY && y < rowY + rowHeight) {
+    const int16_t height = rowHeight(row);
+    if (y >= rowY && y < rowY + height) {
       if (row.image) {
-        bool insideImage = x >= DocumentSidePadding && x < _display.width() - DocumentSidePadding;
+        int16_t width = imageWidth(row.imageLabel);
+        if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
+          width = _embeddedImages[row.imageIndex].width + (row.imageLink ? 2 : 0);
+        }
+        bool insideImage = x >= DocumentSidePadding && x < DocumentSidePadding + width;
         return insideImage && row.imageLinkIndex ? _linkUrls[row.imageLinkIndex - 1] : "";
       }
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
@@ -396,7 +725,7 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
       }
       return "";
     }
-    rowY += rowHeight;
+    rowY += height;
   }
   return "";
 }
@@ -425,6 +754,11 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return false;
   }
+
+  // Invalidates queued image jobs before a new page takes the shared HTTP
+  // client. A task already in a network read is allowed to finish safely;
+  // its result is discarded.
+  releaseEmbeddedImages();
 
   _showStart = false;
   _message = "Loading...";
@@ -538,7 +872,13 @@ bool BrowserScreen::parseUrl(const String &value, Url &url) const {
 }
 
 bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &body,
-                          String &contentType, String &downloadedPath, String &error) {
+                          String &contentType, String &downloadedPath, String &error,
+                          uint32_t downloadLimit) {
+  HttpLock lock(_httpMutex);
+  if (!lock.locked()) {
+    error = "Browser is busy";
+    return false;
+  }
   body = "";
   contentType = "";
   downloadedPath = "";
@@ -579,7 +919,7 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
       error = "Compressed file response unsupported";
     } else if (downloadable) {
       readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
-                                downloadedPath, error);
+                                downloadedPath, error, downloadLimit);
     } else {
       readOk = readBody(*client, response.chunked, response.contentLength, body, error);
     }
@@ -665,6 +1005,7 @@ bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutM
   line = "";
   uint32_t started = millis();
   while (millis() - started < timeoutMs) {
+    if (_activeImageGeneration && _activeImageGeneration != _imageGeneration) return false;
     while (client.available()) {
       int value = client.read();
       if (value < 0) continue;
@@ -685,6 +1026,7 @@ bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutM
 int BrowserScreen::readByte(WiFiClient &client, uint32_t timeoutMs) const {
   uint32_t started = millis();
   while (millis() - started < timeoutMs) {
+    if (_activeImageGeneration && _activeImageGeneration != _imageGeneration) return -1;
     if (client.available()) return client.read();
     if (!client.connected()) return -1;
     delay(1);
@@ -789,14 +1131,16 @@ bool BrowserScreen::isSupportedDownloadFile(const String &path, FileFormats::For
 }
 
 bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
-                                     FileFormats::Format format, String &downloadedPath, String &error) {
+                                     FileFormats::Format format, String &downloadedPath, String &error,
+                                     uint32_t downloadLimit) {
   downloadedPath = "";
   if (!_sdCard.isMounted()) {
     error = "SD card required for downloads";
     return false;
   }
-  if (contentLength > (int32_t)MaxDownloadBytes) {
-    error = "File exceeds 16 MiB limit";
+  if (downloadLimit == 0 || downloadLimit > MaxDownloadBytes) downloadLimit = MaxDownloadBytes;
+  if (contentLength > (int32_t)downloadLimit) {
+    error = "File exceeds download limit";
     return false;
   }
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
@@ -841,8 +1185,8 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   };
   uint32_t total = 0;
   auto writeBytes = [&](const uint8_t *bytes, uint16_t length) -> bool {
-    if (length > MaxDownloadBytes - total) {
-      error = "File exceeds 16 MiB limit";
+    if (length > downloadLimit - total) {
+      error = "File exceeds download limit";
       return false;
     }
     if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
@@ -905,8 +1249,8 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
         } while (sizeLine.length());
         break;
       }
-      if (amount > MaxDownloadBytes - total || !receiveBytes(amount)) {
-        if (error.length() == 0) error = "File exceeds 16 MiB limit";
+      if (amount > downloadLimit - total || !receiveBytes(amount)) {
+        if (error.length() == 0) error = "File exceeds download limit";
         complete = false;
         break;
       }
@@ -1141,8 +1485,19 @@ void BrowserScreen::renderDocument(const String &html) {
         appendBreak();
       } else if (tag == "img") {
         String alt = decodeEntities(attributeValue(attributes, "alt"));
-        appendImage(alt.length() ? alt : "image", _currentStyle.link, _currentStyle.linkIndex,
-                    isFullWidthImage(attributes));
+        String source = decodeEntities(attributeValue(attributes, "src"));
+        int16_t imageIndex = fetchEmbeddedImage(source);
+        uint8_t imageLinkIndex = _currentStyle.linkIndex;
+        if (imageLinkIndex == 0 && source.length()) {
+          Url base;
+          String resolved;
+          String normalized;
+          String error;
+          if (parseUrl(_currentUrl, base)) resolved = resolveUrl(base, source);
+          if (normalizeUrl(resolved, normalized, error)) imageLinkIndex = registerLink(normalized);
+        }
+        appendImage(alt.length() ? alt : "image", imageLinkIndex != 0, imageLinkIndex,
+                    isFullWidthImage(attributes), imageIndex);
       } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
                  tag == "embed" || tag == "canvas") {
         appendStub(tag);
@@ -1173,6 +1528,7 @@ void BrowserScreen::renderPlainText(const String &text, const String &title) {
 }
 
 void BrowserScreen::resetRenderedRows() {
+  releaseEmbeddedImages();
   _rowCount = 0;
   _pageCount = 0;
   _styleDepth = 0;
@@ -1207,12 +1563,13 @@ void BrowserScreen::appendBreak() {
   }
 }
 
-void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth) {
+void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth,
+                                int16_t imageIndex) {
   TextStyle style = _currentStyle;
   style.link = linked;
   style.linkIndex = linkIndex;
   if (!fullWidth) {
-    appendInlineImage(label, style);
+    appendInlineImage(label, style, imageIndex);
     return;
   }
   appendBreak();
@@ -1222,14 +1579,18 @@ void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIn
   row.imageLabel = label;
   row.imageLink = linked;
   row.imageLinkIndex = linkIndex;
+  row.imageIndex = imageIndex;
   row.contentWidth = 0;
   row.runCount = 0;
 }
 
-void BrowserScreen::appendInlineImage(const String &label, const TextStyle &style) {
+void BrowserScreen::appendInlineImage(const String &label, const TextStyle &style, int16_t imageIndex) {
   const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
-  String displayLabel = shortImageLabel(label, maxWidth - 26);
-  int16_t width = imageWidth(displayLabel);
+  const bool hasImageSlot = imageIndex >= 0 && imageIndex < _embeddedImageCount;
+  const bool hasThumbnail = hasImageSlot && _embeddedImages[imageIndex].pixels;
+  String displayLabel = hasThumbnail ? "" : shortImageLabel(label, maxWidth - 26);
+  int16_t width = hasThumbnail ? _embeddedImages[imageIndex].width + (style.linkIndex ? 2 : 0)
+                                : imageWidth(displayLabel);
   beginTextRow();
   if (_rowCount == 0) return;
 
@@ -1259,6 +1620,7 @@ void BrowserScreen::appendInlineImage(const String &label, const TextStyle &styl
   run.image = true;
   run.text = displayLabel;
   run.style = style;
+  run.imageIndex = imageIndex;
   run.x = row->contentWidth;
   run.width = width;
   row->contentWidth += width;
@@ -1323,10 +1685,11 @@ void BrowserScreen::appendRun(const String &text, const TextStyle &style) {
     run.text += text;
     run.width += width;
   } else if (row.runCount < MaxRunsPerRow) {
-    VisualRun &run = row.runs[row.runCount++];
-    run.image = false;
-    run.text = text;
-    run.style = style;
+  VisualRun &run = row.runs[row.runCount++];
+  run.image = false;
+  run.text = text;
+  run.style = style;
+  run.imageIndex = -1;
     run.x = row.contentWidth;
     run.width = width;
   } else {
@@ -1347,8 +1710,189 @@ void BrowserScreen::beginTextRow() {
   row.imageLabel = "";
   row.imageLink = false;
   row.imageLinkIndex = 0;
+  row.imageIndex = -1;
   row.contentWidth = 0;
   row.runCount = 0;
+}
+
+int16_t BrowserScreen::rowHeight(const VisualRow &row) const {
+  int16_t height = TextRowHeight;
+  if (row.image) {
+    if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
+      const EmbeddedImage &image = _embeddedImages[row.imageIndex];
+      if (image.pixels) height = image.height + (row.imageLink ? 2 : 0);
+    }
+  } else {
+    for (uint8_t i = 0; i < row.runCount; i++) {
+      const VisualRun &run = row.runs[i];
+      if (!run.image || run.imageIndex < 0 || run.imageIndex >= _embeddedImageCount) continue;
+      const EmbeddedImage &image = _embeddedImages[run.imageIndex];
+      if (!image.pixels) continue;
+      const int16_t imageHeight = image.height + (run.style.linkIndex ? 2 : 0);
+      if (imageHeight > height) height = imageHeight;
+    }
+  }
+  return height > TextRowHeight ? height : TextRowHeight;
+}
+
+void BrowserScreen::drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) const {
+  if (imageIndex < 0 || imageIndex >= _embeddedImageCount) return;
+  const EmbeddedImage &image = _embeddedImages[imageIndex];
+  if (!image.pixels || !image.width || !image.height) return;
+  _display.tft().pushImage(x, y, image.width, image.height, image.pixels);
+}
+
+int16_t BrowserScreen::fetchEmbeddedImage(const String &source) {
+  if (source.length() == 0 || _embeddedImageCount >= MaxEmbeddedImages || !_wifi.isConnected() ||
+      source.length() >= ImageUrlMaxLength) return -1;
+  Url base;
+  String resolved;
+  String url;
+  String error;
+  if (!parseUrl(_currentUrl, base)) return -1;
+  resolved = resolveUrl(base, source);
+  if (!normalizeUrl(resolved, url, error)) return -1;
+
+  // Pages commonly repeat logos, tracking pixels, and article thumbnails.
+  // Reuse the same pending or decoded slot by canonical URL rather than
+  // downloading and allocating it again.
+  for (uint16_t i = 0; i < _embeddedImageCount; i++) {
+    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].url == url) return i;
+  }
+
+  const uint16_t index = _embeddedImageCount++;
+  _embeddedImages[index] = {nullptr, 0, 0, url, _imageGeneration, 0};
+  return index;
+}
+
+bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t *&pixels,
+                                               uint8_t &width, uint8_t &height) {
+  pixels = nullptr;
+  width = height = 0;
+
+  String finalUrl;
+  String body;
+  String contentType;
+  String downloadedPath;
+  String error;
+  if (!fetch(url, finalUrl, body, contentType, downloadedPath, error, MaxEmbeddedImageBytes) ||
+      downloadedPath.length() == 0) {
+    return false;
+  }
+  if (FileFormats::group(FileFormats::fromPath(downloadedPath)) != FileFormats::Group::Image) {
+    if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      SD.remove(downloadedPath.c_str());
+      SpiBusLock::unlock();
+    }
+    return false;
+  }
+
+  // Both decoders contain sizeable line buffers, so keep this out of the
+  // main Arduino task stack. Browsing loads images serially.
+  static ThumbnailDecoder decoder;
+  SpiBusLock::lock();
+  const bool decoded = decoder.decode(downloadedPath, FileFormats::fromPath(downloadedPath), pixels, width, height);
+  SpiBusLock::unlock();
+  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    SD.remove(downloadedPath.c_str());
+    SpiBusLock::unlock();
+  }
+  if (!decoded || !pixels || !width || !height) {
+    if (pixels) free(pixels);
+    pixels = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void BrowserScreen::releaseEmbeddedImages() {
+  _imageGeneration++;
+  if (_imageGeneration == 0) _imageGeneration = 1;
+  for (uint16_t i = 0; i < _embeddedImageCount; i++) {
+    if (_embeddedImages[i].pixels) free(_embeddedImages[i].pixels);
+    _embeddedImages[i] = {nullptr, 0, 0, "", 0, 0};
+  }
+  _embeddedImageCount = 0;
+  _nextImageToQueue = 0;
+}
+
+void BrowserScreen::updateImageLayout() {
+  for (uint16_t rowIndex = 0; rowIndex < _rowCount; rowIndex++) {
+    VisualRow &row = _rows[rowIndex];
+    if (row.image) continue;
+    int16_t x = 0;
+    for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
+      VisualRun &run = row.runs[runIndex];
+      if (run.image && run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
+        const EmbeddedImage &image = _embeddedImages[run.imageIndex];
+        if (image.pixels) run.width = image.width + (run.style.linkIndex ? 2 : 0);
+      }
+      run.x = x;
+      x += run.width;
+    }
+    row.contentWidth = x;
+  }
+}
+
+void BrowserScreen::pumpImageJobs() {
+  if (!_imageJobs || _showStart || _message.length()) return;
+  while (_nextImageToQueue < _embeddedImageCount) {
+    EmbeddedImage &image = _embeddedImages[_nextImageToQueue];
+    const uint16_t index = _nextImageToQueue++;
+    if (image.state != 0 || image.generation != _imageGeneration || image.url.length() >= ImageUrlMaxLength) continue;
+    ImageJob job{};
+    job.imageIndex = index;
+    job.generation = image.generation;
+    image.url.toCharArray(job.url, sizeof(job.url));
+    if (xQueueSend(_imageJobs, &job, 0) != pdTRUE) {
+      _nextImageToQueue--;
+      return;
+    }
+    image.state = 1;
+  }
+}
+
+void BrowserScreen::collectImageResults() {
+  if (!_imageResults) return;
+  bool redraw = false;
+  ImageResult result{};
+  while (xQueueReceive(_imageResults, &result, 0) == pdTRUE) {
+    if (result.generation == _imageGeneration && result.imageIndex < _embeddedImageCount) {
+      EmbeddedImage &image = _embeddedImages[result.imageIndex];
+      if (image.generation == result.generation && image.state == 1 && result.pixels && result.width && result.height) {
+        image.pixels = result.pixels;
+        image.width = result.width;
+        image.height = result.height;
+        image.state = 2;
+        redraw = true;
+        continue;
+      }
+      if (image.generation == result.generation && image.state == 1) image.state = 3;
+    }
+    if (result.pixels) free(result.pixels);
+  }
+  if (redraw && !_showStart && _message.length() == 0) {
+    updateImageLayout();
+    buildPages();
+    redrawDocument();
+  }
+}
+
+void BrowserScreen::imageWorkerTask(void *context) {
+  BrowserScreen *screen = static_cast<BrowserScreen *>(context);
+  ImageJob job{};
+  while (true) {
+    if (xQueueReceive(screen->_imageJobs, &job, portMAX_DELAY) != pdTRUE) continue;
+    ImageResult result{};
+    result.imageIndex = job.imageIndex;
+    result.generation = job.generation;
+    if (job.generation == screen->_imageGeneration) {
+      screen->_activeImageGeneration = job.generation;
+      screen->fetchEmbeddedImageOnWorker(String(job.url), result.pixels, result.width, result.height);
+      screen->_activeImageGeneration = 0;
+    }
+    xQueueSend(screen->_imageResults, &result, portMAX_DELAY);
+  }
 }
 
 void BrowserScreen::buildPages() {
@@ -1359,7 +1903,7 @@ void BrowserScreen::buildPages() {
   int16_t y = HeaderHeight + DocumentPadding;
   _pageStarts[_pageCount++] = 0;
   for (uint16_t i = 0; i < _rowCount; i++) {
-    int16_t height = _rows[i].image ? ImageRowHeight : TextRowHeight;
+    int16_t height = rowHeight(_rows[i]);
     if (y + height > bottom && i > first) {
       if (_pageCount >= MaxPages) break;
       first = i;
