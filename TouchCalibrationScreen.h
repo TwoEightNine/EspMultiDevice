@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "Screen.h"
+#include "UiKit.h"
 
 class TouchCalibrationScreen : public Screen {
 public:
@@ -23,7 +24,7 @@ private:
   };
 
   static const uint8_t GridSize = 4;
-  static const int16_t HeaderHeight = 44;
+  static const int16_t HeaderHeight = UiKit::AppBarHeight;
   static const int16_t InfoHeight = 46;
   static const int16_t TargetSize = 28;
   static const int16_t ButtonWidth = 210;
@@ -43,12 +44,10 @@ private:
   void drawCalibrationMode();
   void drawHeader(const char *title);
   void drawButton(const char *label, int16_t x, int16_t y, bool selected);
-  void drawBackButton();
   void drawCalibrationTarget();
   void drawCalibrationTouch(const TouchPoint &point, const char *status);
   void acceptCalibrationPoint(const TouchPoint &point);
   bool inButton(int16_t x, int16_t y, int16_t index) const;
-  bool inBackButton(int16_t x, int16_t y) const;
   int16_t targetX(uint8_t column) const;
   int16_t targetY(uint8_t row) const;
   void resetCalibration();

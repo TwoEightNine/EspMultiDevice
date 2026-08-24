@@ -60,11 +60,53 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 
 ## Browser
 
-The Home Browser app opens a start page with up to eight recent sites. Tap **Open a new page** (or **New URL**) to enter a URL with the on-screen keyboard; a URL without a scheme is treated as `https://`. Recent entries are tappable, while hyperlinks in rendered page content are intentionally plain, non-tappable text.
+The Home Browser app stores up to eight recent sites and shows the three newest on its start page. Tap **Open a new page** (or **New URL**) to enter a URL with the on-screen keyboard; a URL without a scheme is treated as `https://`. Recent entries are tappable, while hyperlinks in rendered page content are intentionally plain, non-tappable text.
 
 The browser supports `http://` and `https://` GET requests, up to five redirects, chunked or fixed-length uncompressed responses, and a bounded cookie jar. It retains up to 512 KiB from a response rather than rejecting a large page, then renders its readable static text as paged styled rows. Inline HTML color, bold, italic, and link underlining are supported; external stylesheets, CSS classes, JavaScript, and link activation are ignored. Images are 20-pixel placeholders with an icon and their `alt` text, shown blue inside a link. Cyrillic text is temporarily transliterated to Latin. Pages that contain only JavaScript report that limitation; media, embeds, and forms appear as text stubs. HTTP Basic authentication and form login are not supported.
 
 Recent sites and cookies are stored as plaintext in `/.system/browser_state.txt` on the SD card. Browser operation continues without an SD card, but no data persists. HTTPS certificate validation is deliberately disabled for this initial compatibility-focused version: do not use the browser for sensitive accounts or private information.
+
+## UI Kit
+
+`UiKit.h/.cpp` is the shared drawing contract for navigable application screens. Use it instead of duplicating header, list-row, ellipsis, icon-scaling, or navigation-hit-test code. Home, Splash, and the full-screen Image Viewer are intentional exceptions; the viewer uses only the kit's close affordance.
+
+### App bars
+
+Draw an app bar after clearing the screen and before drawing content:
+
+```cpp
+#include "UiKit.h"
+
+UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
+```
+
+The helper draws a 48 px `#111` bar, a white 40×40 back icon, and a left-aligned font-4 title. The title begins at x=56, is visually centered vertically (including the font-4 baseline correction), and ellipsizes before the 16 px trailing margin. Pass `UiKit::NavigationIcon::Close` as the fourth argument for a dismiss action such as text entry.
+
+Reserve y=0–47 for the bar. The navigation target is deliberately the entire leading corner before the title (x=0–55, y=0–47), not just the icon:
+
+```cpp
+if (UiKit::navigationIconContains(point.x, point.y)) {
+  _navigator.pop();
+  return;
+}
+```
+
+### List cells
+
+Use `UiKit::drawListCell()` for each standard row. It accepts the display width, row y-coordinate, primary label, and optional 16×16 monochrome XBM icon plus color:
+
+```cpp
+const int16_t rowY = UiKit::AppBarHeight + 16;
+UiKit::drawListCell(tft, _display.width(), rowY, F("Wi-Fi"));
+UiKit::drawListCell(tft, _display.width(), rowY + UiKit::ListCellHeight,
+                    fileName, ic_file, TFT_LIGHTGREY);
+```
+
+Each cell is 40 px high. Labels use font 2; optional icons are scaled to 32×32 and vertically centered. Text starts at x=16 without an icon or x=56 with one. The 1 px dark-gray divider begins at that same text x-coordinate and ends 16 px from the right edge. Labels ellipsize to preserve trailing metadata; the optional final `trailingText` argument renders compact, right-aligned detail such as Wi-Fi security and RSSI.
+
+The drawing helper does not install click handlers. The owning screen must make the **entire cell** tappable—x=0 through the display width and y through `rowY + UiKit::ListCellHeight`—rather than limiting hits to the label or icon. Recalculate pagination and lower content layout from `UiKit::ListCellHeight`; do not copy an old row-height constant.
+
+`drawTopAppBar()` and `drawListCell()` restore TFT_eSPI's default free-font and top-left text datum. Set any specialized font, datum, or color after calling a helper.
 
 ## Screen Architecture
 

@@ -1,10 +1,12 @@
 #include "WiFiScreen.h"
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 namespace {
-const int16_t TopBarHeight = 54;
-const int16_t ContentPadding = 16;
+const int16_t ContentPadding = UiKit::ContentPadding;
+const int16_t EnabledRowY = UiKit::AppBarHeight;
+const int16_t FirstNetworkRowY = 124;
 const uint16_t ButtonColor = TFT_DARKGREY;
 const uint16_t ActiveColor = TFT_BLUE;
 const uint16_t MutedColor = TFT_LIGHTGREY;
@@ -26,9 +28,9 @@ WiFiScreen::WiFiScreen(Navigator &navigator,
     _lastError(),
     _lastSsid(),
     _selectedSsid(),
-    _switchBounds{0, SwitchY, SwitchW, SwitchH},
-    _forgetBounds{ContentPadding, 208, 200, 42},
-    _rescanBounds{ContentPadding, 278, 120, 38} {
+    _switchBounds{0, EnabledRowY, SwitchW, SwitchH},
+    _forgetBounds{ContentPadding, 174, 200, 42},
+    _rescanBounds{ContentPadding, 276, 120, 38} {
 }
 
 void WiFiScreen::onEnter() {
@@ -62,12 +64,13 @@ void WiFiScreen::handleTouch(const TouchPoint &point) {
   }
   _lastTouchDown = true;
 
-  if (point.x >= 10 && point.x < 90 && point.y >= 10 && point.y < 44) {
+  if (UiKit::navigationIconContains(point.x, point.y)) {
     _navigator.pop();
     return;
   }
 
-  if (contains(_switchBounds, point.x, point.y)) {
+  const Rect enabledRow = {0, EnabledRowY, _display.width(), UiKit::ListCellHeight};
+  if (contains(enabledRow, point.x, point.y)) {
     _wifi.setEnabled(!_wifi.isEnabled());
     _forceDraw = true;
     draw();
@@ -97,11 +100,11 @@ void WiFiScreen::handleTouch(const TouchPoint &point) {
     return;
   }
 
-  const int16_t firstRowY = 148;
-  const int16_t rowHeight = 30;
+  const int16_t firstRowY = FirstNetworkRowY;
+  const int16_t rowHeight = UiKit::ListCellHeight;
   for (uint8_t i = 0; i < _wifi.networkCount() && i < VisibleNetworkCount; i++) {
-    Rect row = {ContentPadding, (int16_t)(firstRowY + i * rowHeight),
-                _display.width() - 2 * ContentPadding, rowHeight};
+    Rect row = {0, (int16_t)(firstRowY + i * rowHeight),
+                _display.width(), rowHeight};
     if (contains(row, point.x, point.y)) {
       _selectedSsid = _wifi.networkAt(i).ssid;
       _navigator.push(ScreenId::TextInput,
@@ -140,7 +143,7 @@ void WiFiScreen::draw() {
   if (!_wifi.isEnabled()) {
     TFT_eSPI &tft = _display.tft();
     tft.setTextColor(MutedColor, TFT_BLACK);
-    tft.drawString("Wi-Fi is disabled", ContentPadding, 132, 2);
+    tft.drawString("Wi-Fi is disabled", ContentPadding, 120, 2);
   } else if (_wifi.isConnected()) {
     drawConnected();
   } else {
@@ -158,26 +161,15 @@ void WiFiScreen::draw() {
 }
 
 void WiFiScreen::drawTopBar() {
-  TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawLine(18, 27, 34, 19, TFT_WHITE);
-  tft.drawLine(18, 27, 34, 35, TFT_WHITE);
-  tft.drawLine(18, 27, 48, 27, TFT_WHITE);
-  tft.drawString("Wi-Fi", 108, 16, 4);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Wi-Fi"));
 }
 
 void WiFiScreen::drawEnabledRow() {
-  TFT_eSPI &tft = _display.tft();
   _switchBounds = {_display.width() - ContentPadding - SwitchW,
-                   SwitchY, SwitchW, SwitchH};
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Enabled", ContentPadding, 85, 2);
-  tft.setTextDatum(TL_DATUM);
+                   (int16_t)(EnabledRowY + (UiKit::ListCellHeight - SwitchH) / 2),
+                   SwitchW, SwitchH};
+  UiKit::drawListCell(_display.tft(), _display.width(), EnabledRowY, F("Enabled"));
   drawSwitch();
-  tft.drawFastHLine(ContentPadding, TopBarHeight + 52,
-                    _display.width() - 2 * ContentPadding, TFT_DARKGREY);
 }
 
 void WiFiScreen::drawSwitch() {
@@ -196,9 +188,9 @@ void WiFiScreen::drawConnected() {
   TFT_eSPI &tft = _display.tft();
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(_wifi.ssid(), ContentPadding, 126, 2);
+  tft.drawString(_wifi.ssid(), ContentPadding, 116, 2);
   tft.setTextColor(MutedColor, TFT_BLACK);
-  tft.drawString(_wifi.networkType(), ContentPadding, 150, 2);
+  tft.drawString(_wifi.networkType(), ContentPadding, 140, 2);
   drawButton(_forgetBounds, "Forget network", ButtonColor);
 }
 
@@ -217,38 +209,32 @@ void WiFiScreen::drawNetworkList() {
   TFT_eSPI &tft = _display.tft();
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Available networks", ContentPadding, 120, 2);
+  tft.drawString("Available networks", ContentPadding, 108, 2);
   if (_wifi.error().length() > 0) {
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(_wifi.error(), ContentPadding + 220, 123, 1);
+    tft.drawString(_wifi.error(), ContentPadding + 220, 111, 1);
   }
 
-  const int16_t firstRowY = 148;
-  const int16_t rowHeight = 30;
+  const int16_t firstRowY = FirstNetworkRowY;
+  const int16_t rowHeight = UiKit::ListCellHeight;
   uint8_t shown = _wifi.networkCount() < VisibleNetworkCount
                     ? _wifi.networkCount() : VisibleNetworkCount;
   for (uint8_t i = 0; i < shown; i++) {
     const WiFiNetworkInfo &network = _wifi.networkAt(i);
     int16_t y = firstRowY + i * rowHeight;
-    tft.drawFastHLine(ContentPadding, y + rowHeight - 1,
-                      _display.width() - 2 * ContentPadding, TFT_DARKGREY);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(network.ssid, ContentPadding, y + 4, 2);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(MutedColor, TFT_BLACK);
     String details = String(WiFiController::securityType(network.authMode)) +
                      " " + String(network.rssi) + "dBm";
-    tft.drawString(details, _display.width() - ContentPadding, y + 4, 1);
-    tft.setTextDatum(TL_DATUM);
+    UiKit::drawListCell(tft, _display.width(), y, network.ssid,
+                        nullptr, TFT_WHITE, details);
   }
 
   if (shown == 0) {
     tft.setTextColor(MutedColor, TFT_BLACK);
     tft.drawString(_wifi.error().length() > 0 ? _wifi.error() : "No networks found",
-                   ContentPadding, 158, 2);
+                   ContentPadding, 148, 2);
   }
 
-  _rescanBounds = {ContentPadding, shown == 0 ? 208 : (int16_t)(firstRowY + shown * rowHeight + 8),
+  _rescanBounds = {ContentPadding, shown == 0 ? 192 : (int16_t)(firstRowY + shown * rowHeight + 8),
                    120, 38};
   drawButton(_rescanBounds, "Rescan", ButtonColor);
 }

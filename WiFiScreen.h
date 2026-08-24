@@ -25,8 +25,7 @@ private:
     int16_t h;
   };
 
-  static const uint8_t VisibleNetworkCount = 4;
-  static const int16_t SwitchY = 68;
+  static const uint8_t VisibleNetworkCount = 3;
   static const int16_t SwitchW = 72;
   static const int16_t SwitchH = 34;
 

@@ -5,6 +5,7 @@
 #include "AudioPlayerScreen.h"
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 #include <SD.h>
 #include <string.h>
@@ -137,7 +138,7 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
   if (_lastTouchDown) return;
   _lastTouchDown = true;
 
-  if (point.x >= 10 && point.x < BackTouchWidth && point.y >= 10 && point.y < 44) {
+  if (UiKit::navigationIconContains(point.x, point.y)) {
     _navigator.pop();
     return;
   }
@@ -821,13 +822,7 @@ void AudioPlayerScreen::draw(bool force) {
 }
 
 void AudioPlayerScreen::drawTopBar() {
-  TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawLine(18, 27, 34, 19, TFT_WHITE);
-  tft.drawLine(18, 27, 34, 35, TFT_WHITE);
-  tft.drawLine(18, 27, 48, 27, TFT_WHITE);
-  tft.drawString(F("Audio"), 108, 16, 4);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Audio"));
 }
 
 void AudioPlayerScreen::drawDynamic(bool force) {

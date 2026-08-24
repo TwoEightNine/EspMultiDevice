@@ -29,6 +29,13 @@ public:
   virtual void onExit() {
   }
 
+  // Called when this screen becomes active again after the screen above it
+  // is closed. The default preserves the existing behavior for screens that
+  // do not need to distinguish a fresh entry from a return.
+  virtual void onResume() {
+    onEnter();
+  }
+
   virtual void onResult(const ScreenResult &result) {
     (void)result;
   }

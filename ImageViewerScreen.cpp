@@ -5,6 +5,7 @@
 #include "third_party/AnimatedGIF/AnimatedGIF.cpp"
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 #include <SD.h>
 #include <esp32-hal-psram.h>
@@ -292,7 +293,7 @@ void ImageViewerScreen::handleTouch(const TouchPoint &point) {
   }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
-  if (point.x < CloseTouchSize && point.y < CloseTouchSize) _navigator.pop();
+  if (UiKit::navigationIconContains(point.x, point.y)) _navigator.pop();
 }
 
 void ImageViewerScreen::reset() {
@@ -380,11 +381,9 @@ void ImageViewerScreen::draw() {
 void ImageViewerScreen::drawCloseIcon() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.fillRoundRect(2, 2, 52, 52, 8, TFT_BLACK);
-  for (int16_t offset = 0; offset < 4; offset++) {
-    tft.drawLine(12 + offset, 12, 44 + offset, 44, TFT_WHITE);
-    tft.drawLine(44 + offset, 12, 12 + offset, 44, TFT_WHITE);
-  }
+  tft.fillRect(0, 0, UiKit::NavigationIconSize, UiKit::AppBarHeight, TFT_BLACK);
+  // The image viewer deliberately remains full-screen; draw only the kit's close affordance.
+  UiKit::drawTopAppBar(tft, UiKit::NavigationIconSize, String(), UiKit::NavigationIcon::Close);
 }
 
 void ImageViewerScreen::drawError() {

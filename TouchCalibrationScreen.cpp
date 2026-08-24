@@ -1,6 +1,7 @@
 #include "TouchCalibrationScreen.h"
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 #include <string.h>
 
@@ -33,6 +34,19 @@ void TouchCalibrationScreen::handleTouch(const TouchPoint &point) {
     _lastTouchDown = false;
     if (_mode == Mode::Calibrate) {
       _calibrationWaitingForRelease = false;
+    }
+    return;
+  }
+
+  if (UiKit::navigationIconContains(point.x, point.y)) {
+    if (_mode == Mode::Menu) {
+      _navigator.pop();
+    } else {
+      _touch.setCalibrationCapture(false);
+      _calibrationWaitingForRelease = false;
+      _mode = Mode::Menu;
+      _status = "";
+      draw();
     }
     return;
   }
@@ -78,13 +92,6 @@ void TouchCalibrationScreen::handleTouch(const TouchPoint &point) {
   }
 
   if (_mode == Mode::Draw) {
-    if (inBackButton(point.x, point.y)) {
-      _mode = Mode::Menu;
-      _status = "";
-      draw();
-      return;
-    }
-
     TFT_eSPI &tft = _display.tft();
     tft.fillRect(0, HeaderHeight, _display.width(), _display.height() - HeaderHeight, TFT_BLACK);
     int16_t dotY = min((int16_t)point.y, (int16_t)(_display.height() - InfoHeight - 2));
@@ -123,10 +130,8 @@ void TouchCalibrationScreen::draw() {
 }
 
 void TouchCalibrationScreen::drawMenu() {
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Touch screen"));
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Touch screen"), _display.width() / 2, 28, 4);
 
   int16_t firstY = (_display.height() - (3 * ButtonHeight + 2 * ButtonGap)) / 2;
   drawButton("Draw", (_display.width() - ButtonWidth) / 2, firstY, false);
@@ -165,11 +170,7 @@ void TouchCalibrationScreen::drawCalibrationMode() {
 }
 
 void TouchCalibrationScreen::drawHeader(const char *title) {
-  TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(title, 62, 16, 4);
-  drawBackButton();
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), title);
 }
 
 void TouchCalibrationScreen::drawButton(const char *label,
@@ -184,15 +185,6 @@ void TouchCalibrationScreen::drawButton(const char *label,
   tft.setTextColor(TFT_WHITE, fill);
   tft.drawString(label, x + ButtonWidth / 2, y + ButtonHeight / 2, 2);
   tft.setTextDatum(TL_DATUM);
-}
-
-void TouchCalibrationScreen::drawBackButton() {
-  TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawLine(12, 27, 28, 19, TFT_WHITE);
-  tft.drawLine(12, 27, 28, 35, TFT_WHITE);
-  tft.drawLine(12, 27, 44, 27, TFT_WHITE);
 }
 
 void TouchCalibrationScreen::drawCalibrationTarget() {
@@ -262,16 +254,14 @@ bool TouchCalibrationScreen::inButton(int16_t x, int16_t y, int16_t index) const
          y >= buttonY && y < buttonY + ButtonHeight;
 }
 
-bool TouchCalibrationScreen::inBackButton(int16_t x, int16_t y) const {
-  return x >= 0 && x < 54 && y >= 0 && y < HeaderHeight;
-}
-
 int16_t TouchCalibrationScreen::targetX(uint8_t column) const {
   return (int32_t)column * (_display.width() - 1) / 3;
 }
 
 int16_t TouchCalibrationScreen::targetY(uint8_t row) const {
-  return (int32_t)row * (_display.height() - 1) / 3;
+  const int16_t top = HeaderHeight + TargetSize / 2;
+  const int16_t bottom = _display.height() - InfoHeight - TargetSize / 2 - 1;
+  return top + (int32_t)row * (bottom - top) / 3;
 }
 
 void TouchCalibrationScreen::resetCalibration() {

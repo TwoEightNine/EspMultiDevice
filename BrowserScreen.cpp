@@ -11,12 +11,14 @@
 #include "Navigator.h"
 #include "SdCardController.h"
 #include "SpiBusLock.h"
+#include "UiKit.h"
 #include "WiFiController.h"
 #include "icons.h"
 
 namespace {
-const int16_t HeaderHeight = 38;
+const int16_t HeaderHeight = UiKit::AppBarHeight;
 const int16_t ControlsHeight = 42;
+const uint8_t VisibleRecentSites = 3;
 const int16_t TextRowHeight = 18;
 const int16_t ImageRowHeight = 20;
 const int16_t DocumentPadding = 7;
@@ -103,7 +105,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _styleDepth(0),
     _pendingSpace(false),
     _renderedCharacters(0),
-    _closeBounds{0, 0, 0, 0},
+    _closeBounds{0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize},
     _startBounds{0, 0, 0, 0},
     _newBounds{0, 0, 0, 0},
     _openBounds{0, 0, 0, 0},
@@ -163,7 +165,8 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (_showStart) {
-    for (uint8_t i = 0; i < _recentCount; i++) {
+    const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
+    for (uint8_t i = 0; i < visible; i++) {
       if (contains(_recentBounds[i], point.x, point.y)) {
         openUrl(_recentSites[i].url);
         return;
@@ -176,15 +179,20 @@ void BrowserScreen::layout() {
   const int16_t width = _display.width();
   const int16_t height = _display.height();
   const int16_t buttonWidth = width / 4;
-  _closeBounds = {0, 0, 42, HeaderHeight};
+  _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
   _startBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _newBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
-  _openBounds = {70, 68, (int16_t)(width - 140), 32};
+  _openBounds = {70, 76, (int16_t)(width - 140), 32};
   _previousBounds = {(int16_t)(buttonWidth * 2), (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _nextBounds = {(int16_t)(buttonWidth * 3), (int16_t)(height - ControlsHeight),
                  (int16_t)(width - buttonWidth * 3), ControlsHeight};
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
-    _recentBounds[i] = {8, (int16_t)(108 + i * 22), (int16_t)(width - 16), 20};
+    _recentBounds[i] = {0, 0, 0, 0};
+  }
+  const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
+  for (uint8_t i = 0; i < visible; i++) {
+    _recentBounds[i] = {0, (int16_t)(128 + i * UiKit::ListCellHeight),
+                        width, UiKit::ListCellHeight};
   }
 }
 
@@ -200,41 +208,33 @@ void BrowserScreen::draw() {
 }
 
 void BrowserScreen::drawHeader() {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillRect(0, 0, _display.width(), HeaderHeight, TFT_DARKGREY);
-  tft.drawLine(15, 12, 28, 19, TFT_WHITE);
-  tft.drawLine(15, 26, 28, 19, TFT_WHITE);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
   String heading = _showStart ? "Browser" : (_title.length() ? _title : _currentUrl);
-  tft.drawString(shortText(heading, _display.width() - 52), 48, HeaderHeight / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), heading);
 }
 
 void BrowserScreen::drawStartPage() {
   TFT_eSPI &tft = _display.tft();
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Start page", _display.width() / 2, 56, 4);
-  tft.fillRoundRect(70, 68, _display.width() - 140, 32, 5, TFT_BLUE);
+  tft.drawString("Start page", _display.width() / 2, 66, 4);
+  tft.fillRoundRect(70, 76, _display.width() - 140, 32, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  tft.drawString("Open a new page", _display.width() / 2, 84, 2);
+  tft.drawString("Open a new page", _display.width() / 2, 92, 2);
   tft.setTextDatum(TL_DATUM);
 
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString("Recent sites", 10, 108, 2);
+  tft.drawString("Recent sites", 10, 112, 2);
   if (_recentCount == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("No recent sites yet", 10, 138, 2);
+    tft.drawString("No recent sites yet", 10, 142, 2);
     return;
   }
-  for (uint8_t i = 0; i < _recentCount; i++) {
+  const uint8_t visible = _recentCount < VisibleRecentSites ? _recentCount : VisibleRecentSites;
+  for (uint8_t i = 0; i < visible; i++) {
     const RecentSite &site = _recentSites[i];
     const Rect &bounds = _recentBounds[i];
-    tft.drawRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 3, 0x4a69);
     String label = site.title.length() ? site.title : site.url;
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(shortText(label, bounds.w - 10), bounds.x + 5, bounds.y + 2, 2);
+    UiKit::drawListCell(tft, bounds.w, bounds.y, label);
   }
 }
 

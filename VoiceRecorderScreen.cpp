@@ -1,6 +1,7 @@
 #include "VoiceRecorderScreen.h"
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 #include <SD.h>
 #include <string.h>
@@ -69,7 +70,11 @@ void VoiceRecorderScreen::onExit() {
 
 void VoiceRecorderScreen::handleTouch(const TouchPoint &point) {
   if (point.touched && !_lastTouchDown) {
+    if (UiKit::navigationIconContains(point.x, point.y) && _state == State::Idle) {
+      _navigator.pop();
+    } else {
     handlePress(point.x, point.y);
+    }
   }
 
   _lastTouchDown = point.touched;
@@ -103,7 +108,6 @@ void VoiceRecorderScreen::layoutButtons() {
   int16_t totalWidth = buttonWidth * 3 + buttonGap * 2;
   int16_t startX = (width - totalWidth) / 2;
 
-  _backButton = { 10, 10, 80, 34 };
   _recordButton = { startX, 96, buttonWidth, 54 };
   _stopButton = { (int16_t)(startX + buttonWidth + buttonGap), 96, buttonWidth, 54 };
   _playButton = { (int16_t)(startX + (buttonWidth + buttonGap) * 2), 96, buttonWidth, 54 };
@@ -127,12 +131,8 @@ void VoiceRecorderScreen::draw() {
 }
 
 void VoiceRecorderScreen::drawStaticFrame() {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Voice Recorder"), 108, 16, 4);
+  _display.tft().fillScreen(TFT_BLACK);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Voice Recorder"));
 }
 
 void VoiceRecorderScreen::drawDynamicSections(bool force) {
@@ -177,10 +177,9 @@ void VoiceRecorderScreen::drawButtons(bool force) {
     return;
   }
 
-  drawButton(_backButton, F("Back"), TFT_DARKGREY, (mask & 0x01) != 0);
-  drawButton(_recordButton, F("Rec"), TFT_RED, (mask & 0x02) != 0);
-  drawButton(_stopButton, F("Stop"), TFT_ORANGE, (mask & 0x04) != 0);
-  drawButton(_playButton, F("Play"), TFT_GREEN, (mask & 0x08) != 0);
+  drawButton(_recordButton, F("Rec"), TFT_RED, (mask & 0x01) != 0);
+  drawButton(_stopButton, F("Stop"), TFT_ORANGE, (mask & 0x02) != 0);
+  drawButton(_playButton, F("Play"), TFT_GREEN, (mask & 0x04) != 0);
   _lastButtonMask = mask;
 }
 
@@ -231,28 +230,20 @@ uint8_t VoiceRecorderScreen::buttonMask() {
   uint8_t mask = 0;
   bool idle = _state == State::Idle;
 
-  if (idle) {
+  if (idle && _sdMounted && _mic.isPowered()) {
     mask |= 0x01;
   }
-  if (idle && _sdMounted && _mic.isPowered()) {
+  if (!idle) {
     mask |= 0x02;
   }
-  if (!idle) {
-    mask |= 0x04;
-  }
   if (idle && _sdMounted && _hasRecording) {
-    mask |= 0x08;
+    mask |= 0x04;
   }
 
   return mask;
 }
 
 void VoiceRecorderScreen::handlePress(int16_t x, int16_t y) {
-  if (_backButton.contains(x, y) && _state == State::Idle) {
-    _navigator.pop();
-    return;
-  }
-
   if (_recordButton.contains(x, y) && _state == State::Idle) {
     startRecording();
     return;

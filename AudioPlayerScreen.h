@@ -43,8 +43,6 @@ private:
   static const uint8_t Mp3AnalysisFramesPerTick = 16;
   static const uint16_t Mp3CacheHeaderBytes = 36;
   static const uint16_t OutputFrames = 256;
-  static const int16_t BackTouchWidth = 80;
-
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   fs::File _file;

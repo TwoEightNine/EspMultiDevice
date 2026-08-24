@@ -87,7 +87,7 @@ bool Navigator::pop() {
 
   exitActive();
   _stackDepth--;
-  enter(_stack[_stackDepth - 1]);
+  resumeActive();
   return true;
 }
 
@@ -98,7 +98,7 @@ bool Navigator::pop(const ScreenResult &result) {
 
   exitActive();
   _stackDepth--;
-  enter(_stack[_stackDepth - 1]);
+  resumeActive();
   Screen *screen = activeScreen();
   if (screen) {
     screen->onResult(result);
@@ -151,5 +151,12 @@ void Navigator::exitActive() {
   Screen *screen = activeScreen();
   if (screen) {
     screen->onExit();
+  }
+}
+
+void Navigator::resumeActive() {
+  Screen *screen = activeScreen();
+  if (screen) {
+    screen->onResume();
   }
 }

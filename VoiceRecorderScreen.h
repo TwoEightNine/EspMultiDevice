@@ -61,7 +61,6 @@ private:
   String _lastStorageText;
   String _lastStatusText;
   String _lastDetailsText;
-  Button _backButton;
   Button _recordButton;
   Button _stopButton;
   Button _playButton;

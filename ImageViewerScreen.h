@@ -40,7 +40,6 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint16_t CloseTouchSize = 64;
   static const uint16_t MaxPaletteEntries = 256;
   static const uint16_t CacheWidth = 480;
   static const uint16_t CacheHeight = 320;

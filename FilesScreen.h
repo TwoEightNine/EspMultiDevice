@@ -4,6 +4,7 @@
 
 #include "Screen.h"
 #include "SdCardController.h"
+#include "UiKit.h"
 
 class FilesScreen : public Screen {
 public:
@@ -14,6 +15,7 @@ public:
   ~FilesScreen() override;
 
   void onEnter() override;
+  void onResume() override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
 
@@ -32,9 +34,8 @@ private:
     }
   };
 
-  static const int16_t ListPadding = 16;
   static const int16_t RowTop = 88;
-  static const int16_t RowHeight = 30;
+  static const int16_t RowHeight = UiKit::ListCellHeight;
   static const uint8_t RowKindEntry = 0;
   static const uint8_t RowKindPrevious = 1;
   static const uint8_t RowKindNext = 2;
@@ -67,6 +68,5 @@ private:
   void openParentDirectory();
   String parentPath() const;
   String displayName(const String &path) const;
-  String truncateLabel(const String &label, int16_t maxWidth);
   void handleSdCardEvent(SdCardEvent event);
 };

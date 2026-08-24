@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "Navigator.h"
+#include "UiKit.h"
 
 namespace {
 const uint16_t InputBorderColor = TFT_DARKGREY;
@@ -16,7 +17,6 @@ const int16_t OuterPadding = 6;
 const int16_t KeyGap = 2;
 const int16_t KeyboardGap = 6;
 const int16_t TextPadding = 6;
-const int16_t AppBarHeight = 50;
 const int16_t GridColumns = 10;
 const int16_t KeyboardRowCount = 5;
 // Adjust this value to change the height of every keyboard row.
@@ -205,9 +205,9 @@ void TextInputScreen::layout() {
   const int16_t keyboardHeight = KeyboardRowCount * KeyboardRowHeight +
                                  KeyGap * (KeyboardRowCount - 1);
   const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
-  const int16_t inputHeight = keyboardTop - KeyboardGap - AppBarHeight;
-  _inputBounds = {OuterPadding, AppBarHeight, usableWidth, inputHeight};
-  _closeBounds = {10, 8, 70, 38};
+  const int16_t inputHeight = keyboardTop - KeyboardGap - UiKit::AppBarHeight;
+  _inputBounds = {OuterPadding, UiKit::AppBarHeight, usableWidth, inputHeight};
+  _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
   _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
   _keyCount = 0;
 
@@ -288,13 +288,8 @@ void TextInputScreen::addKey(const char *label,
 }
 
 void TextInputScreen::drawAppBar() {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillRect(0, 0, _display.width(), AppBarHeight, TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawLine(20, 17, 42, 37, TFT_WHITE);
-  tft.drawLine(42, 17, 20, 37, TFT_WHITE);
-  tft.drawString(_title, 108, 16, 4);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), _title,
+                       UiKit::NavigationIcon::Close);
 }
 
 void TextInputScreen::drawInputFrame() {

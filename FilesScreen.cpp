@@ -1,6 +1,7 @@
 #include "FilesScreen.h"
 
 #include "Navigator.h"
+#include "UiKit.h"
 #include "icons.h"
 
 #include <FS.h>
@@ -11,7 +12,6 @@ const uint16_t FolderColor = TFT_YELLOW;
 const uint16_t FileColor = TFT_LIGHTGREY;
 const uint16_t ImageFileColor = TFT_GREEN;
 const uint16_t AudioFileColor = TFT_BLUE;
-const uint16_t ControlColor = TFT_LIGHTGREY;
 }
 
 FilesScreen::FilesScreen(Navigator &navigator,
@@ -44,6 +44,12 @@ void FilesScreen::onEnter() {
   draw();
 }
 
+void FilesScreen::onResume() {
+  _lastTouchDown = false;
+  _sdMounted = _sdCard.isMounted();
+  draw();
+}
+
 void FilesScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) {
     _lastTouchDown = false;
@@ -54,7 +60,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
   }
   _lastTouchDown = true;
 
-  if (point.x >= 10 && point.x < 90 && point.y >= 10 && point.y < 44) {
+  if (UiKit::navigationIconContains(point.x, point.y)) {
     _navigator.pop();
     return;
   }
@@ -143,21 +149,15 @@ void FilesScreen::draw() {
 }
 
 void FilesScreen::drawTopBar() {
-  TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawLine(18, 27, 34, 19, TFT_WHITE);
-  tft.drawLine(18, 27, 34, 35, TFT_WHITE);
-  tft.drawLine(18, 27, 48, 27, TFT_WHITE);
-  tft.drawString(F("Files"), 108, 16, 4);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Files"));
 }
 
 void FilesScreen::drawPathHeader() {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(16, 55, _display.width() - 32, 25, TFT_DARKGREY);
+  tft.fillRect(16, 56, _display.width() - 32, 24, TFT_DARKGREY);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString(_currentPath, 24, 67, 2);
+  tft.drawString(UiKit::ellipsize(tft, _currentPath, _display.width() - 48, 2), 24, 68, 2);
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -165,28 +165,23 @@ void FilesScreen::drawListing() {
   refreshListingInfo();
   _rowCount = 0;
 
-  const int16_t listWidth = _display.width() - 2 * ListPadding;
   auto addRow = [&](int16_t y, uint8_t kind, uint16_t entryIndex) -> Row * {
     if (_rowCount >= _rowCapacity) return nullptr;
     Row &row = _rows[_rowCount++];
-    row = { ListPadding, listWidth, y, RowHeight, kind, entryIndex };
+    row = { 0, _display.width(), y, RowHeight, kind, entryIndex };
     return &row;
   };
 
   if (_currentPath != "/" && _page == 0) {
     int16_t y = RowTop + _rowCount * RowHeight;
     if (!addRow(y, RowKindEntry, 0xffff)) return;
-    TFT_eSPI &tft = _display.tft();
-    tft.drawXBitmap(ListPadding + 2, y + 7, ic_dir, 16, 16, FolderColor);
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(F(".."), ListPadding + 28, y + RowHeight / 2, 2);
-    tft.setTextDatum(TL_DATUM);
+    UiKit::drawListCell(_display.tft(), _display.width(), y, F(".."), ic_dir, FolderColor);
   }
 
   if (_page > 0) {
     int16_t y = RowTop + _rowCount * RowHeight;
     if (!addRow(y, RowKindPrevious, 0)) return;
+    UiKit::drawListCell(_display.tft(), _display.width(), y, F("Previous page"));
   }
 
   uint16_t firstEntry = _page * _pageSize;
@@ -197,21 +192,16 @@ void FilesScreen::drawListing() {
     bool isDirectory = false;
     if (entryAt(index, name, isDirectory)) {
       int16_t y = RowTop + _rowCount * RowHeight;
-      TFT_eSPI &tft = _display.tft();
       if (!addRow(y, RowKindEntry, index)) return;
-      tft.fillRect(ListPadding, y, listWidth, RowHeight, TFT_BLACK);
       if (isDirectory) {
-        tft.drawXBitmap(ListPadding + 2, y + 7, ic_dir, 16, 16, FolderColor);
+        UiKit::drawListCell(_display.tft(), _display.width(), y,
+                             displayName(name), ic_dir, FolderColor);
       } else {
-        // drawXBitmap paints only set bits, preserving the background beneath the mask.
         uint16_t color = isImageFile(name) ? ImageFileColor
                            : (isAudioFile(name) ? AudioFileColor : FileColor);
-        tft.drawXBitmap(ListPadding + 2, y + 7, ic_file, 16, 16, color);
+        UiKit::drawListCell(_display.tft(), _display.width(), y,
+                             displayName(name), ic_file, color);
       }
-      tft.setTextDatum(ML_DATUM);
-      tft.setTextColor(TFT_WHITE, TFT_BLACK);
-      tft.drawString(truncateLabel(displayName(name), listWidth - 42), ListPadding + 28, y + RowHeight / 2, 2);
-      tft.setTextDatum(TL_DATUM);
       displayed++;
     }
     index++;
@@ -220,20 +210,7 @@ void FilesScreen::drawListing() {
   if (_page + 1 < _pageCount) {
     int16_t y = RowTop + _rowCount * RowHeight;
     if (!addRow(y, RowKindNext, 0)) return;
-    TFT_eSPI &tft = _display.tft();
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(ControlColor, TFT_BLACK);
-    tft.drawString(F("Next page"), ListPadding + 28, y + RowHeight / 2, 2);
-    tft.setTextDatum(TL_DATUM);
-  }
-
-  if (_page > 0) {
-    TFT_eSPI &tft = _display.tft();
-    int16_t y = RowTop;
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(ControlColor, TFT_BLACK);
-    tft.drawString(F("Previous page"), ListPadding + 28, y + RowHeight / 2, 2);
-    tft.setTextDatum(TL_DATUM);
+    UiKit::drawListCell(_display.tft(), _display.width(), y, F("Next page"));
   }
 }
 
@@ -349,14 +326,6 @@ String FilesScreen::parentPath() const {
 String FilesScreen::displayName(const String &path) const {
   int16_t slash = path.lastIndexOf('/');
   return slash < 0 ? path : path.substring(slash + 1);
-}
-
-String FilesScreen::truncateLabel(const String &label, int16_t maxWidth) {
-  TFT_eSPI &tft = _display.tft();
-  if (tft.textWidth(label, 2) <= maxWidth) return label;
-  String result = label;
-  while (result.length() > 3 && tft.textWidth(result + "...", 2) > maxWidth) result.remove(result.length() - 1);
-  return result + "...";
 }
 
 void FilesScreen::handleSdCardEvent(SdCardEvent event) {

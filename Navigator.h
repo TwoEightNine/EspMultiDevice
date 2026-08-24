@@ -56,4 +56,5 @@ private:
   bool isRegistered(ScreenId id) const;
   void enter(const StackEntry &entry);
   void exitActive();
+  void resumeActive();
 };
