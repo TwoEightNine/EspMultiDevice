@@ -87,6 +87,10 @@ private:
 
   struct TextStyle {
     uint16_t color;
+    uint16_t backgroundColor;
+    bool hasBackground;
+    uint16_t blockBackgroundColor;
+    bool hasBlockBackground;
     bool bold;
     bool italic;
     bool underline;
@@ -109,6 +113,7 @@ private:
     bool imageLink;
     uint8_t imageLinkIndex;
     int16_t imageIndex;
+    TextStyle style;
     int16_t contentWidth;
     uint8_t runCount;
     VisualRun runs[MaxRunsPerRow];
@@ -157,6 +162,8 @@ private:
   bool _loaded;
   bool _showStart;
   bool _lastTouchDown;
+  bool _loadCancelled;
+  bool _loadCancelTouchDown;
   uint16_t _page;
   String _currentUrl;
   String _title;
@@ -196,6 +203,9 @@ private:
   void drawControls();
   void layout();
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
+  bool isLoading() const;
+  void cancelLoading();
+  bool pollLoadingCancel();
   String documentLinkAt(int16_t x, int16_t y) const;
   void openUrlInput();
   bool openUrl(const String &value, bool addToHistory = true, bool addToRecent = false);
@@ -206,10 +216,10 @@ private:
   bool fetch(const String &initialUrl, String &finalUrl, String &body, String &contentType,
              String &downloadedPath, String &error, uint32_t downloadLimit = MaxDownloadBytes);
   bool requestOne(const Url &url, HttpResponse &response, WiFiClient *&client, String &error);
-  bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs) const;
-  int readByte(WiFiClient &client, uint32_t timeoutMs) const;
+  bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs);
+  int readByte(WiFiClient &client, uint32_t timeoutMs);
   bool readBody(WiFiClient &client, bool chunked, int32_t contentLength,
-                String &body, String &error) const;
+                String &body, String &error);
   bool readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
                         FileFormats::Format format, String &downloadedPath, String &error,
                         uint32_t downloadLimit);
@@ -226,9 +236,10 @@ private:
   void resetRenderedRows();
   void appendText(const String &text);
   void appendBreak();
-  void appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth,
-                   int16_t imageIndex = -1);
+  void appendImage(const String &label, const TextStyle &style, bool linked, uint8_t linkIndex,
+                   bool fullWidth, int16_t imageIndex = -1);
   void appendStub(const String &label);
+  String formStubLabel(const String &tag, const String &attributes) const;
   void appendWord(const String &word, const TextStyle &style);
   void appendRun(const String &text, const TextStyle &style);
   void appendInlineImage(const String &label, const TextStyle &style, int16_t imageIndex);
@@ -252,6 +263,8 @@ private:
   uint8_t registerLink(const String &url);
   String attributeValue(const String &attributes, const char *name) const;
   uint16_t parseColor(const String &value, uint16_t fallback) const;
+  bool parseCssColor(const String &value, uint16_t &color) const;
+  void applyBackground(TextStyle &style, const String &value) const;
   int findTagEnd(const String &html, int start) const;
   void pushStyle(const String &tag, const TextStyle &style);
   void popStyle(const String &tag);

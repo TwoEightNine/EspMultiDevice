@@ -89,6 +89,13 @@ void drawFooterHome(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t co
   tft.fillRect(centerX - 2, centerY + 3, 5, 8, color);
 }
 
+void drawFooterClose(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    tft.drawLine(centerX - 7, centerY - 7 + offset, centerX + 7, centerY + 7 + offset, color);
+    tft.drawLine(centerX - 7, centerY + 7 + offset, centerX + 7, centerY - 7 + offset, color);
+  }
+}
+
 uint64_t parseHttpDate(const String &source) {
   String value = source;
   int comma = value.indexOf(',');
@@ -419,6 +426,8 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _loaded(false),
     _showStart(true),
     _lastTouchDown(false),
+    _loadCancelled(false),
+    _loadCancelTouchDown(false),
     _page(0),
     _currentUrl(),
     _title(),
@@ -434,7 +443,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _imageWorker(nullptr),
     _httpMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
-    _currentStyle{DefaultTextColor, false, false, false, false, 0},
+    _currentStyle{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0},
     _styleDepth(0),
     _pendingSpace(false),
     _renderedCharacters(0),
@@ -494,11 +503,13 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _navigator.pop();
     return;
   }
-  if (contains(_backBounds, point.x, point.y) && _historyCount > 0) {
-    goBack();
+  if (contains(_backBounds, point.x, point.y)) {
+    if (isLoading()) cancelLoading();
+    else if (_historyCount > 0) goBack();
     return;
   }
-  if (contains(_homeBounds, point.x, point.y)) {
+  if (!_showStart && contains(_homeBounds, point.x, point.y)) {
+    if (isLoading()) releaseEmbeddedImages();
     _showStart = true;
     _page = 0;
     _message = "";
@@ -575,11 +586,11 @@ void BrowserScreen::drawHeader() {
 
 void BrowserScreen::drawStartPage() {
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TC_DATUM);
+  tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.fillRoundRect(_openBounds.x, _openBounds.y, _openBounds.w, _openBounds.h, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  tft.drawString("Open URL", _display.width() / 2, StartOpenButtonTop + StartOpenButtonHeight / 2, 2);
+  tft.drawString("Open URL", _openBounds.x + _openBounds.w / 2, _openBounds.y + _openBounds.h / 2, 2);
   tft.setTextDatum(TL_DATUM);
 
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
@@ -620,35 +631,59 @@ void BrowserScreen::drawDocument() {
     const VisualRow &row = _rows[index];
     if (row.image) {
       uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
+      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : TFT_BLACK;
       const int16_t height = rowHeight(row);
-      if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
+      int16_t width = imageWidth(row.imageLabel);
+      const bool hasThumbnail = row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount &&
+                                _embeddedImages[row.imageIndex].pixels;
+      if (hasThumbnail) {
+        const EmbeddedImage &image = _embeddedImages[row.imageIndex];
+        width = image.width + (row.imageLink ? 2 : 0);
+      }
+      if (row.style.hasBlockBackground) {
+        tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, height,
+                     row.style.blockBackgroundColor);
+      } else if (row.style.hasBackground) {
+        tft.fillRect(DocumentSidePadding, y, width, height, row.style.backgroundColor);
+      }
+      if (hasThumbnail) {
         const EmbeddedImage &image = _embeddedImages[row.imageIndex];
         if (row.imageLink) tft.drawRect(DocumentSidePadding, y, image.width + 2, image.height + 2, color);
         drawThumbnail(row.imageIndex, DocumentSidePadding + (row.imageLink ? 1 : 0), y + (row.imageLink ? 1 : 0));
       } else {
-        const int16_t width = imageWidth(row.imageLabel);
         if (row.imageLink) tft.drawRect(DocumentSidePadding, y, width, TextRowHeight, color);
         tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
-        tft.setFreeFont(&FreeSans9pt7b);
-        tft.setTextColor(color, TFT_BLACK);
+        applyFont(row.style);
+        tft.setTextColor(color, row.style.hasBackground ? row.style.backgroundColor : rowBackground);
         tft.setTextDatum(ML_DATUM);
         tft.drawString(shortImageLabel(row.imageLabel, width - 26), DocumentSidePadding + 22, y + TextRowHeight / 2);
         tft.setTextDatum(TL_DATUM);
       }
     } else {
+      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : TFT_BLACK;
+      if (row.style.hasBlockBackground) {
+        tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, rowHeight(row),
+                     row.style.blockBackgroundColor);
+      }
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
         const VisualRun &run = row.runs[runIndex];
         const int16_t x = DocumentSidePadding + run.x;
         if (run.image) {
           uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
-          if (run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
+          const int16_t height = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
+                                 _embeddedImages[run.imageIndex].pixels
+            ? _embeddedImages[run.imageIndex].height + (run.style.linkIndex ? 2 : 0) : TextRowHeight;
+          if (run.style.hasBackground) tft.fillRect(x, y, run.width, height, run.style.backgroundColor);
+          const bool hasThumbnail = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
+                                    _embeddedImages[run.imageIndex].pixels;
+          if (hasThumbnail) {
             if (run.style.linkIndex) tft.drawRect(x, y, run.width, _embeddedImages[run.imageIndex].height + 2, color);
             drawThumbnail(run.imageIndex, x + (run.style.linkIndex ? 1 : 0), y + (run.style.linkIndex ? 1 : 0));
           } else {
             if (run.style.linkIndex) tft.drawRect(x, y, run.width, TextRowHeight, color);
             tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
-            tft.setFreeFont(&FreeSans9pt7b);
-            tft.setTextColor(color, TFT_BLACK);
+            applyFont(run.style);
+            tft.setTextColor(color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
             tft.setTextDatum(ML_DATUM);
             tft.drawString(run.text, x + 22, y + TextRowHeight / 2);
             tft.setTextDatum(TL_DATUM);
@@ -656,7 +691,10 @@ void BrowserScreen::drawDocument() {
           continue;
         }
         applyFont(run.style);
-        tft.setTextColor(run.style.color, TFT_BLACK);
+        if (run.style.hasBackground && run.width > 0) {
+          tft.fillRect(x, y, run.width, TextRowHeight, run.style.backgroundColor);
+        }
+        tft.setTextColor(run.style.color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
         tft.setTextDatum(TL_DATUM);
         tft.drawString(run.text, x, y);
         if (run.style.underline && run.width > 0) {
@@ -679,8 +717,10 @@ void BrowserScreen::redrawDocument() {
 void BrowserScreen::drawControls() {
   TFT_eSPI &tft = _display.tft();
   const Rect buttons[] = {_backBounds, _homeBounds, _previousBounds, _nextBounds};
+  const bool loading = isLoading();
   for (uint8_t i = 0; i < 4; i++) {
-    bool active = i == 1 || (i == 0 && _historyCount > 0) || (!_showStart && ((i == 2 && _page > 0) ||
+    bool active = (i == 0 && (loading || _historyCount > 0)) || (i == 1 && !_showStart) ||
+      (!_showStart && ((i == 2 && _page > 0) ||
       (i == 3 && hasNextPage())));
     uint16_t color = active ? 0x2965 : TFT_DARKGREY;
     const Rect &button = buttons[i];
@@ -688,7 +728,8 @@ void BrowserScreen::drawControls() {
     uint16_t iconColor = active ? TFT_WHITE : 0x8410;
     const int16_t centerX = button.x + button.w / 2;
     const int16_t centerY = button.y + button.h / 2;
-    if (i == 0) drawFooterArrow(tft, centerX, centerY, false, false, iconColor);
+    if (i == 0 && loading) drawFooterClose(tft, centerX, centerY, iconColor);
+    else if (i == 0) drawFooterArrow(tft, centerX, centerY, false, false, iconColor);
     else if (i == 1) drawFooterHome(tft, centerX, centerY, iconColor);
     else drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
   }
@@ -697,6 +738,44 @@ void BrowserScreen::drawControls() {
 
 bool BrowserScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
   return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+}
+
+bool BrowserScreen::isLoading() const {
+  if (_message == "Loading...") return true;
+  if (_activeImageGeneration == _imageGeneration) return true;
+  for (uint16_t i = 0; i < _embeddedImageCount; i++) {
+    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].state < 2) return true;
+  }
+  return false;
+}
+
+void BrowserScreen::cancelLoading() {
+  const bool contentIsPending = _message == "Loading...";
+  releaseEmbeddedImages();
+  _plainClient.stop();
+  _secureClient.stop();
+  _loadCancelled = true;
+  if (contentIsPending) _message = "Loading cancelled";
+  draw();
+}
+
+bool BrowserScreen::pollLoadingCancel() {
+  // The foreground HTTP request runs in the Arduino task, so it needs to
+  // poll touch itself. Image work is already on the second core and is
+  // cancelled by releaseEmbeddedImages() through its generation check.
+  if (_activeImageGeneration) return _activeImageGeneration != _imageGeneration;
+  if (_message != "Loading...") return _loadCancelled;
+  _touch.update();
+  TouchPoint point = _touch.point();
+  if (!point.touched) {
+    _loadCancelTouchDown = false;
+    return _loadCancelled;
+  }
+  if (!_loadCancelTouchDown) {
+    _loadCancelTouchDown = true;
+    if (contains(_backBounds, point.x, point.y)) cancelLoading();
+  }
+  return _loadCancelled;
 }
 
 String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
@@ -736,6 +815,7 @@ void BrowserScreen::openUrlInput() {
 
 bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRecent) {
   const bool hadDocument = !_showStart && _currentUrl.length() > 0;
+  const String previousUrl = _currentUrl;
   String url;
   String error;
   if (!normalizeUrl(value, url, error)) {
@@ -746,6 +826,8 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return false;
   }
+  _currentUrl = url;
+  _title = "";
   if (!_wifi.isConnected()) {
     _showStart = false;
     _message = "Connect to Wi-Fi first";
@@ -766,6 +848,8 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   _pageCount = 0;
   _title = "";
   _page = 0;
+  _loadCancelled = false;
+  _loadCancelTouchDown = false;
   draw();
   yield();
 
@@ -774,12 +858,11 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   String contentType;
   String downloadedPath;
   if (!fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
-    _currentUrl = url;
-    _message = error;
+    _message = _loadCancelled ? "Loading cancelled" : error;
     draw();
     return false;
   }
-  if (addToHistory && hadDocument) addHistory(_currentUrl);
+  if (addToHistory && hadDocument) addHistory(previousUrl);
   _currentUrl = finalUrl;
   _message = "";
   if (downloadedPath.length()) {
@@ -934,6 +1017,10 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
 
 bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClient *&client,
                                String &error) {
+  if (pollLoadingCancel()) {
+    error = "Loading cancelled";
+    return false;
+  }
   _plainClient.stop();
   _secureClient.stop();
   client = &_plainClient;
@@ -942,7 +1029,12 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
     client = &_secureClient;
   }
   if (!client->connect(url.host.c_str(), url.port)) {
-    error = "Connection failed";
+    error = _loadCancelled ? "Loading cancelled" : "Connection failed";
+    return false;
+  }
+  if (pollLoadingCancel()) {
+    client->stop();
+    error = "Loading cancelled";
     return false;
   }
   String hostHeader = url.host;
@@ -1001,10 +1093,11 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   return true;
 }
 
-bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutMs) const {
+bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutMs) {
   line = "";
   uint32_t started = millis();
   while (millis() - started < timeoutMs) {
+    if (pollLoadingCancel()) return false;
     if (_activeImageGeneration && _activeImageGeneration != _imageGeneration) return false;
     while (client.available()) {
       int value = client.read();
@@ -1023,9 +1116,10 @@ bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutM
   return false;
 }
 
-int BrowserScreen::readByte(WiFiClient &client, uint32_t timeoutMs) const {
+int BrowserScreen::readByte(WiFiClient &client, uint32_t timeoutMs) {
   uint32_t started = millis();
   while (millis() - started < timeoutMs) {
+    if (pollLoadingCancel()) return -1;
     if (_activeImageGeneration && _activeImageGeneration != _imageGeneration) return -1;
     if (client.available()) return client.read();
     if (!client.connected()) return -1;
@@ -1036,7 +1130,7 @@ int BrowserScreen::readByte(WiFiClient &client, uint32_t timeoutMs) const {
 }
 
 bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLength,
-                             String &body, String &error) const {
+                             String &body, String &error) {
   body = "";
   uint32_t reserveBytes = contentLength > 0
     ? (contentLength < (int32_t)MaxBodyBytes ? (uint32_t)contentLength : MaxBodyBytes)
@@ -1496,13 +1590,13 @@ void BrowserScreen::renderDocument(const String &html) {
           if (parseUrl(_currentUrl, base)) resolved = resolveUrl(base, source);
           if (normalizeUrl(resolved, normalized, error)) imageLinkIndex = registerLink(normalized);
         }
-        appendImage(alt.length() ? alt : "image", imageLinkIndex != 0, imageLinkIndex,
-                    isFullWidthImage(attributes), imageIndex);
+        appendImage(alt.length() ? alt : "image", styledForTag(tag, attributes), imageLinkIndex != 0,
+                    imageLinkIndex, isFullWidthImage(attributes), imageIndex);
       } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
                  tag == "embed" || tag == "canvas") {
         appendStub(tag);
       } else if (tag == "form" || tag == "input" || tag == "button" || tag == "textarea" || tag == "select") {
-        appendStub("form control");
+        appendStub(formStubLabel(tag, attributes));
       } else {
         if (isBlockTag(tag)) appendBreak();
         if ((tag == "td" || tag == "th") && _rowCount) _pendingSpace = true;
@@ -1532,7 +1626,7 @@ void BrowserScreen::resetRenderedRows() {
   _rowCount = 0;
   _pageCount = 0;
   _styleDepth = 0;
-  _currentStyle = {DefaultTextColor, false, false, false, false, 0};
+  _currentStyle = {DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
   _linkCount = 0;
   _pendingSpace = false;
   _renderedCharacters = 0;
@@ -1563,9 +1657,9 @@ void BrowserScreen::appendBreak() {
   }
 }
 
-void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex, bool fullWidth,
-                                int16_t imageIndex) {
-  TextStyle style = _currentStyle;
+void BrowserScreen::appendImage(const String &label, const TextStyle &sourceStyle, bool linked,
+                                uint8_t linkIndex, bool fullWidth, int16_t imageIndex) {
+  TextStyle style = sourceStyle;
   style.link = linked;
   style.linkIndex = linkIndex;
   if (!fullWidth) {
@@ -1580,6 +1674,7 @@ void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIn
   row.imageLink = linked;
   row.imageLinkIndex = linkIndex;
   row.imageIndex = imageIndex;
+  row.style = style;
   row.contentWidth = 0;
   row.runCount = 0;
 }
@@ -1630,6 +1725,16 @@ void BrowserScreen::appendStub(const String &label) {
   appendBreak();
   appendText(String("(") + label + ")");
   appendBreak();
+}
+
+String BrowserScreen::formStubLabel(const String &tag, const String &attributes) const {
+  String name = decodeEntities(attributeValue(attributes, "name"));
+  if (!name.length()) name = decodeEntities(attributeValue(attributes, "id"));
+  if (!name.length()) name = decodeEntities(attributeValue(attributes, "aria-label"));
+  if (!name.length() && tag == "form") name = decodeEntities(attributeValue(attributes, "action"));
+  if (!name.length() && tag == "input") name = decodeEntities(attributeValue(attributes, "type"));
+  name.trim();
+  return name.length() ? tag + ": " + name : tag;
 }
 
 void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
@@ -1711,6 +1816,7 @@ void BrowserScreen::beginTextRow() {
   row.imageLink = false;
   row.imageLinkIndex = 0;
   row.imageIndex = -1;
+  row.style = _currentStyle;
   row.contentWidth = 0;
   row.runCount = 0;
 }
@@ -1855,8 +1961,10 @@ void BrowserScreen::pumpImageJobs() {
 void BrowserScreen::collectImageResults() {
   if (!_imageResults) return;
   bool redraw = false;
+  bool updateControls = false;
   ImageResult result{};
   while (xQueueReceive(_imageResults, &result, 0) == pdTRUE) {
+    updateControls = true;
     if (result.generation == _imageGeneration && result.imageIndex < _embeddedImageCount) {
       EmbeddedImage &image = _embeddedImages[result.imageIndex];
       if (image.generation == result.generation && image.state == 1 && result.pixels && result.width && result.height) {
@@ -1876,6 +1984,7 @@ void BrowserScreen::collectImageResults() {
     buildPages();
     redrawDocument();
   }
+  if (updateControls && !_showStart) drawControls();
 }
 
 void BrowserScreen::imageWorkerTask(void *context) {
@@ -1938,12 +2047,15 @@ void BrowserScreen::applyFont(const TextStyle &style) const {
 }
 
 bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) const {
-  return left.color == right.color && left.bold == right.bold && left.italic == right.italic &&
+  return left.color == right.color && left.backgroundColor == right.backgroundColor &&
+         left.hasBackground == right.hasBackground && left.blockBackgroundColor == right.blockBackgroundColor &&
+         left.hasBlockBackground == right.hasBlockBackground && left.bold == right.bold && left.italic == right.italic &&
          left.underline == right.underline && left.link == right.link && left.linkIndex == right.linkIndex;
 }
 
 BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) {
   TextStyle style = _currentStyle;
+  const bool isBlock = isBlockTag(tag);
   if (tag == "b" || tag == "strong") style.bold = true;
   if (tag == "i" || tag == "em") style.italic = true;
   if (tag == "a") {
@@ -1967,6 +2079,9 @@ BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const St
   String color = attributeValue(attributes, "color");
   if (color.length()) style.color = parseColor(color, style.color);
 
+  String background = attributeValue(attributes, "bgcolor");
+  if (background.length()) applyBackground(style, background);
+
   String inlineStyle = attributeValue(attributes, "style");
   int start = 0;
   while (start < (int)inlineStyle.length()) {
@@ -1977,11 +2092,18 @@ BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const St
       String property = lower(trimCopy(declaration.substring(0, colon)));
       String value = lower(trimCopy(declaration.substring(colon + 1)));
       if (property == "color") style.color = parseColor(value, style.color);
+      else if (property == "background" || property == "background-color") applyBackground(style, value);
       else if (property == "font-weight") style.bold = value.indexOf("bold") >= 0 || value.toInt() >= 600;
       else if (property == "font-style") style.italic = value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0;
     }
     if (end < 0) break;
     start = end + 1;
+  }
+  if (isBlock) {
+    if (style.hasBackground) {
+      style.blockBackgroundColor = style.backgroundColor;
+      style.hasBlockBackground = true;
+    }
   }
   return style;
 }
@@ -2068,6 +2190,71 @@ uint16_t BrowserScreen::parseColor(const String &rawValue, uint16_t fallback) co
   return fallback;
 }
 
+bool BrowserScreen::parseCssColor(const String &rawValue, uint16_t &color) const {
+  String value = lower(trimCopy(rawValue));
+  if (value.startsWith("#")) {
+    String digits = value.substring(1);
+    if (digits.length() != 3 && digits.length() != 6) return false;
+    for (uint16_t i = 0; i < digits.length(); i++) {
+      if (!isxdigit((unsigned char)digits[i])) return false;
+    }
+    color = parseColor(value, TFT_BLACK);
+    return true;
+  }
+  if (value.startsWith("rgb(") && value.endsWith(")")) {
+    int red = -1;
+    int green = -1;
+    int blue = -1;
+    if (sscanf(value.c_str(), "rgb(%d,%d,%d)", &red, &green, &blue) == 3 &&
+        red >= 0 && red <= 255 && green >= 0 && green <= 255 && blue >= 0 && blue <= 255) {
+      color = ((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3);
+      return true;
+    }
+  }
+  if (value == "black" || value == "white" || value == "red" || value == "green" ||
+      value == "blue" || value == "yellow" || value == "cyan" || value == "aqua" ||
+      value == "magenta" || value == "fuchsia" || value == "gray" || value == "grey" ||
+      value == "darkgray" || value == "darkgrey" || value == "orange" || value == "purple") {
+    color = parseColor(value, TFT_BLACK);
+    return true;
+  }
+  return false;
+}
+
+void BrowserScreen::applyBackground(TextStyle &style, const String &rawValue) const {
+  String value = lower(trimCopy(rawValue));
+  value.replace("!important", "");
+  value.trim();
+  if (value == "transparent") {
+    style.hasBackground = false;
+    return;
+  }
+
+  uint16_t color = TFT_BLACK;
+  if (parseCssColor(value, color)) {
+    style.backgroundColor = color;
+    style.hasBackground = true;
+    return;
+  }
+
+  // `background` often contains layout keywords alongside the color. Look
+  // through its tokens, while preserving the more precise background-color
+  // behaviour for a single color value.
+  int start = 0;
+  while (start < (int)value.length()) {
+    while (start < (int)value.length() && isspace((unsigned char)value[start])) start++;
+    int end = start;
+    while (end < (int)value.length() && !isspace((unsigned char)value[end])) end++;
+    color = TFT_BLACK;
+    if (parseCssColor(value.substring(start, end), color)) {
+      style.backgroundColor = color;
+      style.hasBackground = true;
+      return;
+    }
+    start = end + 1;
+  }
+}
+
 int BrowserScreen::findTagEnd(const String &html, int start) const {
   char quote = '\0';
   for (int index = start; index < (int)html.length(); index++) {
@@ -2096,7 +2283,7 @@ void BrowserScreen::popStyle(const String &tag) {
     if (_styleStack[index].tag != tag) continue;
     _styleDepth = index;
     _currentStyle = index > 0 ? _styleStack[index - 1].style :
-      TextStyle{DefaultTextColor, false, false, false, false, 0};
+      TextStyle{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
     return;
   }
 }
@@ -2194,7 +2381,7 @@ String BrowserScreen::shortText(const String &value, int16_t maxWidth) const {
 }
 
 String BrowserScreen::shortImageLabel(const String &value, int16_t maxWidth) const {
-  TextStyle style{DefaultTextColor, false, false, false, false, 0};
+  TextStyle style{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
   if (textWidth(value, style) <= maxWidth) return value;
   String result = value;
   while (result.length() > 3 && textWidth(result + "...", style) > maxWidth) {
@@ -2210,10 +2397,10 @@ String BrowserScreen::lower(const String &value) const {
 }
 
 bool BrowserScreen::isBlockTag(const String &tag) const {
-  return tag == "p" || tag == "div" || tag == "section" || tag == "article" || tag == "header" ||
+  return tag == "body" || tag == "p" || tag == "div" || tag == "section" || tag == "article" || tag == "header" ||
          tag == "footer" || tag == "main" || tag == "nav" || tag == "h1" || tag == "h2" || tag == "h3" ||
          tag == "h4" || tag == "h5" || tag == "h6" || tag == "ul" || tag == "ol" || tag == "li" ||
-         tag == "table" || tag == "tr" || tag == "blockquote" || tag == "hr";
+         tag == "table" || tag == "tr" || tag == "td" || tag == "th" || tag == "blockquote" || tag == "hr";
 }
 
 bool BrowserScreen::isFullWidthImage(const String &attributes) const {
@@ -2238,7 +2425,7 @@ bool BrowserScreen::isFullWidthImage(const String &attributes) const {
 }
 
 int16_t BrowserScreen::imageWidth(const String &label) const {
-  TextStyle style{DefaultTextColor, false, false, false, false, 0};
+  TextStyle style{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
   return 26 + textWidth(label, style);
 }
 
