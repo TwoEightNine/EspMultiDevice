@@ -4,6 +4,7 @@
 
 #include "AudioPlayerScreen.h"
 
+#include "FileFormats.h"
 #include "Navigator.h"
 #include "UiKit.h"
 
@@ -226,12 +227,11 @@ bool AudioPlayerScreen::loadSource(const String &path) {
 }
 
 AudioPlayerScreen::SourceFormat AudioPlayerScreen::formatForPath(const String &path) const {
-  int16_t dot = path.lastIndexOf('.');
-  if (dot < 0) return SourceFormat::None;
-  String suffix = path.substring(dot);
-  suffix.toLowerCase();
-  if (suffix == F(".wav")) return SourceFormat::Wav;
-  if (suffix == F(".mp3")) return SourceFormat::Mp3;
+  switch (FileFormats::fromPath(path)) {
+    case FileFormats::Format::Wav: return SourceFormat::Wav;
+    case FileFormats::Format::Mp3: return SourceFormat::Mp3;
+    default: break;
+  }
   return SourceFormat::None;
 }
 

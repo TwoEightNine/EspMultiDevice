@@ -1,0 +1,143 @@
+#pragma once
+
+#include <Arduino.h>
+
+// Central registry for file formats understood by the application. Every
+// format belongs to an image or audio family when applicable. Custom cache
+// formats retain that family, but are marked internal so callers do not treat
+// cache files as source media.
+class FileFormats {
+public:
+  enum class Group : uint8_t {
+    Unknown,
+    Image,
+    Audio
+  };
+
+  enum class Format : uint8_t {
+    Unknown,
+    Bmp,
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Wav,
+    Mp3,
+    Em16,
+    Emga,
+    Empa
+  };
+
+  static Format fromPath(const String &path) {
+    String value = path;
+    int query = value.indexOf('?');
+    if (query >= 0) value.remove(query);
+    int dot = value.lastIndexOf('.');
+    if (dot < 0) return Format::Unknown;
+    String suffix = value.substring(dot);
+    suffix.toLowerCase();
+    if (suffix == F(".bmp")) return Format::Bmp;
+    if (suffix == F(".png")) return Format::Png;
+    if (suffix == F(".jpg") || suffix == F(".jpeg")) return Format::Jpeg;
+    if (suffix == F(".gif")) return Format::Gif;
+    if (suffix == F(".webp")) return Format::Webp;
+    if (suffix == F(".wav")) return Format::Wav;
+    if (suffix == F(".mp3")) return Format::Mp3;
+    if (suffix == F(".em16")) return Format::Em16;
+    if (suffix == F(".emga")) return Format::Emga;
+    if (suffix == F(".empa")) return Format::Empa;
+    return Format::Unknown;
+  }
+
+  static Format fromContentType(const String &contentType) {
+    String type = contentType;
+    int semicolon = type.indexOf(';');
+    if (semicolon >= 0) type.remove(semicolon);
+    type.trim();
+    type.toLowerCase();
+    if (type == F("image/bmp") || type == F("image/x-ms-bmp")) return Format::Bmp;
+    if (type == F("image/png") || type == F("image/x-png")) return Format::Png;
+    if (type == F("image/jpeg") || type == F("image/jpg") || type == F("image/pjpeg")) return Format::Jpeg;
+    if (type == F("image/gif")) return Format::Gif;
+    if (type == F("image/webp")) return Format::Webp;
+    if (type == F("audio/wav") || type == F("audio/x-wav") || type == F("audio/wave") ||
+        type == F("audio/vnd.wave") || type == F("audio/x-pn-wav")) return Format::Wav;
+    if (type == F("audio/mpeg") || type == F("audio/mp3") || type == F("audio/x-mpeg")) return Format::Mp3;
+    return Format::Unknown;
+  }
+
+  static Format fromSignature(const uint8_t *bytes, size_t length) {
+    if (!bytes) return Format::Unknown;
+    if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == '1' && bytes[3] == '6') return Format::Em16;
+    if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == 'G' && bytes[3] == 'A') return Format::Emga;
+    if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == 'P' && bytes[3] == 'A') return Format::Empa;
+    if (length >= 2 && bytes[0] == 'B' && bytes[1] == 'M') return Format::Bmp;
+    if (length >= 8 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G' &&
+        bytes[4] == 0x0d && bytes[5] == 0x0a && bytes[6] == 0x1a && bytes[7] == 0x0a) return Format::Png;
+    if (length >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) return Format::Jpeg;
+    if (length >= 6 && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == '8' &&
+        (bytes[4] == '7' || bytes[4] == '9') && bytes[5] == 'a') return Format::Gif;
+    if (length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
+        bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') return Format::Webp;
+    if (length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
+        bytes[8] == 'W' && bytes[9] == 'A' && bytes[10] == 'V' && bytes[11] == 'E') return Format::Wav;
+    if (length >= 3 && bytes[0] == 'I' && bytes[1] == 'D' && bytes[2] == '3') return Format::Mp3;
+    if (length >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0) return Format::Mp3;
+    return Format::Unknown;
+  }
+
+  static Group group(Format format) {
+    switch (format) {
+      case Format::Bmp:
+      case Format::Png:
+      case Format::Jpeg:
+      case Format::Gif:
+      case Format::Webp:
+      case Format::Em16:
+      case Format::Emga:
+        return Group::Image;
+      case Format::Wav:
+      case Format::Mp3:
+      case Format::Empa:
+        return Group::Audio;
+      default:
+        return Group::Unknown;
+    }
+  }
+
+  static bool isDownloadable(Format format) {
+    return !isInternal(format) && (isImage(format) || isAudio(format));
+  }
+
+  static bool isOpenable(Format format) {
+    return isDownloadable(format);
+  }
+
+  static bool isImage(Format format) {
+    return group(format) == Group::Image;
+  }
+
+  static bool isAudio(Format format) {
+    return group(format) == Group::Audio;
+  }
+
+  static bool isInternal(Format format) {
+    return format == Format::Em16 || format == Format::Emga || format == Format::Empa;
+  }
+
+  static const char *extension(Format format) {
+    switch (format) {
+      case Format::Bmp: return ".bmp";
+      case Format::Png: return ".png";
+      case Format::Jpeg: return ".jpg";
+      case Format::Gif: return ".gif";
+      case Format::Webp: return ".webp";
+      case Format::Wav: return ".wav";
+      case Format::Mp3: return ".mp3";
+      case Format::Em16: return ".em16";
+      case Format::Emga: return ".emga";
+      case Format::Empa: return ".empa";
+      default: return "";
+    }
+  }
+};

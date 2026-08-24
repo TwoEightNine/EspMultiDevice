@@ -1,5 +1,7 @@
 #include "ImageViewerScreen.h"
 
+#include "FileFormats.h"
+
 // Arduino's sketch builder does not compile sources below the sketch root;
 // include the pinned, header-based decoder implementation exactly once.
 #include "third_party/AnimatedGIF/AnimatedGIF.cpp"
@@ -609,12 +611,12 @@ bool ImageViewerScreen::readRasterHeader() {
     _error = F("Unable to read image header");
     return false;
   }
-  if (signature[0] == 'B' && signature[1] == 'M') {
+  FileFormats::Format sourceFormat = FileFormats::fromSignature(signature, sizeof(signature));
+  if (sourceFormat == FileFormats::Format::Bmp) {
     _format = ImageFormat::Bmp;
     return readHeader();
   }
-  if (signature[0] == 0x89 && signature[1] == 'P' && signature[2] == 'N' && signature[3] == 'G' &&
-      signature[4] == 0x0d && signature[5] == 0x0a && signature[6] == 0x1a && signature[7] == 0x0a) {
+  if (sourceFormat == FileFormats::Format::Png) {
     _format = ImageFormat::Png;
     _decoderOwner = this;
     int pngResult = _png.open(_path.c_str(), pngOpen, pngClose, pngRead, pngSeek, pngDraw);
@@ -635,7 +637,7 @@ bool ImageViewerScreen::readRasterHeader() {
     }
     return true;
   }
-  if (signature[0] == 0xff && signature[1] == 0xd8) {
+  if (sourceFormat == FileFormats::Format::Jpeg) {
     _format = ImageFormat::Jpeg;
     _decoderOwner = this;
     int jpegResult = _file.seek(0) ? _jpeg.open(_file, jpegDraw) : 0;
@@ -656,9 +658,7 @@ bool ImageViewerScreen::readRasterHeader() {
     }
     return true;
   }
-  if (signature[0] == 'G' && signature[1] == 'I' && signature[2] == 'F' &&
-      ((signature[3] == '8' && signature[4] == '7' && signature[5] == 'a') ||
-       (signature[3] == '8' && signature[4] == '9' && signature[5] == 'a'))) {
+  if (sourceFormat == FileFormats::Format::Gif) {
     _format = ImageFormat::Gif;
     _decoderOwner = this;
     _gif.begin(GIF_PALETTE_RGB565_LE);
@@ -680,9 +680,7 @@ bool ImageViewerScreen::readRasterHeader() {
     }
     return true;
   }
-  if (signature[0] == 'R' && signature[1] == 'I' && signature[2] == 'F' &&
-      signature[3] == 'F' && signature[8] == 'W' && signature[9] == 'E' &&
-      signature[10] == 'B' && signature[11] == 'P') {
+  if (sourceFormat == FileFormats::Format::Webp) {
     _format = ImageFormat::Webp;
     if (_webpSource == nullptr && !inspectWebpSource()) return false;
     return true;
@@ -1780,8 +1778,7 @@ void ImageViewerScreen::releaseGifDecoder() {
 bool ImageViewerScreen::isGifSource() {
   uint8_t signature[6] = {};
   if (!_file || !_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) return false;
-  return signature[0] == 'G' && signature[1] == 'I' && signature[2] == 'F' &&
-    signature[3] == '8' && (signature[4] == '7' || signature[4] == '9') && signature[5] == 'a';
+  return FileFormats::fromSignature(signature, sizeof(signature)) == FileFormats::Format::Gif;
 }
 
 bool ImageViewerScreen::isWebpSource() {
@@ -1789,9 +1786,7 @@ bool ImageViewerScreen::isWebpSource() {
   if (!_file || !_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) {
     return false;
   }
-  return signature[0] == 'R' && signature[1] == 'I' && signature[2] == 'F' &&
-         signature[3] == 'F' && signature[8] == 'W' && signature[9] == 'E' &&
-         signature[10] == 'B' && signature[11] == 'P';
+  return FileFormats::fromSignature(signature, sizeof(signature)) == FileFormats::Format::Webp;
 }
 
 bool ImageViewerScreen::prepareWebpSource() {

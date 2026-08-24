@@ -62,8 +62,6 @@ private:
   uint16_t countEntries() const;
   bool entryAt(uint16_t index, String &name, bool &isDirectory) const;
   bool isHiddenEntry(const String &path) const;
-  bool isImageFile(const String &name) const;
-  bool isAudioFile(const String &name) const;
   void openDirectory(const String &path);
   void openParentDirectory();
   String parentPath() const;

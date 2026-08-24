@@ -28,6 +28,7 @@ const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
 const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
+const char *DownloadDirectory = "/.system/browser_media";
 
 String trimCopy(const String &value) {
   String result = value;
@@ -89,6 +90,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _sdCard(sdCard),
     _plainClient(),
     _secureClient(),
+    _linkCount(0),
     _recentCount(0),
     _cookieCount(0),
     _loaded(false),
@@ -101,7 +103,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _titleBuffer(),
     _rowCount(0),
     _pageCount(0),
-    _currentStyle{DefaultTextColor, false, false, false, false},
+    _currentStyle{DefaultTextColor, false, false, false, false, 0},
     _styleDepth(0),
     _pendingSpace(false),
     _renderedCharacters(0),
@@ -172,6 +174,10 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
         return;
       }
     }
+  }
+  if (!_showStart) {
+    String linkUrl = documentLinkAt(point.x, point.y);
+    if (linkUrl.length()) openUrl(linkUrl);
   }
 }
 
@@ -309,6 +315,33 @@ bool BrowserScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
   return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
 }
 
+String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
+  if (_message.length() || _page >= _pageCount) return "";
+  const uint16_t start = _pageStarts[_page];
+  const uint16_t end = pageEndRow(_page);
+  int16_t rowY = HeaderHeight + DocumentPadding;
+  for (uint16_t index = start; index < end; index++) {
+    const VisualRow &row = _rows[index];
+    const int16_t rowHeight = row.image ? ImageRowHeight : TextRowHeight;
+    if (y >= rowY && y < rowY + rowHeight) {
+      if (row.image) {
+        bool insideImage = x >= DocumentSidePadding && x < _display.width() - DocumentSidePadding;
+        return insideImage && row.imageLinkIndex ? _linkUrls[row.imageLinkIndex - 1] : "";
+      }
+      for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
+        const VisualRun &run = row.runs[runIndex];
+        if (run.style.linkIndex && x >= DocumentSidePadding + run.x &&
+            x < DocumentSidePadding + run.x + run.width) {
+          return _linkUrls[run.style.linkIndex - 1];
+        }
+      }
+      return "";
+    }
+    rowY += rowHeight;
+  }
+  return "";
+}
+
 void BrowserScreen::openUrlInput() {
   _navigator.push(ScreenId::TextInput, ScreenData::textInput("Open URL", false));
 }
@@ -345,7 +378,8 @@ void BrowserScreen::openUrl(const String &value) {
   String finalUrl;
   String body;
   String contentType;
-  if (!fetch(url, finalUrl, body, contentType, error)) {
+  String downloadedPath;
+  if (!fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
     _currentUrl = url;
     _message = error;
     draw();
@@ -353,6 +387,22 @@ void BrowserScreen::openUrl(const String &value) {
   }
   _currentUrl = finalUrl;
   _message = "";
+  if (downloadedPath.length()) {
+    FileFormats::Format format = FileFormats::fromPath(downloadedPath);
+    FileFormats::Group group = FileFormats::group(format);
+    renderPlainText(group == FileFormats::Group::Audio
+      ? "Downloaded audio opened in player."
+      : "Downloaded image opened in viewer.", group == FileFormats::Group::Audio ? "Audio download" : "Image download");
+    addRecent(_currentUrl, _title);
+    saveState();
+    if (group == FileFormats::Group::Image &&
+        _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(downloadedPath))) return;
+    if (group == FileFormats::Group::Audio &&
+        _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(downloadedPath))) return;
+    _message = "Could not open downloaded file";
+    draw();
+    return;
+  }
   if (contentType.indexOf("text/html") >= 0 || contentType.indexOf("application/xhtml") >= 0 ||
       contentType.length() == 0) {
     renderDocument(body);
@@ -420,7 +470,10 @@ bool BrowserScreen::parseUrl(const String &value, Url &url) const {
 }
 
 bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &body,
-                          String &contentType, String &error) {
+                          String &contentType, String &downloadedPath, String &error) {
+  body = "";
+  contentType = "";
+  downloadedPath = "";
   String next = initialUrl;
   for (uint8_t redirect = 0; redirect <= MaxRedirects; redirect++) {
     Url url;
@@ -428,25 +481,42 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
       error = "Invalid redirect URL";
       return false;
     }
-    int statusCode = 0;
-    String location;
-    if (!fetchOne(url, statusCode, location, body, contentType, error)) return false;
-    if (statusCode >= 300 && statusCode <= 399) {
-      if (location.length() == 0) {
+    HttpResponse response{};
+    WiFiClient *client = nullptr;
+    if (!requestOne(url, response, client, error)) return false;
+    if (response.statusCode >= 300 && response.statusCode <= 399) {
+      client->stop();
+      if (response.location.length() == 0) {
         error = "Redirect has no destination";
         return false;
       }
-      next = resolveRedirect(url, location);
+      next = resolveUrl(url, response.location);
       continue;
     }
-    if (statusCode == 401) {
+    if (response.statusCode == 401) {
+      client->stop();
       error = "Basic authentication is unsupported";
       return false;
     }
-    if (statusCode < 200 || statusCode >= 300) {
-      error = "HTTP error " + String(statusCode);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      client->stop();
+      error = "HTTP error " + String(response.statusCode);
       return false;
     }
+    contentType = response.contentType;
+    FileFormats::Format format = downloadableFormatForResponse(contentType, url);
+    bool downloadable = FileFormats::isDownloadable(format);
+    bool readOk = false;
+    if (downloadable && response.compressed) {
+      error = "Compressed file response unsupported";
+    } else if (downloadable) {
+      readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
+                                downloadedPath, error);
+    } else {
+      readOk = readBody(*client, response.chunked, response.contentLength, body, error);
+    }
+    client->stop();
+    if (!readOk) return false;
     finalUrl = next;
     return true;
   }
@@ -454,11 +524,11 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
   return false;
 }
 
-bool BrowserScreen::fetchOne(const Url &url, int &statusCode, String &location, String &body,
-                             String &contentType, String &error) {
+bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClient *&client,
+                               String &error) {
   _plainClient.stop();
   _secureClient.stop();
-  WiFiClient *client = &_plainClient;
+  client = &_plainClient;
   if (url.scheme == "https") {
     _secureClient.setInsecure();
     client = &_secureClient;
@@ -489,17 +559,19 @@ bool BrowserScreen::fetchOne(const Url &url, int &statusCode, String &location, 
     return false;
   }
   int firstSpace = line.indexOf(' ');
-  statusCode = firstSpace >= 0 ? line.substring(firstSpace + 1).toInt() : 0;
-  if (statusCode == 0) {
+  response.statusCode = firstSpace >= 0 ? line.substring(firstSpace + 1).toInt() : 0;
+  if (response.statusCode == 0) {
     client->stop();
+    client = nullptr;
     error = "Invalid HTTP status";
     return false;
   }
 
-  bool chunked = false;
-  int32_t contentLength = -1;
-  contentType = "";
-  location = "";
+  response.chunked = false;
+  response.compressed = false;
+  response.contentLength = -1;
+  response.contentType = "";
+  response.location = "";
   for (uint8_t count = 0; count < 48; count++) {
     if (!readLine(*client, line, ConnectTimeoutMs)) {
       client->stop();
@@ -511,18 +583,13 @@ bool BrowserScreen::fetchOne(const Url &url, int &statusCode, String &location, 
     if (colon <= 0) continue;
     String name = lower(trimCopy(line.substring(0, colon)));
     String headerValue = trimCopy(line.substring(colon + 1));
-    if (name == "content-length") contentLength = headerValue.toInt();
-    else if (name == "transfer-encoding" && lower(headerValue).indexOf("chunked") >= 0) chunked = true;
-    else if (name == "content-type") contentType = lower(headerValue);
-    else if (name == "location") location = headerValue;
+    if (name == "content-length") response.contentLength = headerValue.toInt();
+    else if (name == "transfer-encoding" && lower(headerValue).indexOf("chunked") >= 0) response.chunked = true;
+    else if (name == "content-encoding" && !headerValue.equalsIgnoreCase("identity")) response.compressed = true;
+    else if (name == "content-type") response.contentType = lower(headerValue);
+    else if (name == "location") response.location = headerValue;
     else if (name == "set-cookie") acceptCookie(headerValue, url);
   }
-  bool readContent = statusCode < 300 || (statusCode >= 300 && statusCode < 400);
-  if (readContent && !readBody(*client, chunked, contentLength, body, error)) {
-    client->stop();
-    return false;
-  }
-  client->stop();
   return true;
 }
 
@@ -629,15 +696,246 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
   return true;
 }
 
-String BrowserScreen::resolveRedirect(const Url &base, const String &location) const {
-  String target = trimCopy(location);
-  if (target.indexOf("://") >= 0) return target;
+FileFormats::Format BrowserScreen::downloadableFormatForResponse(const String &contentType, const Url &url) const {
+  String type = lower(trimCopy(contentType));
+  int semicolon = type.indexOf(';');
+  if (semicolon >= 0) type.remove(semicolon);
+  type.trim();
+  FileFormats::Format format = FileFormats::fromContentType(type);
+  if (FileFormats::isDownloadable(format)) return format;
+  if (type.length() == 0 || type == "application/octet-stream") {
+    format = FileFormats::fromPath(url.path);
+    if (FileFormats::isDownloadable(format)) return format;
+  }
+  return FileFormats::Format::Unknown;
+}
+
+bool BrowserScreen::isSupportedDownloadFile(const String &path, FileFormats::Format expected) const {
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  File file = SD.open(path.c_str(), FILE_READ);
+  uint8_t signature[12] = {};
+  const int bytes = file ? file.read(signature, sizeof(signature)) : 0;
+  if (file) file.close();
+  SpiBusLock::unlock();
+  return FileFormats::fromSignature(signature, bytes > 0 ? (size_t)bytes : 0) == expected;
+}
+
+bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
+                                     FileFormats::Format format, String &downloadedPath, String &error) {
+  downloadedPath = "";
+  if (!_sdCard.isMounted()) {
+    error = "SD card required for downloads";
+    return false;
+  }
+  if (contentLength > (int32_t)MaxDownloadBytes) {
+    error = "File exceeds 16 MiB limit";
+    return false;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    error = "SD card is busy";
+    return false;
+  }
+  bool ready = (SD.exists("/.system") || SD.mkdir("/.system")) &&
+               (SD.exists(DownloadDirectory) || SD.mkdir(DownloadDirectory));
+  if (!ready) {
+    SpiBusLock::unlock();
+    error = "Cannot create download cache";
+    return false;
+  }
+
+  const String extension = FileFormats::extension(format);
+  const uint32_t stamp = millis();
+  String path;
+  String tempPath;
+  File file;
+  for (uint16_t attempt = 0; attempt < 1000; attempt++) {
+    path = String(DownloadDirectory) + "/media-" + String((unsigned long)stamp) + "-" + String(attempt) + extension;
+    tempPath = path + ".tmp";
+    if (SD.exists(path)) continue;
+    if (SD.exists(tempPath)) SD.remove(tempPath);
+    file = SD.open(tempPath.c_str(), FILE_WRITE);
+    if (file) break;
+  }
+  SpiBusLock::unlock();
+  if (!file) {
+    error = "Cannot create download file";
+    return false;
+  }
+
+  auto removeTemp = [&]() {
+    // A failed transfer must not leave a partial file behind. Waiting here is
+    // safe because every normal SD user releases the shared bus lock after
+    // each individual operation.
+    SpiBusLock::lock();
+    if (file) file.close();
+    if (tempPath.length()) SD.remove(tempPath.c_str());
+    SpiBusLock::unlock();
+  };
+  uint32_t total = 0;
+  auto writeBytes = [&](const uint8_t *bytes, uint16_t length) -> bool {
+    if (length > MaxDownloadBytes - total) {
+      error = "File exceeds 16 MiB limit";
+      return false;
+    }
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      error = "SD card is busy";
+      return false;
+    }
+    size_t written = file.write(bytes, length);
+    SpiBusLock::unlock();
+    if (written != length) {
+      error = "File download write failed";
+      return false;
+    }
+    total += length;
+    yield();
+    return true;
+  };
+  auto receiveBytes = [&](uint32_t length) -> bool {
+    uint8_t buffer[512];
+    while (length) {
+      uint16_t amount = length > sizeof(buffer) ? sizeof(buffer) : (uint16_t)length;
+      for (uint16_t i = 0; i < amount; i++) {
+        int value = readByte(client, ConnectTimeoutMs);
+        if (value < 0) {
+          error = "File download timed out";
+          return false;
+        }
+        buffer[i] = (uint8_t)value;
+      }
+      if (!writeBytes(buffer, amount)) return false;
+      length -= amount;
+    }
+    return true;
+  };
+
+  bool complete = true;
+  if (chunked) {
+    while (complete) {
+      String sizeLine;
+      if (!readLine(client, sizeLine, ConnectTimeoutMs)) {
+        error = "File download timed out";
+        complete = false;
+        break;
+      }
+      int semicolon = sizeLine.indexOf(';');
+      if (semicolon >= 0) sizeLine.remove(semicolon);
+      char *end = nullptr;
+      uint32_t amount = strtoul(sizeLine.c_str(), &end, 16);
+      if (sizeLine.length() == 0 || !end || *end != '\0') {
+        error = "Invalid chunked download";
+        complete = false;
+        break;
+      }
+      if (amount == 0) {
+        do {
+          if (!readLine(client, sizeLine, ConnectTimeoutMs)) {
+            error = "File download timed out";
+            complete = false;
+            break;
+          }
+        } while (sizeLine.length());
+        break;
+      }
+      if (amount > MaxDownloadBytes - total || !receiveBytes(amount)) {
+        if (error.length() == 0) error = "File exceeds 16 MiB limit";
+        complete = false;
+        break;
+      }
+      int cr = readByte(client, ConnectTimeoutMs);
+      int lf = readByte(client, ConnectTimeoutMs);
+      if (cr != '\r' || lf != '\n') {
+        error = "Invalid chunked download";
+        complete = false;
+      }
+    }
+  } else if (contentLength >= 0) {
+    complete = receiveBytes((uint32_t)contentLength);
+    if (!complete && error.length() == 0) error = "Incomplete file download";
+  } else {
+    uint8_t buffer[512];
+    uint16_t buffered = 0;
+    while (true) {
+      int value = readByte(client, ConnectTimeoutMs);
+      if (value < 0) {
+        if (!client.connected() && !client.available()) break;
+        error = "File download timed out";
+        complete = false;
+        break;
+      }
+      buffer[buffered++] = (uint8_t)value;
+      if (buffered == sizeof(buffer)) {
+        if (!writeBytes(buffer, buffered)) {
+          complete = false;
+          break;
+        }
+        buffered = 0;
+      }
+    }
+    if (complete && buffered && !writeBytes(buffer, buffered)) complete = false;
+  }
+
+  if (!complete) {
+    removeTemp();
+    return false;
+  }
+  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    file.close();
+    SpiBusLock::unlock();
+  } else {
+    error = "SD card is busy";
+    removeTemp();
+    return false;
+  }
+  if (!isSupportedDownloadFile(tempPath, format)) {
+    error = "Unsupported file download";
+    removeTemp();
+    return false;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    error = "SD card is busy";
+    removeTemp();
+    return false;
+  }
+  bool committed = !SD.exists(path) && SD.rename(tempPath.c_str(), path.c_str());
+  if (!committed) SD.remove(tempPath.c_str());
+  SpiBusLock::unlock();
+  if (!committed) {
+    error = "Cannot save file download";
+    return false;
+  }
+  downloadedPath = path;
+  return true;
+}
+
+String BrowserScreen::resolveUrl(const Url &base, const String &reference) const {
+  String target = trimCopy(reference);
   String root = base.scheme + "://" + base.host;
   bool defaultPort = (base.scheme == "http" && base.port == 80) || (base.scheme == "https" && base.port == 443);
   if (!defaultPort) root += ":" + String(base.port);
+
+  int fragment = target.indexOf('#');
+  if (fragment >= 0) target.remove(fragment);
+  if (target.length() == 0) return root + base.path;
+
+  if (target.startsWith("//")) return base.scheme + ":" + target;
+  if (target.indexOf("://") >= 0) return target;
+
+  int colon = target.indexOf(':');
+  int separator = target.length();
+  int slash = target.indexOf('/');
+  int query = target.indexOf('?');
+  if (slash >= 0 && slash < separator) separator = slash;
+  if (query >= 0 && query < separator) separator = query;
+  if (colon >= 0 && colon < separator) return target;
+
   if (target.startsWith("/")) return root + target;
-  String directory = base.path;
-  int slash = directory.lastIndexOf('/');
+  String path = base.path;
+  int queryStart = path.indexOf('?');
+  if (queryStart >= 0) path.remove(queryStart);
+  if (target.startsWith("?")) return root + path + target;
+  String directory = path;
+  slash = directory.lastIndexOf('/');
   directory = slash >= 0 ? directory.substring(0, slash + 1) : "/";
   return root + directory + target;
 }
@@ -774,7 +1072,7 @@ void BrowserScreen::renderDocument(const String &html) {
         appendBreak();
       } else if (tag == "img") {
         String alt = decodeEntities(attributeValue(attributes, "alt"));
-        appendImage(alt.length() ? alt : "image", _currentStyle.link);
+        appendImage(alt.length() ? alt : "image", _currentStyle.link, _currentStyle.linkIndex);
       } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
                  tag == "embed" || tag == "canvas") {
         appendStub(tag);
@@ -807,7 +1105,8 @@ void BrowserScreen::resetRenderedRows() {
   _rowCount = 0;
   _pageCount = 0;
   _styleDepth = 0;
-  _currentStyle = {DefaultTextColor, false, false, false, false};
+  _currentStyle = {DefaultTextColor, false, false, false, false, 0};
+  _linkCount = 0;
   _pendingSpace = false;
   _renderedCharacters = 0;
 }
@@ -837,13 +1136,14 @@ void BrowserScreen::appendBreak() {
   }
 }
 
-void BrowserScreen::appendImage(const String &label, bool linked) {
+void BrowserScreen::appendImage(const String &label, bool linked, uint8_t linkIndex) {
   appendBreak();
   if (_rowCount >= MaxRows) return;
   VisualRow &row = _rows[_rowCount++];
   row.image = true;
   row.imageLabel = label;
   row.imageLink = linked;
+  row.imageLinkIndex = linkIndex;
   row.contentWidth = 0;
   row.runCount = 0;
 }
@@ -928,6 +1228,7 @@ void BrowserScreen::beginTextRow() {
   row.image = false;
   row.imageLabel = "";
   row.imageLink = false;
+  row.imageLinkIndex = 0;
   row.contentWidth = 0;
   row.runCount = 0;
 }
@@ -976,16 +1277,29 @@ void BrowserScreen::applyFont(const TextStyle &style) const {
 
 bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) const {
   return left.color == right.color && left.bold == right.bold && left.italic == right.italic &&
-         left.underline == right.underline && left.link == right.link;
+         left.underline == right.underline && left.link == right.link && left.linkIndex == right.linkIndex;
 }
 
-BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) const {
+BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) {
   TextStyle style = _currentStyle;
   if (tag == "b" || tag == "strong") style.bold = true;
   if (tag == "i" || tag == "em") style.italic = true;
   if (tag == "a") {
     style.underline = true;
     style.link = true;
+    style.linkIndex = 0;
+    String href = decodeEntities(attributeValue(attributes, "href"));
+    href.trim();
+    if (href.length() && !href.startsWith("#")) {
+      Url base;
+      String resolved;
+      String error;
+      if (parseUrl(_currentUrl, base)) resolved = resolveUrl(base, href);
+      String normalized;
+      bool isHttp = startsWithIgnoreCase(resolved, "http://") || startsWithIgnoreCase(resolved, "https://");
+      if (isHttp && normalizeUrl(resolved, normalized, error)) style.linkIndex = registerLink(normalized);
+      else style.linkIndex = 0;
+    }
   }
 
   String color = attributeValue(attributes, "color");
@@ -1008,6 +1322,16 @@ BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const St
     start = end + 1;
   }
   return style;
+}
+
+uint8_t BrowserScreen::registerLink(const String &url) {
+  for (uint8_t index = 0; index < _linkCount; index++) {
+    if (_linkUrls[index] == url) return index + 1;
+  }
+  if (_linkCount >= MaxLinks) return 0;
+  _linkUrls[_linkCount] = url;
+  _linkCount++;
+  return _linkCount;
 }
 
 String BrowserScreen::attributeValue(const String &attributes, const char *name) const {
@@ -1110,7 +1434,7 @@ void BrowserScreen::popStyle(const String &tag) {
     if (_styleStack[index].tag != tag) continue;
     _styleDepth = index;
     _currentStyle = index > 0 ? _styleStack[index - 1].style :
-      TextStyle{DefaultTextColor, false, false, false, false};
+      TextStyle{DefaultTextColor, false, false, false, false, 0};
     return;
   }
 }
