@@ -2,6 +2,7 @@
 
 #include "DisplayController.h"
 #include "AudioPlayerScreen.h"
+#include "BrowserScreen.h"
 #include "FilesScreen.h"
 #include "HomeScreen.h"
 #include "ImageViewerScreen.h"
@@ -70,6 +71,7 @@ ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
+BrowserScreen *browserScreen = nullptr;
 
 void updateTouch();
 
@@ -190,6 +192,7 @@ void setup() {
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
+  browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -220,6 +223,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::TextInput, *textInputScreen)) {
     Serial.println(F("Navigator failed to register Text Input screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::Browser, *browserScreen)) {
+    Serial.println(F("Navigator failed to register Browser screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

@@ -32,6 +32,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
   _apps[0] = { "Files", AppAction::Files, TFT_BLUE, nullptr, 0, 0, 0, 0 };
   _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
   _apps[2] = { "Settings", AppAction::Settings, TFT_DARKGREEN, nullptr, 0, 0, 0, 0 };
+  _apps[3] = { "Browser", AppAction::Browser, TFT_CYAN, nullptr, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -68,6 +69,8 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::VoiceRecorder);
     } else if (app.action == AppAction::Settings) {
       _navigator.push(ScreenId::Settings);
+    } else if (app.action == AppAction::Browser) {
+      _navigator.push(ScreenId::Browser);
     }
     return;
   }
@@ -96,14 +99,16 @@ void HomeScreen::draw() {
 
 void HomeScreen::layoutApps() {
   int16_t width = _display.width();
-  int16_t columnWidth = width / AppCount;
+  int16_t columnWidth = width / AppColumns;
   int16_t tileTop = StatusBarHeight + 16;
-  int16_t tileHeight = 150;
+  int16_t tileHeight = 116;
 
   for (uint8_t i = 0; i < AppCount; i++) {
-    _apps[i].x = i * columnWidth;
-    _apps[i].y = tileTop;
-    _apps[i].w = (i == AppCount - 1) ? width - _apps[i].x : columnWidth;
+    uint8_t column = i % AppColumns;
+    uint8_t row = i / AppColumns;
+    _apps[i].x = column * columnWidth;
+    _apps[i].y = tileTop + row * tileHeight;
+    _apps[i].w = column == AppColumns - 1 ? width - _apps[i].x : columnWidth;
     _apps[i].h = tileHeight;
   }
 }

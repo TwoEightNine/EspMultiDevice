@@ -21,7 +21,8 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t AppCount = 3;
+  static const uint8_t AppCount = 4;
+  static const uint8_t AppColumns = 3;
   static const int16_t StatusBarHeight = 24;
   static const int16_t IconDiameter = 80;
   static const int16_t IconBitmapSize = 64;
@@ -30,7 +31,8 @@ private:
   enum class AppAction : uint8_t {
     Files,
     Recorder,
-    Settings
+    Settings,
+    Browser
   };
 
   struct AppTile {

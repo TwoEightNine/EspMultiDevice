@@ -24,6 +24,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Records 16 kHz mono WAV voice clips from an INMP441 I2S microphone to SD.
 - Plays the saved voice clip through a MAX98357A I2S amplifier.
 - Streams mono or stereo integer PCM WAV files and local MPEG Layer III MP3 files through the Audio player screen.
+- Includes a simple Browser app with recent sites, HTTP/HTTPS text-page loading, persistent cookies, and fixed page controls.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 - Image Viewer supports BMP, PNG, JPG, JPEG, WebP, and animated GIF/WebP files with PSRAM-backed rendering and SD-backed frame caches. Animated images are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
@@ -55,6 +56,15 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
+- `BrowserScreen.h` / `BrowserScreen.cpp`: lightweight HTTP/HTTPS browser, HTML-to-text renderer, bounded cookie jar, recent-site persistence, and browser UI.
+
+## Browser
+
+The Home Browser app opens a start page with up to eight recent sites. Tap **Open a new page** (or **New URL**) to enter a URL with the on-screen keyboard; a URL without a scheme is treated as `https://`. Recent entries are tappable, while hyperlinks in rendered page content are intentionally plain, non-tappable text.
+
+The browser supports `http://` and `https://` GET requests, up to five redirects, chunked or fixed-length uncompressed responses, and a bounded cookie jar. It retains up to 512 KiB from a response rather than rejecting a large page, then renders its readable static text as simple paged lines. Cyrillic text is temporarily transliterated to Latin. JavaScript and CSS are ignored; pages that contain only JavaScript report that limitation; images, media, embeds, and forms appear as text stubs. HTTP Basic authentication and form login are not supported.
+
+Recent sites and cookies are stored as plaintext in `/.system/browser_state.txt` on the SD card. Browser operation continues without an SD card, but no data persists. HTTPS certificate validation is deliberately disabled for this initial compatibility-focused version: do not use the browser for sensitive accounts or private information.
 
 ## Screen Architecture
 
