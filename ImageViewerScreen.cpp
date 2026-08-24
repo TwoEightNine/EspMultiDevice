@@ -32,6 +32,13 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
                                      SdCardController &sdCard)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
+    _webpSource(nullptr),
+    _webpSourceSize(0),
+    _webpRgba(nullptr),
+    _webpAnimDecoder(nullptr),
+    _webpAnimInfo{},
+    _webpAnimated(false),
+    _webpPreviousTimestamp(0),
     _sourceFileSize(0),
     _sourceWriteTime(0),
     _cacheOffset(0),
@@ -152,6 +159,16 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     _cachePath = animationCachePathForSource();
     _cacheTempPath = _cachePath + F(".tmp");
     if (loadAnimationCache()) return;
+  } else if (isWebpSource()) {
+    _format = ImageFormat::Webp;
+    if (!inspectWebpSource()) {
+      if (_error.length() == 0) _error = F("Invalid WebP image");
+      drawError();
+      return;
+    }
+    _cachePath = _webpAnimated ? animationCachePathForSource() : cachePathForSource();
+    _cacheTempPath = _cachePath + F(".tmp");
+    if (_webpAnimated && loadAnimationCache()) return;
   } else {
     _cachePath = cachePathForSource();
     _cacheTempPath = _cachePath + F(".tmp");
@@ -162,22 +179,26 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     draw();
     _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
     releaseBuffers();
+    releaseWebpDecoder();
     drawCloseIcon();
     return;
   }
   if (!readRasterHeader() || !prepareRender()) {
     if (_error.length() == 0) _error = F("Unable to render image");
+    releaseWebpDecoder();
     drawError();
     return;
   }
   draw();
   drawLoading(0);
-  if (_format == ImageFormat::Gif) {
-    if (!startGifBuild()) {
-      if (_error.length() == 0) _error = F("Could not cache GIF");
+  if (_format == ImageFormat::Gif || (_format == ImageFormat::Webp && _webpAnimated)) {
+    bool started = _format == ImageFormat::Gif ? startGifBuild() : startWebpBuild();
+    if (!started) {
+      if (_error.length() == 0) _error = F("Could not cache animation");
       if (_cacheFile) _cacheFile.close();
       if (_cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
       releaseGifDecoder();
+      releaseWebpDecoder();
       releaseGifBuffers();
       releaseBuffers();
       drawError();
@@ -189,6 +210,7 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   if (_format != ImageFormat::Bmp && !decodeRasterImage()) {
     if (_error.length() == 0) _error = F("Could not decode image");
     releaseBuffers();
+    releaseWebpDecoder();
     drawError();
     return;
   }
@@ -196,7 +218,10 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   if (!_rendering) {
     _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
     startCacheWrite();
-    if (!_cacheWriting) releaseBuffers();
+    if (!_cacheWriting) {
+      releaseBuffers();
+      releaseWebpDecoder();
+    }
     drawCloseIcon();
     return;
   }
@@ -216,12 +241,14 @@ void ImageViewerScreen::onExit() {
 
 void ImageViewerScreen::tick(uint32_t nowMs) {
   if (_gifState == GifState::Building) {
-    if (!buildGifFrame()) {
+    bool built = _format == ImageFormat::Webp ? buildWebpFrame() : buildGifFrame();
+    if (!built) {
       _gifState = GifState::None;
-      if (_error.length() == 0) _error = F("Could not cache GIF");
+      if (_error.length() == 0) _error = F("Could not cache animation");
       if (_cacheFile) _cacheFile.close();
       if (_cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
       releaseGifDecoder();
+      releaseWebpDecoder();
       releaseGifBuffers();
       releaseBuffers();
       drawError();
@@ -275,6 +302,7 @@ void ImageViewerScreen::reset() {
   stopGifLoader();
   _decoderOwner = nullptr;
   releaseGifDecoder();
+  releaseWebpDecoder();
   if (_file) _file.close();
   if (_decoderFile) _decoderFile.close();
   if (_cacheFile) _cacheFile.close();
@@ -295,6 +323,7 @@ void ImageViewerScreen::reset() {
   _gifBuildFrame = 0;
   _gifBuildWriteOffset = 0;
   _gifBuildDelay = 0;
+  _webpPreviousTimestamp = 0;
   _gifFrameCount = 0;
   _gifPlaybackFrame = 0;
   _gifPlaybackDelay = 0;
@@ -397,6 +426,7 @@ const char *ImageViewerScreen::formatName() const {
     case ImageFormat::Png: return "PNG";
     case ImageFormat::Jpeg: return "JPEG";
     case ImageFormat::Gif: return "GIF";
+    case ImageFormat::Webp: return "WebP";
     default: return "unknown";
   }
 }
@@ -575,7 +605,7 @@ bool ImageViewerScreen::readHeader() {
 }
 
 bool ImageViewerScreen::readRasterHeader() {
-  uint8_t signature[8] = {};
+  uint8_t signature[12] = {};
   if (!_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) {
     _error = F("Unable to read image header");
     return false;
@@ -651,6 +681,13 @@ bool ImageViewerScreen::readRasterHeader() {
     }
     return true;
   }
+  if (signature[0] == 'R' && signature[1] == 'I' && signature[2] == 'F' &&
+      signature[3] == 'F' && signature[8] == 'W' && signature[9] == 'E' &&
+      signature[10] == 'B' && signature[11] == 'P') {
+    _format = ImageFormat::Webp;
+    if (_webpSource == nullptr && !inspectWebpSource()) return false;
+    return true;
+  }
   _error = F("Unsupported image format");
   return false;
 }
@@ -683,7 +720,8 @@ bool ImageViewerScreen::readCacheHeader(fs::File &file) const {
 }
 
 bool ImageViewerScreen::loadCache() {
-  if (_format == ImageFormat::Gif) return false;
+  if (_format == ImageFormat::Unknown || _format == ImageFormat::Gif ||
+      (_format == ImageFormat::Webp && _webpAnimated)) return false;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
   if (!SD.exists(_cachePath)) return false;
   fs::File cache = SD.open(_cachePath.c_str(), FILE_READ);
@@ -805,7 +843,9 @@ bool ImageViewerScreen::loadAnimationCache() {
     releaseGifBuffers();
     return false;
   }
-  Serial.print(F("Animated GIF cache hit: "));
+  if (_format == ImageFormat::Webp) releaseWebpDecoder();
+  Serial.print(_format == ImageFormat::Webp ? F("Animated WebP cache hit: ")
+                                             : F("Animated GIF cache hit: "));
   Serial.println(_cachePath);
   return true;
 }
@@ -952,7 +992,7 @@ void ImageViewerScreen::drawGifLoading(uint8_t percent) {
   tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Converting GIF"), centerX, centerY - 12, 2);
+  tft.drawString(F("Converting animation"), centerX, centerY - 12, 2);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.drawString(String(percent) + F("%"), centerX, centerY + 14, 2);
   tft.setTextDatum(TL_DATUM);
@@ -1289,6 +1329,25 @@ void ImageViewerScreen::prepareGifDrawRect() {
   }
 }
 
+void ImageViewerScreen::presentGifFullFrame(const uint16_t *frame) {
+  if (!frame || !_display.isReady()) return;
+
+  // Keep each TFT transaction short. A complete 480x320 transfer can hold
+  // the CPU long enough to starve another time-sensitive peripheral (notably
+  // I2S playback). Row bands preserve the image while allowing the scheduler
+  // and interrupt handlers to run between transfers.
+  const uint16_t width = _display.width();
+  const uint16_t height = _display.height();
+  const uint16_t bandHeight = 16;
+  for (uint16_t y = 0; y < height; y += bandHeight) {
+    uint16_t rows = height - y;
+    if (rows > bandHeight) rows = bandHeight;
+    _display.tft().pushImage(0, y, width, rows,
+                              const_cast<uint16_t *>(frame + (size_t)y * width));
+    taskYIELD();
+  }
+}
+
 void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
                                         const uint16_t *previous,
                                         bool forceFull) {
@@ -1299,7 +1358,7 @@ void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
   // proven full-frame path in that uncommon orientation.
   if (forceFull || !previous || cacheNeedsRotation() ||
       width != CacheWidth || height != CacheHeight) {
-    _display.tft().pushImage(0, 0, width, height, const_cast<uint16_t *>(frame));
+    presentGifFullFrame(frame);
     return;
   }
 
@@ -1317,7 +1376,7 @@ void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
         if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
       }
       if (different && ++changed > (uint16_t)((columns * rows) / 2)) {
-        _display.tft().pushImage(0, 0, width, height, const_cast<uint16_t *>(frame));
+        presentGifFullFrame(frame);
         return;
       }
     }
@@ -1333,7 +1392,10 @@ void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
         memcpy(_gifTileBuffer + row * GifTileSize, currentRow, GifTileSize * sizeof(uint16_t));
         if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
       }
-      if (different) _display.tft().pushImage(x, y, GifTileSize, GifTileSize, _gifTileBuffer);
+      if (different) {
+        _display.tft().pushImage(x, y, GifTileSize, GifTileSize, _gifTileBuffer);
+        taskYIELD();
+      }
     }
   }
 }
@@ -1637,7 +1699,7 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
       return true;
     }
     _gifCyclesCompleted++;
-    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _gifPlaybackA);
+    presentGifFullFrame(_gifPlaybackA);
     _gifNextFrameAt = nowMs + (_gifPlaybackDelay ? _gifPlaybackDelay : 1);
     return true;
   }
@@ -1649,7 +1711,7 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
   uint32_t displayedFrame = _gifBufferedFrame;
   _gifPlaybackFrame = displayedFrame;
   _gifPlaybackDelay = _gifNextDelay;
-  _display.tft().pushImage(0, 0, _display.width(), _display.height(), active);
+  presentGifFullFrame(active);
   drawCloseIcon();
 
   if (displayedFrame + 1 < _gifFrameCount) {
@@ -1718,6 +1780,275 @@ bool ImageViewerScreen::isGifSource() {
   if (!_file || !_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) return false;
   return signature[0] == 'G' && signature[1] == 'I' && signature[2] == 'F' &&
     signature[3] == '8' && (signature[4] == '7' || signature[4] == '9') && signature[5] == 'a';
+}
+
+bool ImageViewerScreen::isWebpSource() {
+  uint8_t signature[12] = {};
+  if (!_file || !_file.seek(0) || _file.read(signature, sizeof(signature)) != sizeof(signature)) {
+    return false;
+  }
+  return signature[0] == 'R' && signature[1] == 'I' && signature[2] == 'F' &&
+         signature[3] == 'F' && signature[8] == 'W' && signature[9] == 'E' &&
+         signature[10] == 'B' && signature[11] == 'P';
+}
+
+bool ImageViewerScreen::prepareWebpSource() {
+  if (_webpSource) return true;
+  if (!_file || _sourceFileSize == 0 || !psramFound()) {
+    _error = F("WebP needs PSRAM");
+    return false;
+  }
+  _webpSourceSize = _sourceFileSize;
+  _webpSource = (uint8_t *)ps_malloc(_webpSourceSize);
+  if (!_webpSource) {
+    _error = F("WebP source needs too much PSRAM");
+    return false;
+  }
+  if (!_file.seek(0)) {
+    _error = F("WebP source seek failed");
+    releaseWebpDecoder();
+    return false;
+  }
+  uint32_t offset = 0;
+  while (offset < _webpSourceSize) {
+    uint16_t amount = (uint16_t)((_webpSourceSize - offset) > CacheChunkBytes
+                                   ? CacheChunkBytes : (_webpSourceSize - offset));
+    if (_file.read(_cacheChunk, amount) != amount) {
+      _error = F("WebP source read failed");
+      releaseWebpDecoder();
+      return false;
+    }
+    memcpy(_webpSource + offset, _cacheChunk, amount);
+    offset += amount;
+  }
+  return true;
+}
+
+bool ImageViewerScreen::inspectWebpSource() {
+  if (!prepareWebpSource()) return false;
+  WebPBitstreamFeatures features;
+  if (WebPGetFeatures(_webpSource, _webpSourceSize, &features) != VP8_STATUS_OK ||
+      features.width <= 0 || features.height <= 0) {
+    _error = F("Invalid WebP header");
+    releaseWebpDecoder();
+    return false;
+  }
+  _sourceWidth = (uint32_t)features.width;
+  _sourceHeight = (uint32_t)features.height;
+  _webpAnimated = features.has_animation != 0;
+  if (!_webpAnimated) return true;
+
+  WebPData data = { _webpSource, _webpSourceSize };
+  WebPAnimDecoderOptions options;
+  if (!WebPAnimDecoderOptionsInit(&options)) {
+    _error = F("WebP animation setup failed");
+    releaseWebpDecoder();
+    return false;
+  }
+  options.color_mode = MODE_RGBA;
+  options.use_threads = 0;
+  _webpAnimDecoder = WebPAnimDecoderNew(&data, &options);
+  if (!_webpAnimDecoder || !WebPAnimDecoderGetInfo(_webpAnimDecoder, &_webpAnimInfo) ||
+      _webpAnimInfo.frame_count == 0) {
+    _error = F("Invalid WebP animation");
+    releaseWebpDecoder();
+    return false;
+  }
+  _sourceWidth = _webpAnimInfo.canvas_width;
+  _sourceHeight = _webpAnimInfo.canvas_height;
+  _gifFrameCount = _webpAnimInfo.frame_count;
+  _gifLoopCount = (int32_t)_webpAnimInfo.loop_count;
+  return true;
+}
+
+void ImageViewerScreen::scaleWebpRgba(const uint8_t *rgba) {
+  if (!_frameBuffer || !rgba || _sourceWidth == 0 || _sourceHeight == 0) return;
+  memset(_frameBuffer, 0, (size_t)_display.width() * _display.height() * sizeof(uint16_t));
+  for (uint32_t dy = 0; dy < _drawHeight; dy++) {
+    uint32_t sourceY = _drawHeight > 1
+      ? (uint32_t)(((uint64_t)dy * (_sourceHeight - 1)) / (_drawHeight - 1)) : 0;
+    uint16_t *destination = _frameBuffer +
+      (size_t)(_top + dy) * _display.width() + _left;
+    const uint8_t *sourceRow = rgba + (size_t)sourceY * _sourceWidth * 4;
+    for (uint32_t dx = 0; dx < _drawWidth; dx++) {
+      uint32_t sourceX = _drawWidth > 1
+        ? (uint32_t)(((uint64_t)dx * (_sourceWidth - 1)) / (_drawWidth - 1)) : 0;
+      const uint8_t *pixel = sourceRow + sourceX * 4;
+      uint8_t alpha = pixel[3];
+      uint8_t red = (uint8_t)(((uint16_t)pixel[0] * alpha + 127) / 255);
+      uint8_t green = (uint8_t)(((uint16_t)pixel[1] * alpha + 127) / 255);
+      uint8_t blue = (uint8_t)(((uint16_t)pixel[2] * alpha + 127) / 255);
+      destination[dx] = (uint16_t)(((red & 0xf8) << 8) |
+                                   ((green & 0xfc) << 3) | (blue >> 3));
+    }
+  }
+}
+
+bool ImageViewerScreen::decodeWebpImage() {
+  if (_webpAnimated || !_webpSource || !_frameBuffer) return false;
+  uint64_t rgbaBytes = (uint64_t)_sourceWidth * _sourceHeight * 4ULL;
+  if (rgbaBytes == 0 || rgbaBytes > 0xffffffffULL || _sourceWidth > 0x1fffffffUL) {
+    _error = F("WebP dimensions unsupported");
+    return false;
+  }
+  _webpRgba = (uint8_t *)ps_malloc((size_t)rgbaBytes);
+  if (!_webpRgba || !WebPDecodeRGBAInto(_webpSource, _webpSourceSize, _webpRgba,
+                                        (size_t)rgbaBytes, (int)_sourceWidth * 4)) {
+    _error = F("WebP decode failed");
+    releaseWebpDecoder();
+    return false;
+  }
+  scaleWebpRgba(_webpRgba);
+  releaseWebpDecoder();
+  _lastProgress = 100;
+  drawLoading(100);
+  return true;
+}
+
+bool ImageViewerScreen::startWebpBuild() {
+  if (_format != ImageFormat::Webp || !_webpAnimated || !_webpAnimDecoder || !_frameBuffer) return false;
+  if (!cacheNeedsRotation() &&
+      (_display.width() != CacheWidth || _display.height() != CacheHeight)) {
+    _error = F("WebP cache does not support this display size");
+    return false;
+  }
+  int slash = _cachePath.lastIndexOf('/');
+  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
+  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+    _error = F("Cannot create WebP cache directory");
+    return false;
+  }
+  SD.remove(_cacheTempPath);
+  _cacheFile = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  if (!_cacheFile || !writeAnimationCacheHeader(_cacheFile, 0, _gifLoopCount)) {
+    _error = F("Cannot start WebP cache");
+    if (_cacheFile) _cacheFile.close();
+    SD.remove(_cacheTempPath);
+    return false;
+  }
+  _gifBuildFrame = 0;
+  _gifBuildWriteOffset = 0;
+  _gifBuildWritePending = false;
+  _gifBuildLastFrame = false;
+  _gifBuildDelay = 0;
+  _webpPreviousTimestamp = 0;
+  _gifState = GifState::Building;
+  drawGifLoading(0);
+  return true;
+}
+
+bool ImageViewerScreen::buildWebpFrame() {
+  if (!_cacheFile || !_webpAnimDecoder || !_frameBuffer) return false;
+  if (_gifBuildWritePending) {
+    uint32_t recordBytes = gifFrameRecordBytes();
+    uint32_t remaining = recordBytes - _gifBuildWriteOffset;
+    uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
+    if (_gifBuildWriteOffset < AnimationFrameHeaderSize) {
+      uint8_t delay[AnimationFrameHeaderSize] = {};
+      writeLe32(delay, _gifBuildDelay);
+      uint16_t available = AnimationFrameHeaderSize - _gifBuildWriteOffset;
+      if (amount > available) amount = available;
+      memcpy(_cacheChunk, delay + _gifBuildWriteOffset, amount);
+    } else {
+      uint32_t payloadOffset = _gifBuildWriteOffset - AnimationFrameHeaderSize;
+      for (uint16_t i = 0; i < amount; i++) {
+        uint32_t position = payloadOffset + i;
+        uint32_t pair = position / 3;
+        uint32_t firstPixel = pair * 2;
+        uint16_t x0 = (uint16_t)(firstPixel % _drawWidth);
+        uint16_t y0 = (uint16_t)(firstPixel / _drawWidth);
+        uint16_t first = _frameBuffer[(size_t)(_top + y0) * _display.width() + _left + x0];
+        uint16_t rgb444a = (uint16_t)((first & 0xf000) >> 4) |
+                           (uint16_t)((first & 0x0780) >> 3) |
+                           (uint16_t)((first & 0x001e) >> 1);
+        uint16_t rgb444b = 0;
+        if (firstPixel + 1 < (uint32_t)_drawWidth * _drawHeight) {
+          uint16_t x1 = (uint16_t)((firstPixel + 1) % _drawWidth);
+          uint16_t y1 = (uint16_t)((firstPixel + 1) / _drawWidth);
+          uint16_t second = _frameBuffer[(size_t)(_top + y1) * _display.width() + _left + x1];
+          rgb444b = (uint16_t)((second & 0xf000) >> 4) |
+                       (uint16_t)((second & 0x0780) >> 3) |
+                       (uint16_t)((second & 0x001e) >> 1);
+        }
+        switch (position % 3) {
+          case 0: _cacheChunk[i] = (uint8_t)(rgb444a >> 4); break;
+          case 1: _cacheChunk[i] = (uint8_t)((rgb444a << 4) | (rgb444b >> 8)); break;
+          default: _cacheChunk[i] = (uint8_t)rgb444b; break;
+        }
+      }
+    }
+    if (_cacheFile.write(_cacheChunk, amount) != amount) {
+      _error = F("WebP cache write failed");
+      return false;
+    }
+    _gifBuildWriteOffset += amount;
+    if (_gifBuildWriteOffset == recordBytes) {
+      _gifBuildWritePending = false;
+      _gifBuildFrame++;
+      drawGifLoading((uint8_t)((_gifBuildFrame * 100UL) / _gifFrameCount));
+      if (_gifBuildLastFrame) return finishWebpBuild();
+    }
+    return true;
+  }
+  if (!WebPAnimDecoderHasMoreFrames(_webpAnimDecoder)) return false;
+  uint8_t *rgba = nullptr;
+  int timestamp = 0;
+  if (!WebPAnimDecoderGetNext(_webpAnimDecoder, &rgba, &timestamp) || !rgba) {
+    _error = F("WebP animation decode failed");
+    return false;
+  }
+  uint32_t currentTimestamp = timestamp > 0 ? (uint32_t)timestamp : 0;
+  uint32_t delay = currentTimestamp >= _webpPreviousTimestamp
+    ? currentTimestamp - _webpPreviousTimestamp : 0;
+  _webpPreviousTimestamp = currentTimestamp;
+  _gifBuildDelay = delay < GifMinimumDelayMs ? GifMinimumDelayMs : delay;
+  scaleWebpRgba(rgba);
+  _gifBuildLastFrame = (_gifBuildFrame + 1 >= _gifFrameCount);
+  _gifBuildWriteOffset = 0;
+  _gifBuildWritePending = true;
+  return true;
+}
+
+bool ImageViewerScreen::finishWebpBuild() {
+  if (!_cacheFile.seek(0) || !writeAnimationCacheHeader(_cacheFile, _gifBuildFrame, _gifLoopCount)) {
+    _error = F("WebP cache header write failed");
+    return false;
+  }
+  _cacheFile.close();
+  if (SD.exists(_cachePath)) SD.remove(_cachePath);
+  if (!SD.rename(_cacheTempPath, _cachePath)) {
+    _error = F("WebP cache commit failed");
+    SD.remove(_cacheTempPath);
+    return false;
+  }
+  releaseWebpDecoder();
+  releaseBuffers();
+  _gifCacheReadFile = SD.open(_cachePath.c_str(), FILE_READ);
+  if (!_gifCacheReadFile || !startGifPlayback()) {
+    _error = F("WebP cache reopen failed");
+    if (_gifCacheReadFile) _gifCacheReadFile.close();
+    releaseGifBuffers();
+    return false;
+  }
+  return true;
+}
+
+void ImageViewerScreen::releaseWebpDecoder() {
+  if (_webpAnimDecoder) {
+    WebPAnimDecoderDelete(_webpAnimDecoder);
+    _webpAnimDecoder = nullptr;
+  }
+  if (_webpRgba) {
+    free(_webpRgba);
+    _webpRgba = nullptr;
+  }
+  if (_webpSource) {
+    free(_webpSource);
+    _webpSource = nullptr;
+  }
+  _webpSourceSize = 0;
+  _webpAnimated = false;
+  memset(&_webpAnimInfo, 0, sizeof(_webpAnimInfo));
 }
 
 bool ImageViewerScreen::writeCacheHeader(fs::File &file) const {
@@ -1831,7 +2162,7 @@ bool ImageViewerScreen::prepareRender() {
   }
   uint32_t screenWidth = _display.width();
   uint32_t screenHeight = _display.height();
-  if (_format == ImageFormat::Gif) {
+  if (_format == ImageFormat::Gif || (_format == ImageFormat::Webp && _webpAnimated)) {
     prepareGifDrawRect();
   } else if ((uint64_t)screenWidth * _sourceHeight <= (uint64_t)screenHeight * _sourceWidth) {
     _drawWidth = screenWidth;
@@ -1923,6 +2254,8 @@ bool ImageViewerScreen::decodeRasterImage() {
       _error = String(F("JPEG decode error ")) + jpegError;
       return false;
     }
+  } else if (_format == ImageFormat::Webp) {
+    return decodeWebpImage();
   }
   _lastProgress = 100;
   drawLoading(100);

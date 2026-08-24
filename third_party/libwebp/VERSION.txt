@@ -1,0 +1,4 @@
+libwebp 1.6.0
+Source: https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz
+Commit: 4fa21912338357f89e4fd51cf2368325b59e9bd9 (annotated tag object b7e29b9d75bd31422b00c2a446d49d7af06c328d)
+Build: portable C decoder and demux subset only; encoders, mux, SIMD, and threading omitted.

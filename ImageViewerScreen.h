@@ -21,6 +21,8 @@ using File = fs::File;
 #include <JPEGDEC.h>
 #include <PNGdec.h>
 #include "third_party/AnimatedGIF/AnimatedGIF.h"
+#include "third_party/libwebp/src/webp/decode.h"
+#include "third_party/libwebp/src/webp/demux.h"
 
 #include "Screen.h"
 #include "SdCardController.h"
@@ -44,8 +46,8 @@ private:
   static const uint16_t CacheHeight = 320;
   static const uint16_t CacheHeaderSize = 24;
   static const uint16_t AnimationCacheHeaderSize = 40;
-  // GIF cache records use packed RGB444 pixels. They are expanded into the
-  // RGB565 PSRAM ring by the worker without palette shimmer.
+  // Animated cache records use packed RGB444 pixels. They are expanded into
+  // the RGB565 PSRAM ring by the worker without palette shimmer.
   static const uint32_t AnimationFrameHeaderSize = 4;
   static const uint16_t GifPhotoMaxWidth = 320;
   static const uint16_t GifPhotoMaxHeight = 240;
@@ -68,7 +70,7 @@ private:
     AlphaBitfields = 6
   };
 
-  enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg, Gif };
+  enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg, Gif, Webp };
 
   struct PaletteEntry {
     uint8_t r;
@@ -96,6 +98,13 @@ private:
   fs::File _decoderFile;
   fs::File _cacheFile;
   fs::File _gifCacheReadFile;
+  uint8_t *_webpSource;
+  uint32_t _webpSourceSize;
+  uint8_t *_webpRgba;
+  WebPAnimDecoder *_webpAnimDecoder;
+  WebPAnimInfo _webpAnimInfo;
+  bool _webpAnimated;
+  uint32_t _webpPreviousTimestamp;
   String _path;
   String _error;
   String _cachePath;
@@ -245,6 +254,7 @@ private:
   uint32_t gifRgb444Bytes() const;
   uint32_t gifFrameRecordBytes() const;
   void prepareGifDrawRect();
+  void presentGifFullFrame(const uint16_t *frame);
   void presentGifFrame(const uint16_t *frame, const uint16_t *previous, bool forceFull);
   bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
                               uint16_t *destination, uint32_t &delay);
@@ -254,6 +264,15 @@ private:
   void releaseGifBuffers();
   void releaseGifDecoder();
   bool isGifSource();
+  bool isWebpSource();
+  bool prepareWebpSource();
+  bool inspectWebpSource();
+  bool decodeWebpImage();
+  bool startWebpBuild();
+  bool buildWebpFrame();
+  bool finishWebpBuild();
+  void releaseWebpDecoder();
+  void scaleWebpRgba(const uint8_t *rgba);
   void scaleGifFrame();
   bool cacheNeedsRotation() const;
   void startCacheWrite();

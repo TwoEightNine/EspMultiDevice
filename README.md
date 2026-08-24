@@ -26,7 +26,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Streams mono or stereo integer PCM WAV files and local MPEG Layer III MP3 files through the Audio player screen.
 - Browses SD-card files and directories with folder navigation and pagination.
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
-- Image Viewer supports BMP, PNG, JPG, JPEG, and animated GIF files with PSRAM-backed rendering and SD-backed frame caches. GIFs are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
+- Image Viewer supports BMP, PNG, JPG, JPEG, WebP, and animated GIF/WebP files with PSRAM-backed rendering and SD-backed frame caches. Animated images are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill.
 
 ## Files
 
@@ -51,7 +51,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
-- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
+- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, WebP, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
 - `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
 - `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
@@ -71,7 +71,7 @@ Screens get common UI services from the base `Screen` constructor: `Navigator`, 
 
 ## Image Decoder Libraries
 
-Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. MP3 decoding uses the bundled public-domain `third_party/minimp3` implementation, so it needs no Library Manager dependency. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, and GIF87a/GIF89a files with animation, local/global palettes, transparency, interlacing, disposal methods, and loop metadata. Very large GIFs may still be rejected when their cooked decoder canvas cannot fit in currently available PSRAM. Animated PNG and progressive JPEG files remain unsupported.
+Install the `PNGdec` and `JPEGDEC` libraries from the Arduino Library Manager before compiling. Animated GIF decoding is pinned in `third_party/AnimatedGIF` and is compiled with the sketch; it retains the upstream Apache-2.0 notice. WebP decoding is pinned in `third_party/libwebp` and compiled as a portable, decode-only C subset; its BSD license and source version are retained beside the vendored sources. MP3 decoding uses the bundled public-domain `third_party/minimp3` implementation, so it needs no Library Manager dependency. The included `build_opt.h` raises PNGdec's row-buffer limit for PNG images up to 4096 pixels wide. The viewer accepts static, non-interlaced PNG images, baseline JPEG images, simple and extended WebP files (including lossless and alpha), and GIF87a/GIF89a or animated WebP files with animation, transparency, disposal/blending, and loop metadata. Very large animated images may still be rejected when their decoder canvas and source buffer cannot fit in currently available PSRAM. Animated PNG and progressive JPEG files remain unsupported.
 
 ## Image Cache Formats
 
@@ -87,9 +87,9 @@ The audio player similarly stores a tiny MP3-analysis sidecar. For example, `/mu
 - The canvas contains the viewer's aspect-fit render, including its black letterbox area, so cache playback needs no image decoding.
 - A cache is accepted only when its source size, modification time, cache geometry, payload size, and file length all match the current viewer.
 
-### `.emga` — animated-GIF frame cache
+### `.emga` — animated GIF/WebP frame cache
 
-`.emga` is used only for GIFs. The current format is `EMGA` version 4 with a 40-byte little-endian header and fixed-size records for each frame. Older `.emga` versions are deliberately invalidated and regenerated.
+`.emga` is used for animated GIF and WebP sources. The current format is `EMGA` version 4 with a 40-byte little-endian header and fixed-size records for each frame. Older `.emga` versions are deliberately invalidated and regenerated.
 
 - Header fields: magic (`EMGA`), version, pixel encoding (`2` = packed RGB444), 480 × 320 display geometry, source-file byte size, source last-modified time, source GIF width and height, frame count, loop count, and the cached draw width and height.
 - Every frame record begins with a 32-bit little-endian display delay in milliseconds. The remaining bytes are two 12-bit RGB444 pixels packed into three bytes (the final odd pixel uses two bytes). This preserves 4,096 colors while using 25% less SD storage and read bandwidth than RGB565.

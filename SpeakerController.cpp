@@ -143,8 +143,11 @@ bool SpeakerController::configureI2s() {
   i2sConfig.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   i2sConfig.communication_format = I2S_COMM_FORMAT;
   i2sConfig.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  i2sConfig.dma_buf_count = 4;
-  i2sConfig.dma_buf_len = 256;
+  // Keep enough queued audio to cover a short burst of display traffic. The
+  // animated image viewer updates the TFT in bounded bands, but the larger
+  // queue also protects playback from SD/cache and filesystem jitter.
+  i2sConfig.dma_buf_count = 8;
+  i2sConfig.dma_buf_len = 512;
   i2sConfig.use_apll = false;
   i2sConfig.tx_desc_auto_clear = true;
 
