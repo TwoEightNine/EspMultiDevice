@@ -62,7 +62,7 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 
 The Home Browser app opens a start page with up to eight recent sites. Tap **Open a new page** (or **New URL**) to enter a URL with the on-screen keyboard; a URL without a scheme is treated as `https://`. Recent entries are tappable, while hyperlinks in rendered page content are intentionally plain, non-tappable text.
 
-The browser supports `http://` and `https://` GET requests, up to five redirects, chunked or fixed-length uncompressed responses, and a bounded cookie jar. It retains up to 512 KiB from a response rather than rejecting a large page, then renders its readable static text as simple paged lines. Cyrillic text is temporarily transliterated to Latin. JavaScript and CSS are ignored; pages that contain only JavaScript report that limitation; images, media, embeds, and forms appear as text stubs. HTTP Basic authentication and form login are not supported.
+The browser supports `http://` and `https://` GET requests, up to five redirects, chunked or fixed-length uncompressed responses, and a bounded cookie jar. It retains up to 512 KiB from a response rather than rejecting a large page, then renders its readable static text as paged styled rows. Inline HTML color, bold, italic, and link underlining are supported; external stylesheets, CSS classes, JavaScript, and link activation are ignored. Images are 20-pixel placeholders with an icon and their `alt` text, shown blue inside a link. Cyrillic text is temporarily transliterated to Latin. Pages that contain only JavaScript report that limitation; media, embeds, and forms appear as text stubs. HTTP Basic authentication and form login are not supported.
 
 Recent sites and cookies are stored as plaintext in `/.system/browser_state.txt` on the SD card. Browser operation continues without an SD card, but no data persists. HTTPS certificate validation is deliberately disabled for this initial compatibility-focused version: do not use the browser for sensitive accounts or private information.
 
@@ -108,7 +108,7 @@ The audio player similarly stores a tiny MP3-analysis sidecar. For example, `/mu
 
 ## ESP32-S3 N16R8 Playback Profile
 
-Select an ESP32-S3 board profile with 16 MiB flash, 8 MiB PSRAM, and a 240 MHz CPU. Startup logs the detected CPU, flash, PSRAM total, free PSRAM, and the largest allocatable PSRAM block. GIF playback requires at least three 480x320 RGB565 PSRAM frames plus a 512 KiB reserve; lower-memory profiles show an image-viewer error rather than falling back to synchronous SD reads.
+Select an ESP32-S3 board profile with 16 MiB flash, 8 MiB PSRAM, and a 240 MHz CPU. Use an application partition of at least 1.5 MiB; for an N16R8, **16M Flash (3MB APP/9.9MB FATFS)** is a known-good choice. The default 1.2 MiB application partition is too small for this firmware. Startup logs the detected CPU, flash, PSRAM total, free PSRAM, and the largest allocatable PSRAM block. GIF playback requires at least three 480x320 RGB565 PSRAM frames plus a 512 KiB reserve; lower-memory profiles show an image-viewer error rather than falling back to synchronous SD reads.
 
 ## TFT_eSPI Setup
 

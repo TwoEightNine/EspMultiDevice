@@ -12,12 +12,18 @@
 #include "SdCardController.h"
 #include "SpiBusLock.h"
 #include "WiFiController.h"
+#include "icons.h"
 
 namespace {
 const int16_t HeaderHeight = 38;
 const int16_t ControlsHeight = 42;
-const int16_t PageLineHeight = 18;
-const uint8_t LinesPerPage = 12;
+const int16_t TextRowHeight = 18;
+const int16_t ImageRowHeight = 20;
+const int16_t DocumentPadding = 7;
+const int16_t DocumentSidePadding = 8;
+const uint16_t DefaultTextColor = TFT_WHITE;
+const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
+const uint16_t LinkImageColor = TFT_BLUE;
 const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
 
@@ -90,9 +96,13 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _currentUrl(),
     _title(),
     _message(),
-    _renderBuffer(),
     _titleBuffer(),
-    _lineCount(0),
+    _rowCount(0),
+    _pageCount(0),
+    _currentStyle{DefaultTextColor, false, false, false, false},
+    _styleDepth(0),
+    _pendingSpace(false),
+    _renderedCharacters(0),
     _closeBounds{0, 0, 0, 0},
     _startBounds{0, 0, 0, 0},
     _newBounds{0, 0, 0, 0},
@@ -148,8 +158,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (!_showStart && contains(_nextBounds, point.x, point.y)) {
-    uint16_t pageCount = (_lineCount + LinesPerPage - 1) / LinesPerPage;
-    if (_page + 1 < pageCount) _page++;
+    if (hasNextPage()) _page++;
     draw();
     return;
   }
@@ -182,6 +191,7 @@ void BrowserScreen::layout() {
 void BrowserScreen::draw() {
   if (!_display.isReady()) return;
   layout();
+  _display.tft().setFreeFont();
   _display.tft().fillScreen(TFT_BLACK);
   drawHeader();
   if (_showStart) drawStartPage();
@@ -230,7 +240,7 @@ void BrowserScreen::drawStartPage() {
 
 void BrowserScreen::drawDocument() {
   TFT_eSPI &tft = _display.tft();
-  const int16_t textTop = HeaderHeight + 7;
+  const int16_t textTop = HeaderHeight + DocumentPadding;
   if (_message.length() > 0) {
     tft.setTextColor(_message == "Loading..." ? TFT_CYAN : TFT_RED, TFT_BLACK);
     tft.setTextDatum(TC_DATUM);
@@ -238,16 +248,44 @@ void BrowserScreen::drawDocument() {
     tft.setTextDatum(TL_DATUM);
     return;
   }
-  if (_lineCount == 0) {
+  if (_rowCount == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
     tft.drawString("Page has no readable text", 10, textTop, 2);
     return;
   }
-  uint16_t start = _page * LinesPerPage;
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  for (uint8_t i = 0; i < LinesPerPage && start + i < _lineCount; i++) {
-    tft.drawString(_lines[start + i], 8, textTop + i * PageLineHeight, 2);
+  uint16_t start = _page < _pageCount ? _pageStarts[_page] : 0;
+  uint16_t end = pageEndRow(_page);
+  int16_t y = textTop;
+  for (uint16_t index = start; index < end; index++) {
+    const VisualRow &row = _rows[index];
+    if (row.image) {
+      uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
+      tft.drawRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, ImageRowHeight, color);
+      tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
+      tft.setFreeFont(&FreeSans9pt7b);
+      tft.setTextColor(color, TFT_BLACK);
+      tft.setTextDatum(ML_DATUM);
+      String label = row.imageLabel;
+      const int16_t labelWidth = _display.width() - DocumentSidePadding - 24;
+      while (label.length() > 3 && tft.textWidth(label + "...") > labelWidth) label.remove(label.length() - 1);
+      if (label != row.imageLabel) label += "...";
+      tft.drawString(label, DocumentSidePadding + 22, y + ImageRowHeight / 2);
+      tft.setTextDatum(TL_DATUM);
+    } else {
+      for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
+        const VisualRun &run = row.runs[runIndex];
+        applyFont(run.style);
+        tft.setTextColor(run.style.color, TFT_BLACK);
+        tft.setTextDatum(TL_DATUM);
+        tft.drawString(run.text, DocumentSidePadding + run.x, y);
+        if (run.style.underline && run.width > 0) {
+          tft.drawFastHLine(DocumentSidePadding + run.x, y + TextRowHeight - 2, run.width, run.style.color);
+        }
+      }
+    }
+    y += row.image ? ImageRowHeight : TextRowHeight;
   }
+  tft.setFreeFont();
 }
 
 void BrowserScreen::drawControls() {
@@ -256,7 +294,7 @@ void BrowserScreen::drawControls() {
   const char *labels[] = {"Start", "New URL", "Prev", "Next"};
   for (uint8_t i = 0; i < 4; i++) {
     bool active = i < 2 || (!_showStart && ((i == 2 && _page > 0) ||
-      (i == 3 && _page + 1 < (_lineCount + LinesPerPage - 1) / LinesPerPage)));
+      (i == 3 && hasNextPage())));
     uint16_t color = active ? 0x2965 : TFT_DARKGREY;
     const Rect &button = buttons[i];
     tft.fillRect(button.x, button.y, button.w - 1, button.h, color);
@@ -281,21 +319,24 @@ void BrowserScreen::openUrl(const String &value) {
   if (!normalizeUrl(value, url, error)) {
     _showStart = false;
     _message = error;
-    _lineCount = 0;
+    _rowCount = 0;
+    _pageCount = 0;
     draw();
     return;
   }
   if (!_wifi.isConnected()) {
     _showStart = false;
     _message = "Connect to Wi-Fi first";
-    _lineCount = 0;
+    _rowCount = 0;
+    _pageCount = 0;
     draw();
     return;
   }
 
   _showStart = false;
   _message = "Loading...";
-  _lineCount = 0;
+  _rowCount = 0;
+  _pageCount = 0;
   _title = "";
   _page = 0;
   draw();
@@ -316,12 +357,10 @@ void BrowserScreen::openUrl(const String &value) {
       contentType.length() == 0) {
     renderDocument(body);
   } else if (contentType.indexOf("text/plain") >= 0) {
-    _title = "Text page";
-    wrapRenderedText(body);
+    renderPlainText(body, "Text page");
   } else {
-    _title = "Unsupported content";
-    _renderBuffer = "[Unsupported content: " + (contentType.length() ? contentType : String("unknown type")) + "]";
-    wrapRenderedText(_renderBuffer);
+    renderPlainText("[Unsupported content: " + (contentType.length() ? contentType : String("unknown type")) + "]",
+                    "Unsupported content");
   }
   addRecent(_currentUrl, _title);
   saveState();
@@ -692,7 +731,7 @@ uint64_t BrowserScreen::nowEpoch() const {
 }
 
 void BrowserScreen::renderDocument(const String &html) {
-  _renderBuffer = "";
+  resetRenderedRows();
   _titleBuffer = "";
   _title = "";
   bool inScript = false;
@@ -706,7 +745,7 @@ void BrowserScreen::renderDocument(const String &html) {
     if (inTitle) _titleBuffer += text;
     else if (!inScript && !inStyle) appendText(text);
     if (nextTag < 0) break;
-    int endTag = html.indexOf('>', nextTag + 1);
+    int endTag = findTagEnd(html, nextTag + 1);
     if (endTag < 0) break;
     String inside = trimCopy(html.substring(nextTag + 1, endTag));
     bool closing = inside.startsWith("/");
@@ -714,6 +753,13 @@ void BrowserScreen::renderDocument(const String &html) {
     inside.trim();
     int space = inside.indexOf(' ');
     String tag = lower(space < 0 ? inside : inside.substring(0, space));
+    if (tag.endsWith("/")) tag.remove(tag.length() - 1);
+    String attributes = space < 0 ? "" : trimCopy(inside.substring(space + 1));
+    bool selfClosing = inside.endsWith("/");
+    if (tag.startsWith("!") || tag.startsWith("?")) {
+      position = endTag + 1;
+      continue;
+    }
     if (tag == "script") {
       if (!closing) sawScript = true;
       inScript = !closing;
@@ -721,78 +767,351 @@ void BrowserScreen::renderDocument(const String &html) {
     else if (tag == "style") inStyle = !closing;
     else if (tag == "title") inTitle = !closing;
     else if (!inScript && !inStyle && !inTitle) {
-      if (tag == "br" || isBlockTag(tag)) appendBreak();
-      if (!closing && (tag == "img" || tag == "audio" || tag == "video" || tag == "iframe" ||
-          tag == "object" || tag == "embed" || tag == "canvas")) {
-        appendStub(tag == "img" ? "image" : tag);
+      if (closing) {
+        if (isBlockTag(tag)) appendBreak();
+        popStyle(tag);
+      } else if (tag == "br") {
+        appendBreak();
+      } else if (tag == "img") {
+        String alt = decodeEntities(attributeValue(attributes, "alt"));
+        appendImage(alt.length() ? alt : "image", _currentStyle.link);
+      } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
+                 tag == "embed" || tag == "canvas") {
+        appendStub(tag);
+      } else if (tag == "form" || tag == "input" || tag == "button" || tag == "textarea" || tag == "select") {
+        appendStub("form control");
+      } else {
+        if (isBlockTag(tag)) appendBreak();
+        if (!selfClosing) pushStyle(tag, styledForTag(tag, attributes));
       }
-      if (!closing && (tag == "form" || tag == "input" || tag == "button" || tag == "textarea" || tag == "select")) appendStub("form control");
     }
     position = endTag + 1;
   }
   _title = decodeEntities(trimCopy(_titleBuffer));
   if (_title.length() == 0) _title = "Web page";
-  _renderBuffer = decodeEntities(_renderBuffer);
-  if (trimCopy(_renderBuffer).length() == 0) {
-    _renderBuffer = sawScript
-      ? "(This page is generated by JavaScript. JavaScript is not supported.)"
-      : "(This page has no static readable text.)";
-  }
-  wrapRenderedText(_renderBuffer);
+  if (_rowCount == 0) appendText(sawScript
+    ? "(This page is generated by JavaScript. JavaScript is not supported.)"
+    : "(This page has no static readable text.)");
+  buildPages();
+}
+
+void BrowserScreen::renderPlainText(const String &text, const String &title) {
+  resetRenderedRows();
+  _title = title;
+  appendText(text);
+  if (_rowCount == 0) appendText("(No readable text in this response.)");
+  buildPages();
+}
+
+void BrowserScreen::resetRenderedRows() {
+  _rowCount = 0;
+  _pageCount = 0;
+  _styleDepth = 0;
+  _currentStyle = {DefaultTextColor, false, false, false, false};
+  _pendingSpace = false;
+  _renderedCharacters = 0;
 }
 
 void BrowserScreen::appendText(const String &text) {
-  for (uint16_t i = 0; i < text.length() && _renderBuffer.length() < 12288; i++) {
-    char value = text[i];
-    if (value == '\r' || value == '\n' || value == '\t') value = ' ';
-    _renderBuffer += value;
-  }
-}
-
-void BrowserScreen::appendBreak() {
-  if (_renderBuffer.length() && !_renderBuffer.endsWith("\n")) _renderBuffer += '\n';
-}
-
-void BrowserScreen::appendStub(const String &label) {
-  appendBreak();
-  _renderBuffer += "(" + label + ")";
-  appendBreak();
-}
-
-void BrowserScreen::wrapRenderedText(const String &text) {
-  _lineCount = 0;
-  String line;
+  String decoded = decodeEntities(text);
   String word;
-  const int16_t maxWidth = _display.width() - 16;
-  auto commitLine = [&]() {
-    if (_lineCount < MaxLines) _lines[_lineCount++] = line;
-    line = "";
-  };
-  for (uint32_t i = 0; i <= text.length(); i++) {
-    char value = i < text.length() ? text[i] : '\n';
-    if (value != ' ' && value != '\n') {
+  for (uint16_t i = 0; i <= decoded.length(); i++) {
+    char value = i < decoded.length() ? decoded[i] : ' ';
+    if (value != ' ' && value != '\r' && value != '\n' && value != '\t') {
       word += value;
       continue;
     }
     if (word.length()) {
-      String candidate = line.length() ? line + " " + word : word;
-      if (line.length() && _display.tft().textWidth(candidate, 2) > maxWidth) commitLine();
-      while (_display.tft().textWidth(word, 2) > maxWidth && word.length() > 1) {
-        String part;
-        while (word.length() && _display.tft().textWidth(part + word[0], 2) <= maxWidth) {
-          part += word[0];
-          word.remove(0, 1);
-        }
-        if (_lineCount < MaxLines) _lines[_lineCount++] = part;
-      }
-      line = line.length() ? line + " " + word : word;
+      appendWord(word, _currentStyle);
       word = "";
     }
-    if (value == '\n' && line.length()) commitLine();
-    if (_lineCount >= MaxLines) break;
+    if (value == '\n' || value == '\r') appendBreak();
+    else _pendingSpace = true;
   }
-  if (_lineCount == 0) {
-    _lines[_lineCount++] = "(No readable text in this response.)";
+}
+
+void BrowserScreen::appendBreak() {
+  _pendingSpace = false;
+  if (_rowCount && !_rows[_rowCount - 1].image && _rows[_rowCount - 1].runCount) {
+    _rows[_rowCount - 1].contentWidth = _display.width();
+  }
+}
+
+void BrowserScreen::appendImage(const String &label, bool linked) {
+  appendBreak();
+  if (_rowCount >= MaxRows) return;
+  VisualRow &row = _rows[_rowCount++];
+  row.image = true;
+  row.imageLabel = label;
+  row.imageLink = linked;
+  row.contentWidth = 0;
+  row.runCount = 0;
+}
+
+void BrowserScreen::appendStub(const String &label) {
+  appendBreak();
+  appendText(String("(") + label + ")");
+  appendBreak();
+}
+
+void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
+  if (_renderedCharacters >= 16384) return;
+  String remaining = word;
+  const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
+  while (remaining.length() && _rowCount < MaxRows) {
+    beginTextRow();
+    VisualRow &row = _rows[_rowCount - 1];
+    if (_pendingSpace && row.contentWidth > 0) {
+      int16_t spaceWidth = textWidth(" ", style);
+      if (row.contentWidth + spaceWidth >= maxWidth) {
+        row.contentWidth = _display.width();
+        beginTextRow();
+      } else {
+        appendRun(" ", style);
+      }
+    }
+    _pendingSpace = false;
+    VisualRow &target = _rows[_rowCount - 1];
+    int16_t available = maxWidth - target.contentWidth;
+    int16_t wholeWidth = textWidth(remaining, style);
+    if (wholeWidth <= available) {
+      appendRun(remaining, style);
+      _renderedCharacters += remaining.length();
+      return;
+    }
+    String part;
+    while (part.length() < remaining.length() && textWidth(part + remaining[part.length()], style) <= available) {
+      part += remaining[part.length()];
+    }
+    if (part.length() == 0) {
+      if (target.contentWidth > 0) {
+        target.contentWidth = _display.width();
+        continue;
+      }
+      part = remaining.substring(0, 1);
+    }
+    appendRun(part, style);
+    _renderedCharacters += part.length();
+    remaining.remove(0, part.length());
+    if (remaining.length()) _rows[_rowCount - 1].contentWidth = _display.width();
+  }
+}
+
+void BrowserScreen::appendRun(const String &text, const TextStyle &style) {
+  if (text.length() == 0 || _rowCount == 0) return;
+  VisualRow &row = _rows[_rowCount - 1];
+  int16_t width = textWidth(text, style);
+  if (row.runCount && stylesEqual(row.runs[row.runCount - 1].style, style)) {
+    VisualRun &run = row.runs[row.runCount - 1];
+    run.text += text;
+    run.width += width;
+  } else if (row.runCount < MaxRunsPerRow) {
+    VisualRun &run = row.runs[row.runCount++];
+    run.text = text;
+    run.style = style;
+    run.x = row.contentWidth;
+    run.width = width;
+  } else {
+    row.contentWidth = _display.width();
+    beginTextRow();
+    appendRun(text, style);
+    return;
+  }
+  row.contentWidth += width;
+}
+
+void BrowserScreen::beginTextRow() {
+  const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
+  if (_rowCount && !_rows[_rowCount - 1].image && _rows[_rowCount - 1].contentWidth < maxWidth) return;
+  if (_rowCount >= MaxRows) return;
+  VisualRow &row = _rows[_rowCount++];
+  row.image = false;
+  row.imageLabel = "";
+  row.imageLink = false;
+  row.contentWidth = 0;
+  row.runCount = 0;
+}
+
+void BrowserScreen::buildPages() {
+  _pageCount = 0;
+  if (_rowCount == 0) return;
+  const int16_t bottom = _display.height() - ControlsHeight - 4;
+  uint16_t first = 0;
+  int16_t y = HeaderHeight + DocumentPadding;
+  _pageStarts[_pageCount++] = 0;
+  for (uint16_t i = 0; i < _rowCount; i++) {
+    int16_t height = _rows[i].image ? ImageRowHeight : TextRowHeight;
+    if (y + height > bottom && i > first) {
+      if (_pageCount >= MaxPages) break;
+      first = i;
+      _pageStarts[_pageCount++] = i;
+      y = HeaderHeight + DocumentPadding;
+    }
+    y += height;
+  }
+  if (_page >= _pageCount) _page = 0;
+}
+
+uint16_t BrowserScreen::pageEndRow(uint8_t page) const {
+  if (page + 1 < _pageCount) return _pageStarts[page + 1];
+  return _rowCount;
+}
+
+bool BrowserScreen::hasNextPage() const {
+  return _page + 1 < _pageCount;
+}
+
+int16_t BrowserScreen::textWidth(const String &text, const TextStyle &style) const {
+  applyFont(style);
+  return _display.tft().textWidth(text);
+}
+
+void BrowserScreen::applyFont(const TextStyle &style) const {
+  TFT_eSPI &tft = _display.tft();
+  if (style.bold && style.italic) tft.setFreeFont(&FreeSansBoldOblique9pt7b);
+  else if (style.bold) tft.setFreeFont(&FreeSansBold9pt7b);
+  else if (style.italic) tft.setFreeFont(&FreeSansOblique9pt7b);
+  else tft.setFreeFont(&FreeSans9pt7b);
+}
+
+bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) const {
+  return left.color == right.color && left.bold == right.bold && left.italic == right.italic &&
+         left.underline == right.underline && left.link == right.link;
+}
+
+BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) const {
+  TextStyle style = _currentStyle;
+  if (tag == "b" || tag == "strong") style.bold = true;
+  if (tag == "i" || tag == "em") style.italic = true;
+  if (tag == "a") {
+    style.underline = true;
+    style.link = true;
+  }
+
+  String color = attributeValue(attributes, "color");
+  if (color.length()) style.color = parseColor(color, style.color);
+
+  String inlineStyle = attributeValue(attributes, "style");
+  int start = 0;
+  while (start < (int)inlineStyle.length()) {
+    int end = inlineStyle.indexOf(';', start);
+    String declaration = trimCopy(inlineStyle.substring(start, end < 0 ? inlineStyle.length() : end));
+    int colon = declaration.indexOf(':');
+    if (colon > 0) {
+      String property = lower(trimCopy(declaration.substring(0, colon)));
+      String value = lower(trimCopy(declaration.substring(colon + 1)));
+      if (property == "color") style.color = parseColor(value, style.color);
+      else if (property == "font-weight") style.bold = value.indexOf("bold") >= 0 || value.toInt() >= 600;
+      else if (property == "font-style") style.italic = value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0;
+    }
+    if (end < 0) break;
+    start = end + 1;
+  }
+  return style;
+}
+
+String BrowserScreen::attributeValue(const String &attributes, const char *name) const {
+  String wanted = lower(String(name));
+  uint16_t index = 0;
+  while (index < attributes.length()) {
+    while (index < attributes.length() && (isspace((unsigned char)attributes[index]) || attributes[index] == '/')) index++;
+    uint16_t nameStart = index;
+    while (index < attributes.length() && !isspace((unsigned char)attributes[index]) &&
+           attributes[index] != '=' && attributes[index] != '/') index++;
+    if (nameStart == index) {
+      index++;
+      continue;
+    }
+    String attributeName = lower(attributes.substring(nameStart, index));
+    while (index < attributes.length() && isspace((unsigned char)attributes[index])) index++;
+    if (index >= attributes.length() || attributes[index] != '=') {
+      continue;
+    }
+    index++;
+    while (index < attributes.length() && isspace((unsigned char)attributes[index])) index++;
+    String value;
+    if (index < attributes.length() && (attributes[index] == '\'' || attributes[index] == '\"')) {
+      char quote = attributes[index++];
+      uint16_t valueStart = index;
+      while (index < attributes.length() && attributes[index] != quote) index++;
+      value = attributes.substring(valueStart, index);
+      if (index < attributes.length()) index++;
+    } else {
+      uint16_t valueStart = index;
+      while (index < attributes.length() && !isspace((unsigned char)attributes[index])) index++;
+      value = attributes.substring(valueStart, index);
+    }
+    if (attributeName == wanted) return value;
+  }
+  return "";
+}
+
+uint16_t BrowserScreen::parseColor(const String &rawValue, uint16_t fallback) const {
+  String value = lower(trimCopy(rawValue));
+  if (value.startsWith("#")) {
+    String digits = value.substring(1);
+    for (uint16_t i = 0; i < digits.length(); i++) {
+      if (!isxdigit((unsigned char)digits[i])) return fallback;
+    }
+    char *end = nullptr;
+    if (digits.length() == 3) {
+      uint8_t red = strtoul(digits.substring(0, 1).c_str(), &end, 16) * 17;
+      uint8_t green = strtoul(digits.substring(1, 2).c_str(), &end, 16) * 17;
+      uint8_t blue = strtoul(digits.substring(2, 3).c_str(), &end, 16) * 17;
+      return ((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3);
+    }
+    if (digits.length() == 6) {
+      uint8_t red = strtoul(digits.substring(0, 2).c_str(), &end, 16);
+      uint8_t green = strtoul(digits.substring(2, 4).c_str(), &end, 16);
+      uint8_t blue = strtoul(digits.substring(4, 6).c_str(), &end, 16);
+      return ((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3);
+    }
+  }
+  if (value == "black") return TFT_BLACK;
+  if (value == "white") return TFT_WHITE;
+  if (value == "red") return TFT_RED;
+  if (value == "green") return TFT_GREEN;
+  if (value == "blue") return TFT_BLUE;
+  if (value == "yellow") return TFT_YELLOW;
+  if (value == "cyan" || value == "aqua") return TFT_CYAN;
+  if (value == "magenta" || value == "fuchsia") return TFT_MAGENTA;
+  if (value == "gray" || value == "grey") return TFT_LIGHTGREY;
+  if (value == "darkgray" || value == "darkgrey") return TFT_DARKGREY;
+  if (value == "orange") return TFT_ORANGE;
+  if (value == "purple") return 0x8010;
+  return fallback;
+}
+
+int BrowserScreen::findTagEnd(const String &html, int start) const {
+  char quote = '\0';
+  for (int index = start; index < (int)html.length(); index++) {
+    char value = html[index];
+    if (quote) {
+      if (value == quote) quote = '\0';
+    } else if (value == '\'' || value == '\"') {
+      quote = value;
+    } else if (value == '>') {
+      return index;
+    }
+  }
+  return -1;
+}
+
+void BrowserScreen::pushStyle(const String &tag, const TextStyle &style) {
+  if (_styleDepth >= MaxStyleDepth) return;
+  _styleStack[_styleDepth].tag = tag;
+  _styleStack[_styleDepth].style = style;
+  _styleDepth++;
+  _currentStyle = style;
+}
+
+void BrowserScreen::popStyle(const String &tag) {
+  for (int8_t index = _styleDepth - 1; index >= 0; index--) {
+    if (_styleStack[index].tag != tag) continue;
+    _styleDepth = index;
+    _currentStyle = index > 0 ? _styleStack[index - 1].style :
+      TextStyle{DefaultTextColor, false, false, false, false};
+    return;
   }
 }
 

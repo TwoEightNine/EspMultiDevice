@@ -24,7 +24,10 @@ public:
 private:
   static const uint8_t MaxRecentSites = 8;
   static const uint8_t MaxCookies = 16;
-  static const uint16_t MaxLines = 180;
+  static const uint16_t MaxRows = 192;
+  static const uint8_t MaxRunsPerRow = 10;
+  static const uint8_t MaxStyleDepth = 16;
+  static const uint8_t MaxPages = 32;
   // Keep enough of large legacy pages to reach their body while retaining a
   // bounded allocation on the ESP32.
   static const uint32_t MaxBodyBytes = 512UL * 1024UL;
@@ -59,6 +62,35 @@ private:
     uint64_t expiresAt;
   };
 
+  struct TextStyle {
+    uint16_t color;
+    bool bold;
+    bool italic;
+    bool underline;
+    bool link;
+  };
+
+  struct VisualRun {
+    String text;
+    TextStyle style;
+    int16_t x;
+    int16_t width;
+  };
+
+  struct VisualRow {
+    bool image;
+    String imageLabel;
+    bool imageLink;
+    int16_t contentWidth;
+    uint8_t runCount;
+    VisualRun runs[MaxRunsPerRow];
+  };
+
+  struct StyleFrame {
+    String tag;
+    TextStyle style;
+  };
+
   WiFiController &_wifi;
   SdCardController &_sdCard;
   WiFiClient _plainClient;
@@ -74,10 +106,16 @@ private:
   String _currentUrl;
   String _title;
   String _message;
-  String _renderBuffer;
   String _titleBuffer;
-  String _lines[MaxLines];
-  uint16_t _lineCount;
+  VisualRow _rows[MaxRows];
+  uint16_t _rowCount;
+  uint16_t _pageStarts[MaxPages];
+  uint8_t _pageCount;
+  TextStyle _currentStyle;
+  StyleFrame _styleStack[MaxStyleDepth];
+  uint8_t _styleDepth;
+  bool _pendingSpace;
+  uint16_t _renderedCharacters;
   Rect _closeBounds;
   Rect _startBounds;
   Rect _newBounds;
@@ -112,10 +150,27 @@ private:
   uint64_t nowEpoch() const;
 
   void renderDocument(const String &html);
+  void renderPlainText(const String &text, const String &title);
+  void resetRenderedRows();
   void appendText(const String &text);
   void appendBreak();
+  void appendImage(const String &label, bool linked);
   void appendStub(const String &label);
-  void wrapRenderedText(const String &text);
+  void appendWord(const String &word, const TextStyle &style);
+  void appendRun(const String &text, const TextStyle &style);
+  void beginTextRow();
+  void buildPages();
+  uint16_t pageEndRow(uint8_t page) const;
+  bool hasNextPage() const;
+  int16_t textWidth(const String &text, const TextStyle &style) const;
+  void applyFont(const TextStyle &style) const;
+  bool stylesEqual(const TextStyle &left, const TextStyle &right) const;
+  TextStyle styledForTag(const String &tag, const String &attributes) const;
+  String attributeValue(const String &attributes, const char *name) const;
+  uint16_t parseColor(const String &value, uint16_t fallback) const;
+  int findTagEnd(const String &html, int start) const;
+  void pushStyle(const String &tag, const TextStyle &style);
+  void popStyle(const String &tag);
   String decodeEntities(const String &value) const;
   String transliterateCyrillic(const String &value) const;
   String shortText(const String &value, int16_t maxWidth) const;
