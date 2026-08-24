@@ -720,7 +720,10 @@ bool ImageViewerScreen::readCacheHeader(fs::File &file) const {
 }
 
 bool ImageViewerScreen::loadCache() {
-  if (_format == ImageFormat::Unknown || _format == ImageFormat::Gif ||
+  // JPG, PNG, and BMP intentionally probe their .em16 cache before parsing
+  // the source header, so their format is still Unknown here.  Only animated
+  // sources use the separate .emga cache path.
+  if (_format == ImageFormat::Gif ||
       (_format == ImageFormat::Webp && _webpAnimated)) return false;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
   if (!SD.exists(_cachePath)) return false;
