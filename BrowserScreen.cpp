@@ -28,8 +28,8 @@ const int16_t ControlsHeight = 42;
 const int16_t TextRowHeight = 22;
 const int16_t DocumentPadding = 7;
 const int16_t DocumentSidePadding = 8;
-const uint8_t ThumbnailMaxWidth = 150;
-const uint8_t ThumbnailMaxHeight = 150;
+const uint8_t ThumbnailMaxWidth = 200;
+const uint8_t ThumbnailMaxHeight = 200;
 const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
 const int16_t StartOpenButtonTop = HeaderHeight + 8;
 const int16_t StartOpenButtonHeight = 32;
@@ -45,6 +45,13 @@ String trimCopy(const String &value) {
   String result = value;
   result.trim();
   return result;
+}
+
+bool isLightColor(uint16_t color) {
+  const uint8_t red = color >> 8;
+  const uint8_t green = color >> 3;
+  const uint8_t blue = color << 3;
+  return (uint32_t)red * 299 + (uint32_t)green * 587 + (uint32_t)blue * 114 >= 128000;
 }
 
 bool startsWithIgnoreCase(const String &value, const char *prefix) {
@@ -432,6 +439,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _currentUrl(),
     _title(),
     _message(),
+    _documentBackgroundColor(TFT_BLACK),
     _titleBuffer(),
     _rowCount(0),
     _embeddedImageCount(0),
@@ -505,7 +513,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   }
   if (contains(_backBounds, point.x, point.y)) {
     if (isLoading()) cancelLoading();
-    else if (_historyCount > 0) goBack();
+    else if (!_showStart) goBack();
     return;
   }
   if (!_showStart && contains(_homeBounds, point.x, point.y)) {
@@ -611,16 +619,18 @@ void BrowserScreen::drawStartPage() {
 
 void BrowserScreen::drawDocument() {
   TFT_eSPI &tft = _display.tft();
+  tft.fillRect(0, HeaderHeight, _display.width(),
+               _display.height() - HeaderHeight - ControlsHeight, _documentBackgroundColor);
   const int16_t textTop = HeaderHeight + DocumentPadding;
   if (_message.length() > 0) {
-    tft.setTextColor(_message == "Loading..." ? TFT_CYAN : TFT_RED, TFT_BLACK);
+    tft.setTextColor(_message == "Loading..." ? TFT_CYAN : TFT_RED, _documentBackgroundColor);
     tft.setTextDatum(TC_DATUM);
     tft.drawString(shortText(_message, _display.width() - 18), _display.width() / 2, textTop + 20, 2);
     tft.setTextDatum(TL_DATUM);
     return;
   }
   if (_rowCount == 0) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setTextColor(TFT_DARKGREY, _documentBackgroundColor);
     tft.drawString("Page has no readable text", 10, textTop, 2);
     return;
   }
@@ -631,14 +641,14 @@ void BrowserScreen::drawDocument() {
     const VisualRow &row = _rows[index];
     if (row.image) {
       uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
-      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : TFT_BLACK;
+      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : _documentBackgroundColor;
       const int16_t height = rowHeight(row);
       int16_t width = imageWidth(row.imageLabel);
       const bool hasThumbnail = row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount &&
                                 _embeddedImages[row.imageIndex].pixels;
       if (hasThumbnail) {
         const EmbeddedImage &image = _embeddedImages[row.imageIndex];
-        width = image.width + (row.imageLink ? 2 : 0);
+        width = image.width;
       }
       if (row.style.hasBlockBackground) {
         tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, height,
@@ -647,11 +657,8 @@ void BrowserScreen::drawDocument() {
         tft.fillRect(DocumentSidePadding, y, width, height, row.style.backgroundColor);
       }
       if (hasThumbnail) {
-        const EmbeddedImage &image = _embeddedImages[row.imageIndex];
-        if (row.imageLink) tft.drawRect(DocumentSidePadding, y, image.width + 2, image.height + 2, color);
-        drawThumbnail(row.imageIndex, DocumentSidePadding + (row.imageLink ? 1 : 0), y + (row.imageLink ? 1 : 0));
+        drawThumbnail(row.imageIndex, DocumentSidePadding, y);
       } else {
-        if (row.imageLink) tft.drawRect(DocumentSidePadding, y, width, TextRowHeight, color);
         tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
         applyFont(row.style);
         tft.setTextColor(color, row.style.hasBackground ? row.style.backgroundColor : rowBackground);
@@ -660,7 +667,7 @@ void BrowserScreen::drawDocument() {
         tft.setTextDatum(TL_DATUM);
       }
     } else {
-      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : TFT_BLACK;
+      const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : _documentBackgroundColor;
       if (row.style.hasBlockBackground) {
         tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, rowHeight(row),
                      row.style.blockBackgroundColor);
@@ -672,15 +679,13 @@ void BrowserScreen::drawDocument() {
           uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
           const int16_t height = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
                                  _embeddedImages[run.imageIndex].pixels
-            ? _embeddedImages[run.imageIndex].height + (run.style.linkIndex ? 2 : 0) : TextRowHeight;
+            ? _embeddedImages[run.imageIndex].height : TextRowHeight;
           if (run.style.hasBackground) tft.fillRect(x, y, run.width, height, run.style.backgroundColor);
           const bool hasThumbnail = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
                                     _embeddedImages[run.imageIndex].pixels;
           if (hasThumbnail) {
-            if (run.style.linkIndex) tft.drawRect(x, y, run.width, _embeddedImages[run.imageIndex].height + 2, color);
-            drawThumbnail(run.imageIndex, x + (run.style.linkIndex ? 1 : 0), y + (run.style.linkIndex ? 1 : 0));
+            drawThumbnail(run.imageIndex, x, y);
           } else {
-            if (run.style.linkIndex) tft.drawRect(x, y, run.width, TextRowHeight, color);
             tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
             applyFont(run.style);
             tft.setTextColor(color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
@@ -709,8 +714,6 @@ void BrowserScreen::drawDocument() {
 
 void BrowserScreen::redrawDocument() {
   if (!_display.isReady()) return;
-  _display.tft().fillRect(0, HeaderHeight, _display.width(),
-                          _display.height() - HeaderHeight - ControlsHeight, TFT_BLACK);
   drawDocument();
 }
 
@@ -719,7 +722,7 @@ void BrowserScreen::drawControls() {
   const Rect buttons[] = {_backBounds, _homeBounds, _previousBounds, _nextBounds};
   const bool loading = isLoading();
   for (uint8_t i = 0; i < 4; i++) {
-    bool active = (i == 0 && (loading || _historyCount > 0)) || (i == 1 && !_showStart) ||
+    bool active = (i == 0 && (loading || !_showStart)) || (i == 1 && !_showStart) ||
       (!_showStart && ((i == 2 && _page > 0) ||
       (i == 3 && hasNextPage())));
     uint16_t color = active ? 0x2965 : TFT_DARKGREY;
@@ -790,7 +793,7 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
       if (row.image) {
         int16_t width = imageWidth(row.imageLabel);
         if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
-          width = _embeddedImages[row.imageIndex].width + (row.imageLink ? 2 : 0);
+          width = _embeddedImages[row.imageIndex].width;
         }
         bool insideImage = x >= DocumentSidePadding && x < DocumentSidePadding + width;
         return insideImage && row.imageLinkIndex ? _linkUrls[row.imageLinkIndex - 1] : "";
@@ -837,6 +840,12 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     return false;
   }
 
+  // Record the page we are leaving before its replacement starts loading.
+  // A cancelled (or failed) request still leaves that page reachable through
+  // Back; delaying this until after fetch() succeeds made the footer Back
+  // button disappear after cancelling a navigation.
+  if (addToHistory && hadDocument && previousUrl != url) addHistory(previousUrl);
+
   // Invalidates queued image jobs before a new page takes the shared HTTP
   // client. A task already in a network read is allowed to finish safely;
   // its result is discarded.
@@ -849,7 +858,10 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   _title = "";
   _page = 0;
   _loadCancelled = false;
-  _loadCancelTouchDown = false;
+  // Navigation can be initiated by the Back button itself.  That tap remains
+  // down while this synchronous request starts, so treat it as already
+  // consumed; otherwise pollLoadingCancel() cancels the Back request at once.
+  _loadCancelTouchDown = _lastTouchDown;
   draw();
   yield();
 
@@ -862,7 +874,6 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return false;
   }
-  if (addToHistory && hadDocument) addHistory(previousUrl);
   _currentUrl = finalUrl;
   _message = "";
   if (downloadedPath.length()) {
@@ -902,7 +913,14 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
 }
 
 void BrowserScreen::goBack() {
-  if (_historyCount == 0) return;
+  if (_historyCount == 0) {
+    releaseEmbeddedImages();
+    _showStart = true;
+    _page = 0;
+    _message = "";
+    draw();
+    return;
+  }
   const String target = _historyUrls[_historyCount - 1];
   if (openUrl(target, false)) _historyCount--;
 }
@@ -1625,7 +1643,17 @@ void BrowserScreen::renderDocument(const String &html) {
       } else {
         if (isBlockTag(tag)) appendBreak();
         if ((tag == "td" || tag == "th") && _rowCount) _pendingSpace = true;
-        if (!selfClosing) pushStyle(tag, styledForTag(tag, attributes));
+        if (!selfClosing) {
+          TextStyle tagStyle = styledForTag(tag, attributes);
+          if ((tag == "html" || tag == "body") && tagStyle.hasBackground) {
+            _documentBackgroundColor = tagStyle.backgroundColor;
+            // The browser's normal foreground is white for its dark UI. A
+            // page-level light background has the web default of dark text.
+            if (_currentStyle.color == DefaultTextColor && tagStyle.color == DefaultTextColor &&
+                isLightColor(_documentBackgroundColor)) tagStyle.color = TFT_BLACK;
+          }
+          pushStyle(tag, tagStyle);
+        }
       }
     }
     position = endTag + 1;
@@ -1650,6 +1678,7 @@ void BrowserScreen::resetRenderedRows() {
   releaseEmbeddedImages();
   _rowCount = 0;
   _pageCount = 0;
+  _documentBackgroundColor = TFT_BLACK;
   _styleDepth = 0;
   _currentStyle = {DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
   _linkCount = 0;
@@ -1709,7 +1738,7 @@ void BrowserScreen::appendInlineImage(const String &label, const TextStyle &styl
   const bool hasImageSlot = imageIndex >= 0 && imageIndex < _embeddedImageCount;
   const bool hasThumbnail = hasImageSlot && _embeddedImages[imageIndex].pixels;
   String displayLabel = hasThumbnail ? "" : shortImageLabel(label, maxWidth - 26);
-  int16_t width = hasThumbnail ? _embeddedImages[imageIndex].width + (style.linkIndex ? 2 : 0)
+  int16_t width = hasThumbnail ? _embeddedImages[imageIndex].width
                                 : imageWidth(displayLabel);
   beginTextRow();
   if (_rowCount == 0) return;
@@ -1851,7 +1880,7 @@ int16_t BrowserScreen::rowHeight(const VisualRow &row) const {
   if (row.image) {
     if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
       const EmbeddedImage &image = _embeddedImages[row.imageIndex];
-      if (image.pixels) height = image.height + (row.imageLink ? 2 : 0);
+      if (image.pixels) height = image.height;
     }
   } else {
     for (uint8_t i = 0; i < row.runCount; i++) {
@@ -1859,7 +1888,7 @@ int16_t BrowserScreen::rowHeight(const VisualRow &row) const {
       if (!run.image || run.imageIndex < 0 || run.imageIndex >= _embeddedImageCount) continue;
       const EmbeddedImage &image = _embeddedImages[run.imageIndex];
       if (!image.pixels) continue;
-      const int16_t imageHeight = image.height + (run.style.linkIndex ? 2 : 0);
+      const int16_t imageHeight = image.height;
       if (imageHeight > height) height = imageHeight;
     }
   }
@@ -1956,7 +1985,7 @@ void BrowserScreen::updateImageLayout() {
       VisualRun &run = row.runs[runIndex];
       if (run.image && run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
         const EmbeddedImage &image = _embeddedImages[run.imageIndex];
-        if (image.pixels) run.width = image.width + (run.style.linkIndex ? 2 : 0);
+        if (image.pixels) run.width = image.width;
       }
       run.x = x;
       x += run.width;

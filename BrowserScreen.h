@@ -168,6 +168,7 @@ private:
   String _currentUrl;
   String _title;
   String _message;
+  uint16_t _documentBackgroundColor;
   String _titleBuffer;
   VisualRow _rows[MaxRows];
   EmbeddedImage _embeddedImages[MaxEmbeddedImages];
