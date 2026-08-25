@@ -123,4 +123,66 @@ void drawListCell(TFT_eSPI &tft,
   resetTextState(tft);
 }
 
+void drawProgressBar(TFT_eSPI &tft,
+                     int16_t x,
+                     int16_t y,
+                     int16_t width,
+                     int16_t height,
+                     uint8_t value,
+                     bool indeterminate,
+                     uint16_t fillColor,
+                     uint16_t frameColor,
+                     uint16_t backgroundColor,
+                     bool drawFrame,
+                     uint32_t indeterminateElapsedMs) {
+  if (width < 5 || height < 5) return;
+  const int16_t innerX = x + 2;
+  const int16_t innerY = y + 2;
+  const int16_t innerWidth = width - 4;
+  const int16_t innerHeight = height - 4;
+  if (drawFrame) tft.drawRoundRect(x, y, width, height, 4, frameColor);
+  tft.fillRect(innerX, innerY, innerWidth, innerHeight, backgroundColor);
+
+  int16_t fillWidth = 0;
+  int16_t fillX = innerX;
+  if (indeterminate) {
+    const int16_t segmentWidth = innerWidth < 18 ? innerWidth : innerWidth / 4;
+    const int16_t travel = innerWidth - segmentWidth;
+    fillX += travel > 0 ? (indeterminateElapsedMs / 8) % (travel + 1) : 0;
+    fillWidth = segmentWidth;
+  } else {
+    if (value > 100) value = 100;
+    fillWidth = (int16_t)((int32_t)innerWidth * value / 100);
+  }
+  if (fillWidth > 0) tft.fillRoundRect(fillX, innerY, fillWidth, innerHeight, 3, fillColor);
+}
+
+void updateProgressBar(TFT_eSPI &tft,
+                       int16_t x,
+                       int16_t y,
+                       int16_t width,
+                       int16_t height,
+                       uint8_t previousValue,
+                       uint8_t value,
+                       uint16_t fillColor,
+                       uint16_t backgroundColor) {
+  if (width < 5 || height < 5) return;
+  if (previousValue > 100) previousValue = 100;
+  if (value > 100) value = 100;
+  const int16_t innerX = x + 2;
+  const int16_t innerY = y + 2;
+  const int16_t innerWidth = width - 4;
+  const int16_t innerHeight = height - 4;
+  const int16_t previousWidth = (int16_t)((int32_t)innerWidth * previousValue / 100);
+  const int16_t currentWidth = (int16_t)((int32_t)innerWidth * value / 100);
+  if (currentWidth < previousWidth) {
+    tft.fillRect(innerX, innerY, innerWidth, innerHeight, backgroundColor);
+    if (currentWidth > 0) tft.fillRect(innerX, innerY, currentWidth, innerHeight, fillColor);
+    return;
+  }
+  if (currentWidth > previousWidth) {
+    tft.fillRect(innerX + previousWidth, innerY, currentWidth - previousWidth, innerHeight, fillColor);
+  }
+}
+
 }  // namespace UiKit

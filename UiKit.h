@@ -46,4 +46,34 @@ void drawListCell(TFT_eSPI &tft,
                   uint16_t iconColor = TFT_WHITE,
                   const String &trailingText = String());
 
+// Draws a compact progress bar. Call with drawFrame=false to update only the
+// moving fill while retaining the existing border and avoiding visible flicker.
+// When indeterminate is true, value is ignored and a moving segment is shown.
+// Pass elapsed time since the operation began to start that segment at the
+// left edge; the default of zero leaves it at the start position.
+void drawProgressBar(TFT_eSPI &tft,
+                     int16_t x,
+                     int16_t y,
+                     int16_t width,
+                     int16_t height,
+                     uint8_t value,
+                     bool indeterminate = false,
+                     uint16_t fillColor = TFT_BLUE,
+                     uint16_t frameColor = TFT_DARKGREY,
+                     uint16_t backgroundColor = TFT_WHITE,
+                     bool drawFrame = true,
+                     uint32_t indeterminateElapsedMs = 0);
+
+// Updates a determinate bar without clearing its existing fill. If progress
+// moves backwards, the bar is safely repainted from empty instead.
+void updateProgressBar(TFT_eSPI &tft,
+                       int16_t x,
+                       int16_t y,
+                       int16_t width,
+                       int16_t height,
+                       uint8_t previousValue,
+                       uint8_t value,
+                       uint16_t fillColor = TFT_BLUE,
+                       uint16_t backgroundColor = TFT_WHITE);
+
 }  // namespace UiKit

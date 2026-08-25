@@ -41,6 +41,16 @@ const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
 const char *DownloadDirectory = "/.system/browser_media";
 
+void browserLog(const __FlashStringHelper *message) {
+  Serial.print(F("[Browser] "));
+  Serial.println(message);
+}
+
+void browserLog(const String &message) {
+  Serial.print(F("[Browser] "));
+  Serial.println(message);
+}
+
 String trimCopy(const String &value) {
   String result = value;
   result.trim();
@@ -436,10 +446,19 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _lastTouchDown(false),
     _loadCancelled(false),
     _loadCancelTouchDown(false),
+    _foregroundLoading(false),
     _page(0),
     _currentUrl(),
     _title(),
     _message(),
+    _loadingPhase(),
+    _loadingBytes(0),
+    _loadingTotalBytes(-1),
+    _loadingStartedMs(0),
+    _lastLoadingDrawMs(0),
+    _lastLoadingDrawBytes(0),
+    _lastLoadingPercent(0),
+    _lastLoadingKnownSize(false),
     _documentBackgroundColor(TFT_WHITE),
     _titleBuffer(),
     _rowCount(0),
@@ -478,11 +497,16 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
 #endif
     xTaskCreatePinnedToCore(imageWorkerTask, "browser-images", 16384, this, tskIDLE_PRIORITY + 1,
                             &_imageWorker, workerCore);
+    browserLog(String(F("image worker started on core ")) + workerCore);
+  } else {
+    browserLog(F("image worker unavailable: queue allocation failed"));
   }
 }
 
 void BrowserScreen::onEnter() {
+  browserLog(F("entered"));
   if (!_loaded) {
+    browserLog(F("loading saved state"));
     loadState();
     _loaded = true;
   }
@@ -492,6 +516,7 @@ void BrowserScreen::onEnter() {
 
 void BrowserScreen::onResult(const ScreenResult &result) {
   if (result.kind == ScreenResultKind::Text && result.text.length() > 0) {
+    browserLog(F("received URL from text input"));
     openUrl(result.text, true, true);
   }
 }
@@ -511,15 +536,22 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   _lastTouchDown = true;
 
   if (contains(_closeBounds, point.x, point.y)) {
+    browserLog(F("close requested"));
     _navigator.pop();
     return;
   }
   if (contains(_backBounds, point.x, point.y)) {
-    if (isLoading()) cancelLoading();
-    else if (!_showStart) goBack();
+    if (isLoading()) {
+      browserLog(F("cancel requested"));
+      cancelLoading();
+    } else if (!_showStart) {
+      browserLog(F("back requested"));
+      goBack();
+    }
     return;
   }
   if (!_showStart && contains(_homeBounds, point.x, point.y)) {
+    browserLog(F("returning to start page"));
     if (isLoading()) releaseEmbeddedImages();
     _showStart = true;
     _page = 0;
@@ -528,22 +560,30 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (_showStart && contains(_openBounds, point.x, point.y)) {
+    browserLog(F("opening URL input"));
     openUrlInput();
     return;
   }
   if (!_showStart && contains(_previousBounds, point.x, point.y)) {
-    if (_page > 0) _page--;
+    if (_page > 0) {
+      _page--;
+      browserLog(String(F("moved to page ")) + String(_page + 1));
+    }
     draw();
     return;
   }
   if (!_showStart && contains(_nextBounds, point.x, point.y)) {
-    if (hasNextPage()) _page++;
+    if (hasNextPage()) {
+      _page++;
+      browserLog(String(F("moved to page ")) + String(_page + 1));
+    }
     draw();
     return;
   }
   if (_showStart) {
     for (uint8_t i = 0; i < MaxRecentSites; i++) {
       if (contains(_recentBounds[i], point.x, point.y)) {
+        browserLog(String(F("opening recent site #")) + String(i + 1));
         openUrl(_recentSites[i].url);
         return;
       }
@@ -551,7 +591,10 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   }
   if (!_showStart) {
     String linkUrl = documentLinkAt(point.x, point.y);
-    if (linkUrl.length()) openUrl(linkUrl);
+    if (linkUrl.length()) {
+      browserLog(F("opening document link"));
+      openUrl(linkUrl);
+    }
   }
 }
 
@@ -625,13 +668,16 @@ void BrowserScreen::drawDocument() {
   tft.fillRect(0, HeaderHeight, _display.width(),
                _display.height() - HeaderHeight - ControlsHeight, _documentBackgroundColor);
   const int16_t textTop = HeaderHeight + DocumentPadding;
+  if (_foregroundLoading) {
+    drawLoadingPanel(true, true);
+    return;
+  }
   if (_message.length() > 0) {
-    const bool loading = _message == "Loading...";
     const String hint = shortText(_message, _display.width() - 28);
     const int16_t hintWidth = tft.textWidth(hint, 2) + 14;
     const int16_t hintX = (_display.width() - hintWidth) / 2;
-    const uint16_t hintBackground = loading ? TFT_YELLOW : TFT_RED;
-    const uint16_t hintForeground = loading ? TFT_BLACK : TFT_WHITE;
+    const uint16_t hintBackground = TFT_RED;
+    const uint16_t hintForeground = TFT_WHITE;
     tft.fillRoundRect(hintX, textTop + 7, hintWidth, 26, 5, hintBackground);
     tft.setTextColor(hintForeground, hintBackground);
     tft.setTextDatum(MC_DATUM);
@@ -722,6 +768,50 @@ void BrowserScreen::drawDocument() {
   tft.setFreeFont();
 }
 
+void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
+  TFT_eSPI &tft = _display.tft();
+  const int16_t textTop = HeaderHeight + DocumentPadding;
+  const bool knownSize = _loadingTotalBytes > 0;
+  uint8_t percent = 0;
+  if (knownSize) {
+    percent = (uint8_t)((uint64_t)_loadingBytes * 100 / (uint32_t)_loadingTotalBytes);
+    if (percent > 100) percent = 100;
+  }
+  const String detail = knownSize
+    ? String(percent) + F("%  ") + String(_loadingBytes / 1024) + F(" / ") +
+      String(((uint32_t)_loadingTotalBytes + 1023) / 1024) + F(" KB")
+    : (_loadingBytes ? String(_loadingBytes / 1024) + F(" KB received") : String(F("Please wait")));
+  const int16_t barX = 18;
+  const int16_t barY = textTop + 54;
+  const int16_t barWidth = _display.width() - barX * 2;
+
+  if (redrawPhase) {
+    tft.fillRect(0, textTop, _display.width(), 27, _documentBackgroundColor);
+    const String phase = shortText(_loadingPhase.length() ? _loadingPhase : String(F("Loading")),
+                                   _display.width() - 28);
+    tft.setTextColor(TFT_BLACK, _documentBackgroundColor);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(phase, _display.width() / 2, textTop + 18, 2);
+  }
+  // Only this short line and the bar interior change during a transfer. This
+  // leaves the loading title and the bar frame on screen, eliminating flicker.
+  tft.fillRect(0, textTop + 28, _display.width(), 21, _documentBackgroundColor);
+  tft.setTextColor(TFT_DARKGREY, _documentBackgroundColor);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(detail, _display.width() / 2, textTop + 39, 2);
+  if (knownSize && _lastLoadingKnownSize && !drawBarFrame) {
+    UiKit::updateProgressBar(tft, barX, barY, barWidth, 12, _lastLoadingPercent, percent,
+                             TFT_BLUE, _documentBackgroundColor);
+  } else {
+    UiKit::drawProgressBar(tft, barX, barY, barWidth, 12, percent, !knownSize,
+                           TFT_BLUE, TFT_DARKGREY, _documentBackgroundColor, drawBarFrame,
+                           millis() - _loadingStartedMs);
+  }
+  _lastLoadingPercent = percent;
+  _lastLoadingKnownSize = knownSize;
+  tft.setTextDatum(TL_DATUM);
+}
+
 void BrowserScreen::redrawDocument() {
   if (!_display.isReady()) return;
   drawDocument();
@@ -754,7 +844,7 @@ bool BrowserScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
 }
 
 bool BrowserScreen::isLoading() const {
-  if (_message == "Loading...") return true;
+  if (_foregroundLoading) return true;
   if (_activeImageGeneration == _imageGeneration) return true;
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
     if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].state < 2) return true;
@@ -762,12 +852,69 @@ bool BrowserScreen::isLoading() const {
   return false;
 }
 
+void BrowserScreen::beginLoading(const String &phase) {
+  _foregroundLoading = true;
+  _documentBackgroundColor = TFT_WHITE;
+  _loadingBytes = 0;
+  _loadingTotalBytes = -1;
+  _loadingStartedMs = millis();
+  _lastLoadingDrawMs = 0;
+  _lastLoadingDrawBytes = 0;
+  _lastLoadingPercent = 0;
+  _lastLoadingKnownSize = false;
+  _loadingPhase = phase;
+  browserLog(String(F("progress: ")) + phase);
+}
+
+void BrowserScreen::setLoadingPhase(const String &phase, int32_t totalBytes) {
+  // Image downloads happen on the second core. Their results redraw the
+  // document in tick(), while this progress panel is reserved for the
+  // foreground navigation or direct file transfer.
+  if (!_foregroundLoading || _activeImageGeneration) return;
+  const bool changed = _loadingPhase != phase || _loadingTotalBytes != totalBytes;
+  _loadingPhase = phase;
+  _loadingTotalBytes = totalBytes;
+  if (changed) {
+    browserLog(String(F("progress: ")) + phase +
+               (totalBytes >= 0 ? String(F(", expected bytes=")) + String(totalBytes) : String()));
+    refreshLoadingDisplay(true);
+  }
+}
+
+void BrowserScreen::advanceLoading(uint32_t bytes) {
+  if (!_foregroundLoading || _activeImageGeneration || bytes == 0) return;
+  _loadingBytes += bytes;
+  refreshLoadingDisplay();
+}
+
+void BrowserScreen::finishLoading() {
+  if (!_foregroundLoading) return;
+  browserLog(String(F("progress complete: ")) + _loadingPhase + F(", bytes=") + String(_loadingBytes));
+  _foregroundLoading = false;
+  _loadingPhase = "";
+  _loadingTotalBytes = -1;
+}
+
+void BrowserScreen::refreshLoadingDisplay(bool force) {
+  if (!_foregroundLoading || !_display.isReady()) return;
+  const uint32_t now = millis();
+  // Drawing each received byte would make slow responses slower. Refresh at
+  // most eight times a second, while still updating immediately after a
+  // phase change or every 4 KiB on fast transfers.
+  if (!force && now - _lastLoadingDrawMs < 125 && _loadingBytes - _lastLoadingDrawBytes < 4096) return;
+  _lastLoadingDrawMs = now;
+  _lastLoadingDrawBytes = _loadingBytes;
+  drawLoadingPanel(force, false);
+}
+
 void BrowserScreen::cancelLoading() {
-  const bool contentIsPending = _message == "Loading...";
+  const bool contentIsPending = _foregroundLoading;
+  browserLog(F("cancelling active transfer and image jobs"));
   releaseEmbeddedImages();
   _plainClient.stop();
   _secureClient.stop();
   _loadCancelled = true;
+  finishLoading();
   if (contentIsPending) _message = "Loading cancelled";
   draw();
 }
@@ -777,7 +924,7 @@ bool BrowserScreen::pollLoadingCancel() {
   // poll touch itself. Image work is already on the second core and is
   // cancelled by releaseEmbeddedImages() through its generation check.
   if (_activeImageGeneration) return _activeImageGeneration != _imageGeneration;
-  if (_message != "Loading...") return _loadCancelled;
+  if (!_foregroundLoading) return _loadCancelled;
   _touch.update();
   TouchPoint point = _touch.point();
   if (!point.touched) {
@@ -832,6 +979,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   String url;
   String error;
   if (!normalizeUrl(value, url, error)) {
+    browserLog(String(F("URL rejected: ")) + error);
     _showStart = false;
     _message = error;
     _rowCount = 0;
@@ -839,9 +987,11 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return false;
   }
+  browserLog(String(F("navigation requested: ")) + url);
   _currentUrl = url;
   _title = "";
   if (!_wifi.isConnected()) {
+    browserLog(F("navigation blocked: Wi-Fi is disconnected"));
     _showStart = false;
     _message = "Connect to Wi-Fi first";
     _rowCount = 0;
@@ -854,7 +1004,10 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   // A cancelled (or failed) request still leaves that page reachable through
   // Back; delaying this until after fetch() succeeds made the footer Back
   // button disappear after cancelling a navigation.
-  if (addToHistory && hadDocument && previousUrl != url) addHistory(previousUrl);
+  if (addToHistory && hadDocument && previousUrl != url) {
+    browserLog(F("saving current page to back history"));
+    addHistory(previousUrl);
+  }
 
   // Invalidates queued image jobs before a new page takes the shared HTTP
   // client. A task already in a network read is allowed to finish safely;
@@ -862,7 +1015,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   releaseEmbeddedImages();
 
   _showStart = false;
-  _message = "Loading...";
+  _message = "";
   _rowCount = 0;
   _pageCount = 0;
   _title = "";
@@ -872,6 +1025,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   // down while this synchronous request starts, so treat it as already
   // consumed; otherwise pollLoadingCancel() cancels the Back request at once.
   _loadCancelTouchDown = _lastTouchDown;
+  beginLoading(F("Preparing request"));
   draw();
   yield();
 
@@ -880,12 +1034,14 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   String contentType;
   String downloadedPath;
   if (!fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
+    browserLog(String(F("navigation failed: ")) + (_loadCancelled ? String(F("cancelled")) : error));
+    finishLoading();
     _message = _loadCancelled ? "Loading cancelled" : error;
     draw();
     return false;
   }
   _currentUrl = finalUrl;
-  _message = "";
+  setLoadingPhase(downloadedPath.length() ? F("Opening downloaded file") : F("Rendering page"));
   if (downloadedPath.length()) {
     FileFormats::Format format = FileFormats::fromPath(downloadedPath);
     FileFormats::Group group = FileFormats::group(format);
@@ -897,6 +1053,8 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
       : (group == FileFormats::Group::Video ? "Video download" : "Image download"));
     if (addToRecent) addRecent(_currentUrl, _title);
     saveState();
+    finishLoading();
+    browserLog(String(F("download complete: ")) + downloadedPath);
     if (group == FileFormats::Group::Image &&
         _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(downloadedPath))) return true;
     if (group == FileFormats::Group::Audio &&
@@ -918,12 +1076,16 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   }
   if (addToRecent) addRecent(_currentUrl, _title);
   saveState();
+  finishLoading();
+  browserLog(String(F("page ready: title=\"")) + _title + F("\", rows=") + String(_rowCount) +
+             F(", pages=") + String(_pageCount) + F(", images=") + String(_embeddedImageCount));
   draw();
   return true;
 }
 
 void BrowserScreen::goBack() {
   if (_historyCount == 0) {
+    browserLog(F("back history empty; showing start page"));
     releaseEmbeddedImages();
     _showStart = true;
     _page = 0;
@@ -932,7 +1094,11 @@ void BrowserScreen::goBack() {
     return;
   }
   const String target = _historyUrls[_historyCount - 1];
-  if (openUrl(target, false)) _historyCount--;
+  browserLog(String(F("loading previous page: ")) + target);
+  if (openUrl(target, false)) {
+    _historyCount--;
+    browserLog(F("back navigation complete"));
+  }
 }
 
 bool BrowserScreen::normalizeUrl(const String &value, String &normalized, String &error) const {
@@ -990,11 +1156,14 @@ bool BrowserScreen::parseUrl(const String &value, Url &url) const {
 bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &body,
                           String &contentType, String &downloadedPath, String &error,
                           uint32_t downloadLimit) {
+  setLoadingPhase(F("Waiting for network access"));
   HttpLock lock(_httpMutex);
   if (!lock.locked()) {
+    browserLog(F("HTTP lock unavailable"));
     error = "Browser is busy";
     return false;
   }
+  browserLog(F("network access acquired"));
   body = "";
   contentType = "";
   downloadedPath = "";
@@ -1002,9 +1171,12 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
   for (uint8_t redirect = 0; redirect <= MaxRedirects; redirect++) {
     Url url;
     if (!parseUrl(next, url)) {
+      browserLog(F("invalid redirect target"));
       error = "Invalid redirect URL";
       return false;
     }
+    browserLog(String(F("HTTP request ")) + String(redirect + 1) + F("/") + String(MaxRedirects + 1) +
+               F(": ") + next);
     HttpResponse response{};
     WiFiClient *client = nullptr;
     if (!requestOne(url, response, client, error)) return false;
@@ -1015,23 +1187,32 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
         return false;
       }
       next = resolveUrl(url, response.location);
+      browserLog(String(F("redirect ")) + String(response.statusCode) + F(" -> ") + next);
       continue;
     }
     if (response.statusCode == 401) {
       client->stop();
+      browserLog(F("server requires unsupported Basic authentication"));
       error = "Basic authentication is unsupported";
       return false;
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       client->stop();
+      browserLog(String(F("HTTP request rejected with status ")) + String(response.statusCode));
       error = "HTTP error " + String(response.statusCode);
       return false;
     }
     contentType = response.contentType;
     FileFormats::Format format = downloadableFormatForResponse(contentType, url);
     bool downloadable = FileFormats::isDownloadable(format);
+    browserLog(String(F("response accepted: type=")) +
+               (contentType.length() ? contentType : String(F("unspecified"))) +
+               F(", length=") + String(response.contentLength) +
+               (response.chunked ? F(", chunked") : F("")) +
+               (downloadable ? F(", media download") : F(", page response")));
     bool readOk = false;
     if (downloadable && response.compressed) {
+      browserLog(F("compressed media download rejected"));
       error = "Compressed file response unsupported";
     } else if (downloadable) {
       readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
@@ -1040,10 +1221,15 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
       readOk = readBody(*client, response.chunked, response.contentLength, body, error);
     }
     client->stop();
-    if (!readOk) return false;
+    if (!readOk) {
+      browserLog(String(F("response transfer failed: ")) + error);
+      return false;
+    }
     finalUrl = next;
+    browserLog(String(F("HTTP transfer complete: ")) + finalUrl);
     return true;
   }
+  browserLog(F("redirect limit reached"));
   error = "Too many redirects";
   return false;
 }
@@ -1061,10 +1247,14 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
     _secureClient.setInsecure();
     client = &_secureClient;
   }
+  setLoadingPhase(String(F("Connecting to ")) + url.host);
+  browserLog(String(F("connecting: ")) + url.scheme + F("://") + url.host + F(":") + String(url.port));
   if (!client->connect(url.host.c_str(), url.port)) {
+    browserLog(F("connection failed"));
     error = _loadCancelled ? "Loading cancelled" : "Connection failed";
     return false;
   }
+  setLoadingPhase(F("Sending request"));
   if (pollLoadingCancel()) {
     client->stop();
     error = "Loading cancelled";
@@ -1080,13 +1270,16 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   if (cookies.length()) request += "Cookie: " + cookies + "\r\n";
   request += "\r\n";
   if (client->print(request) != request.length()) {
+    browserLog(F("request write failed"));
     client->stop();
     error = "Request failed";
     return false;
   }
 
   String line;
+  setLoadingPhase(F("Waiting for response"));
   if (!readLine(*client, line, ConnectTimeoutMs) || !startsWithIgnoreCase(line, "HTTP/")) {
+    browserLog(F("invalid or timed out HTTP status line"));
     client->stop();
     error = "Invalid HTTP response";
     return false;
@@ -1099,6 +1292,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
     error = "Invalid HTTP status";
     return false;
   }
+  browserLog(String(F("HTTP status: ")) + String(response.statusCode));
 
   response.chunked = false;
   response.compressed = false;
@@ -1107,6 +1301,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   response.location = "";
   for (uint8_t count = 0; count < 48; count++) {
     if (!readLine(*client, line, ConnectTimeoutMs)) {
+      browserLog(F("response headers timed out"));
       client->stop();
       error = "Response headers timed out";
       return false;
@@ -1123,6 +1318,10 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
     else if (name == "location") response.location = headerValue;
     else if (name == "set-cookie") acceptCookie(headerValue, url);
   }
+  browserLog(String(F("headers complete: length=")) + String(response.contentLength) +
+             F(", type=") + (response.contentType.length() ? response.contentType : String(F("unspecified"))) +
+             (response.chunked ? F(", chunked") : F("")) +
+             (response.compressed ? F(", compressed") : F("")));
   return true;
 }
 
@@ -1164,12 +1363,25 @@ int BrowserScreen::readByte(WiFiClient &client, uint32_t timeoutMs) {
 
 bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLength,
                              String &body, String &error) {
+  setLoadingPhase(F("Loading page"), chunked ? -1 : contentLength);
+  browserLog(String(F("reading page body")) + (chunked ? F(" (chunked)") : F("")) +
+             F(", expected bytes=") + String(contentLength));
   body = "";
   uint32_t reserveBytes = contentLength > 0
     ? (contentLength < (int32_t)MaxBodyBytes ? (uint32_t)contentLength : MaxBodyBytes)
     : 4096;
   body.reserve(reserveBytes);
   uint32_t total = 0;
+  uint32_t reported = 0;
+  auto reportProgress = [&]() {
+    if (total - reported >= 1024) {
+      advanceLoading(total - reported);
+      reported = total;
+    }
+  };
+  auto finishProgress = [&]() {
+    if (total > reported) advanceLoading(total - reported);
+  };
   if (chunked) {
     while (true) {
       String sizeLine;
@@ -1184,6 +1396,8 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
         do {
           if (!readLine(client, sizeLine, ConnectTimeoutMs)) break;
         } while (sizeLine.length());
+        finishProgress();
+        browserLog(String(F("page body complete: bytes=")) + String(total));
         return true;
       }
       // Do not reject a large page. Retain the leading bounded portion and
@@ -1198,7 +1412,11 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
             return false;
           }
           body += (char)value;
+          total++;
+          reportProgress();
         }
+        finishProgress();
+        browserLog(String(F("page body reached retained limit: bytes=")) + String(total));
         return true;
       }
       for (uint32_t i = 0; i < chunk; i++) {
@@ -1208,8 +1426,9 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
           return false;
         }
         body += (char)value;
+        total++;
+        reportProgress();
       }
-      total += chunk;
       int cr = readByte(client, ConnectTimeoutMs);
       int lf = readByte(client, ConnectTimeoutMs);
       if (cr != '\r' || lf != '\n') {
@@ -1222,14 +1441,25 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
   while (contentLength < 0 || total < (uint32_t)contentLength) {
     int value = readByte(client, ConnectTimeoutMs);
     if (value < 0) {
-      if (contentLength < 0) return true;
+      if (contentLength < 0) {
+        finishProgress();
+        browserLog(String(F("page body complete at connection close: bytes=")) + String(total));
+        return true;
+      }
       error = "Incomplete page body";
       return false;
     }
-    if (total >= MaxBodyBytes) return true;
+    if (total >= MaxBodyBytes) {
+      finishProgress();
+      browserLog(String(F("page body reached retained limit: bytes=")) + String(total));
+      return true;
+    }
     body += (char)value;
     total++;
+    reportProgress();
   }
+  finishProgress();
+  browserLog(String(F("page body complete: bytes=")) + String(total));
   return true;
 }
 
@@ -1266,16 +1496,23 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
                                      FileFormats::Format format, String &downloadedPath, String &error,
                                      uint32_t downloadLimit) {
   downloadedPath = "";
+  setLoadingPhase(String(F("Downloading ")) + FileFormats::extension(format), chunked ? -1 : contentLength);
+  browserLog(String(F("starting file download: format=")) + FileFormats::extension(format) +
+             F(", expected bytes=") + String(contentLength) +
+             (chunked ? F(", chunked") : F("")));
   if (!_sdCard.isMounted()) {
+    browserLog(F("download blocked: SD card is not mounted"));
     error = "SD card required for downloads";
     return false;
   }
   if (downloadLimit == 0 || downloadLimit > MaxDownloadBytes) downloadLimit = MaxDownloadBytes;
   if (contentLength > (int32_t)downloadLimit) {
+    browserLog(F("download rejected: declared size exceeds limit"));
     error = "File exceeds download limit";
     return false;
   }
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    browserLog(F("download blocked: SD card bus busy"));
     error = "SD card is busy";
     return false;
   }
@@ -1284,6 +1521,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   if (!ready) {
     SpiBusLock::unlock();
     error = "Cannot create download cache";
+    browserLog(F("download cache directory creation failed"));
     return false;
   }
 
@@ -1302,6 +1540,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   }
   SpiBusLock::unlock();
   if (!file) {
+    browserLog(F("download cache file creation failed"));
     error = "Cannot create download file";
     return false;
   }
@@ -1332,6 +1571,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
       return false;
     }
     total += length;
+    advanceLoading(length);
     yield();
     return true;
   };
@@ -1420,6 +1660,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   }
 
   if (!complete) {
+    browserLog(String(F("download failed after bytes=")) + String(total) + F(": ") + error);
     removeTemp();
     return false;
   }
@@ -1432,6 +1673,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
     return false;
   }
   if (!isSupportedDownloadFile(tempPath, format)) {
+    browserLog(F("download rejected: file signature does not match response format"));
     error = "Unsupported file download";
     removeTemp();
     return false;
@@ -1445,10 +1687,12 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   if (!committed) SD.remove(tempPath.c_str());
   SpiBusLock::unlock();
   if (!committed) {
+    browserLog(F("download commit failed"));
     error = "Cannot save file download";
     return false;
   }
   downloadedPath = path;
+  browserLog(String(F("download saved: bytes=")) + String(total) + F(", path=") + path);
   return true;
 }
 
@@ -1624,7 +1868,7 @@ void BrowserScreen::renderDocument(const String &html) {
           (imageStyle.hasBlockBackground ? imageStyle.blockBackgroundColor : _documentBackgroundColor);
         int16_t imageIndex = fetchEmbeddedImage(source, imageBackground);
         uint8_t imageLinkIndex = _currentStyle.linkIndex;
-        if (imageLinkIndex == 0 && source.length()) {
+      if (imageLinkIndex == 0 && source.length()) {
           Url base;
           String resolved;
           String normalized;
@@ -1674,6 +1918,9 @@ void BrowserScreen::renderDocument(const String &html) {
     ? "(This page is generated by JavaScript. JavaScript is not supported.)"
     : "(This page has no static readable text.)");
   buildPages();
+  browserLog(String(F("document rendered: html bytes=")) + String(html.length()) +
+             F(", CSS rules=") + String(_cssRuleCount) + F(", links=") + String(_linkCount) +
+             F(", image placeholders=") + String(_embeddedImageCount));
 }
 
 void BrowserScreen::renderPlainText(const String &text, const String &title) {
@@ -1682,6 +1929,7 @@ void BrowserScreen::renderPlainText(const String &text, const String &title) {
   appendText(text);
   if (_rowCount == 0) appendText("(No readable text in this response.)");
   buildPages();
+  browserLog(String(F("plain text rendered: bytes=")) + String(text.length()) + F(", rows=") + String(_rowCount));
 }
 
 void BrowserScreen::resetRenderedRows() {
@@ -1934,6 +2182,7 @@ int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgro
 
   const uint16_t index = _embeddedImageCount++;
   _embeddedImages[index] = {nullptr, 0, 0, backgroundColor, url, _imageGeneration, 0};
+  browserLog(String(F("image placeholder registered #")) + String(index + 1));
   return index;
 }
 
@@ -1949,6 +2198,7 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
   String error;
   if (!fetch(url, finalUrl, body, contentType, downloadedPath, error, MaxEmbeddedImageBytes) ||
       downloadedPath.length() == 0) {
+    browserLog(String(F("image fetch failed: ")) + error);
     return false;
   }
   if (FileFormats::group(FileFormats::fromPath(downloadedPath)) != FileFormats::Group::Image) {
@@ -1975,10 +2225,12 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
     pixels = nullptr;
     return false;
   }
+  browserLog(String(F("image decoded: ")) + String(width) + F("x") + String(height));
   return true;
 }
 
 void BrowserScreen::releaseEmbeddedImages() {
+  if (_embeddedImageCount) browserLog(String(F("releasing image jobs and previews: count=")) + String(_embeddedImageCount));
   _imageGeneration++;
   if (_imageGeneration == 0) _imageGeneration = 1;
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
@@ -2023,6 +2275,7 @@ void BrowserScreen::pumpImageJobs() {
       return;
     }
     image.state = 1;
+    browserLog(String(F("image job queued #")) + String(index + 1));
   }
 }
 
@@ -2040,10 +2293,15 @@ void BrowserScreen::collectImageResults() {
         image.width = result.width;
         image.height = result.height;
         image.state = 2;
+        browserLog(String(F("image preview ready #")) + String(result.imageIndex + 1) + F(" (") +
+                   String(result.width) + F("x") + String(result.height) + F(")"));
         redraw = true;
         continue;
       }
-      if (image.generation == result.generation && image.state == 1) image.state = 3;
+      if (image.generation == result.generation && image.state == 1) {
+        image.state = 3;
+        browserLog(String(F("image preview failed #")) + String(result.imageIndex + 1));
+      }
     }
     if (result.pixels) free(result.pixels);
   }
@@ -2064,10 +2322,12 @@ void BrowserScreen::imageWorkerTask(void *context) {
     result.imageIndex = job.imageIndex;
     result.generation = job.generation;
     if (job.generation == screen->_imageGeneration) {
+      browserLog(String(F("image worker started #")) + String(job.imageIndex + 1));
       screen->_activeImageGeneration = job.generation;
       screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor,
                                          result.pixels, result.width, result.height);
       screen->_activeImageGeneration = 0;
+      browserLog(String(F("image worker finished #")) + String(job.imageIndex + 1));
     }
     xQueueSend(screen->_imageResults, &result, portMAX_DELAY);
   }
@@ -2764,6 +3024,7 @@ void BrowserScreen::addHistory(const String &url) {
     _historyCount = MaxHistory - 1;
   }
   _historyUrls[_historyCount++] = url;
+  browserLog(String(F("history stored: entries=")) + String(_historyCount));
 }
 
 void BrowserScreen::addRecent(const String &url, const String &title) {
@@ -2781,15 +3042,24 @@ void BrowserScreen::addRecent(const String &url, const String &title) {
     for (uint8_t i = _recentCount - 1; i > 0; i--) _recentSites[i] = _recentSites[i - 1];
   }
   _recentSites[0] = {url, title};
+  browserLog(String(F("recent site saved: entries=")) + String(_recentCount));
 }
 
 void BrowserScreen::loadState() {
   _recentCount = 0;
   _cookieCount = 0;
-  if (!_sdCard.isMounted() || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  if (!_sdCard.isMounted()) {
+    browserLog(F("saved state skipped: SD card is not mounted"));
+    return;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    browserLog(F("saved state skipped: SD card bus busy"));
+    return;
+  }
   File file = SD.open(StatePath, FILE_READ);
   if (!file) {
     SpiBusLock::unlock();
+    browserLog(F("no saved browser state found"));
     return;
   }
   while (file.available()) {
@@ -2820,19 +3090,30 @@ void BrowserScreen::loadState() {
   file.close();
   SpiBusLock::unlock();
   pruneCookies();
+  browserLog(String(F("saved state loaded: recent=")) + String(_recentCount) +
+             F(", cookies=") + String(_cookieCount));
 }
 
 void BrowserScreen::saveState() {
   pruneCookies();
-  if (!_sdCard.isMounted() || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  if (!_sdCard.isMounted()) {
+    browserLog(F("saved state not written: SD card is not mounted"));
+    return;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    browserLog(F("saved state not written: SD card bus busy"));
+    return;
+  }
   if (!SD.exists("/.system") && !SD.mkdir("/.system")) {
     SpiBusLock::unlock();
+    browserLog(F("saved state not written: system directory unavailable"));
     return;
   }
   SD.remove(StateTempPath);
   File file = SD.open(StateTempPath, FILE_WRITE);
   if (!file) {
     SpiBusLock::unlock();
+    browserLog(F("saved state not written: temporary file open failed"));
     return;
   }
   bool written = true;
@@ -2855,6 +3136,7 @@ void BrowserScreen::saveState() {
     SD.remove(StateTempPath);
   }
   SpiBusLock::unlock();
+  browserLog(written ? F("saved browser state committed") : F("saved browser state write failed"));
 }
 
 String BrowserScreen::encodeField(const String &value) const {
