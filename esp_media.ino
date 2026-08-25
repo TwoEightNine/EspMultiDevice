@@ -258,6 +258,12 @@ void setup() {
 void loop() {
   updateTouch();
 
+  // Keep hot-swap state current even while a screen that does not directly
+  // use the SD controller (for example Settings or the browser) is active.
+  if (sdCard) {
+    sdCard->update();
+  }
+
   if (wifiController) {
     wifiController->update(millis());
   }

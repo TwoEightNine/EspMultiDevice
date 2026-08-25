@@ -19,7 +19,10 @@ public:
                    bool cardDetectActiveLow = true);
 
   bool begin();
-  SdCardEvent update();
+  // Poll from the main loop so card state is kept current regardless of the
+  // currently visible screen. Call takeEvent() from the active SD consumer.
+  void update();
+  SdCardEvent takeEvent();
 
   bool isMounted() const;
   bool isCardPresent() const;
@@ -32,7 +35,10 @@ private:
   // library's conservative, proven rate for reliable playback.
   static const uint32_t SpiFrequency = 40000000;
   static const uint32_t MountRetryIntervalMs = 1000;
-  static const uint32_t NoDetectRetryIntervalMs = 30000;
+  // Without a physical CD pin the only way to find an inserted card is to
+  // retry initialization. Keep this slow enough to avoid hammering an absent
+  // or under-powered module, while still making a runtime reinsert usable.
+  static const uint32_t NoDetectRetryIntervalMs = 3000;
   static const uint32_t HealthCheckIntervalMs = 500;
 
   int _sckPin;
@@ -42,10 +48,10 @@ private:
   int _cardDetectPin;
   bool _cardDetectActiveLow;
   bool _mounted;
-  bool _autoRetrySuspended;
   uint32_t _lastMountAttemptMs;
   uint32_t _nextMountAttemptMs;
   uint32_t _lastHealthCheckMs;
+  SdCardEvent _pendingEvent;
 
   bool mount();
   void unmount();

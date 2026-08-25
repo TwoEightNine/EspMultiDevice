@@ -82,7 +82,7 @@ void HomeScreen::tick(uint32_t nowMs) {
     _lastClockCheckMs = nowMs;
   }
 
-  handleSdCardEvent(_sdCard.update());
+  handleSdCardEvent(_sdCard.takeEvent());
   setWifiState(_wifi.isConnected());
 }
 

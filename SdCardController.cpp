@@ -5,6 +5,8 @@
 #include <SPI.h>
 #include <string.h>
 
+#include "SpiBusLock.h"
+
 SdCardController::SdCardController(int sckPin,
                                    int misoPin,
                                    int mosiPin,
@@ -18,10 +20,10 @@ SdCardController::SdCardController(int sckPin,
     _cardDetectPin(cardDetectPin),
     _cardDetectActiveLow(cardDetectActiveLow),
     _mounted(false),
-    _autoRetrySuspended(false),
     _lastMountAttemptMs(0),
     _nextMountAttemptMs(0),
-    _lastHealthCheckMs(0) {
+    _lastHealthCheckMs(0),
+    _pendingEvent(SdCardEvent::None) {
 }
 
 bool SdCardController::begin() {
@@ -29,36 +31,44 @@ bool SdCardController::begin() {
   return mount();
 }
 
-SdCardEvent SdCardController::update() {
+void SdCardController::update() {
   uint32_t now = millis();
   bool present = isCardPresent();
 
   if (!present) {
     if (_mounted) {
       unmount();
-      return SdCardEvent::Removed;
+      _pendingEvent = SdCardEvent::Removed;
+      return;
     }
 
-    return SdCardEvent::None;
+    return;
   }
 
   if (_mounted && now - _lastHealthCheckMs >= HealthCheckIntervalMs) {
     _lastHealthCheckMs = now;
     if (!mountedCardStillResponds()) {
       unmount();
-      return SdCardEvent::Removed;
+      _pendingEvent = SdCardEvent::Removed;
+      return;
     }
   }
 
-  if (!_mounted && !_autoRetrySuspended && now >= _nextMountAttemptMs && now - _lastMountAttemptMs >= MountRetryIntervalMs) {
+  if (!_mounted && now >= _nextMountAttemptMs && now - _lastMountAttemptMs >= MountRetryIntervalMs) {
     if (mount()) {
-      return SdCardEvent::Mounted;
+      _pendingEvent = SdCardEvent::Mounted;
+      return;
     }
 
-    return SdCardEvent::MountFailed;
+    _pendingEvent = SdCardEvent::MountFailed;
+    return;
   }
+}
 
-  return SdCardEvent::None;
+SdCardEvent SdCardController::takeEvent() {
+  SdCardEvent event = _pendingEvent;
+  _pendingEvent = SdCardEvent::None;
+  return event;
 }
 
 bool SdCardController::isMounted() const {
@@ -169,7 +179,8 @@ bool SdCardController::readTextFile(const char *path, String &content) {
 
 bool SdCardController::mount() {
   _lastMountAttemptMs = millis();
-  _nextMountAttemptMs = _lastMountAttemptMs + MountRetryIntervalMs;
+  _nextMountAttemptMs = _lastMountAttemptMs +
+                         (_cardDetectPin < 0 ? NoDetectRetryIntervalMs : MountRetryIntervalMs);
 
   if (!isCardPresent()) {
     return false;
@@ -188,8 +199,7 @@ bool SdCardController::mount() {
     _mounted = false;
     if (_cardDetectPin < 0) {
       _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
-      _autoRetrySuspended = true;
-      Serial.println(F("SD mount failed; auto retry suspended because no card-detect pin is configured."));
+      Serial.println(F("SD mount failed; retrying in 3 seconds without a card-detect pin."));
     }
     return false;
   }
@@ -200,14 +210,12 @@ bool SdCardController::mount() {
     _mounted = false;
     if (_cardDetectPin < 0) {
       _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
-      _autoRetrySuspended = true;
-      Serial.println(F("SD card not detected; auto retry suspended because no card-detect pin is configured."));
+      Serial.println(F("SD card not detected; retrying in 3 seconds without a card-detect pin."));
     }
     return false;
   }
 
   _mounted = true;
-  _autoRetrySuspended = false;
   _lastHealthCheckMs = millis();
   return true;
 }
@@ -222,13 +230,19 @@ bool SdCardController::mountedCardStillResponds() {
     return false;
   }
 
-  File root = SD.open("/");
-  if (!root) {
-    return false;
+  // Opening the root directory only consults the mounted VFS and can still
+  // succeed after a card has been removed. Reading sector zero forces an SPI
+  // transaction, which reliably detects an ejected card when no CD pin is
+  // available. Defer rather than report a removal while another SPI user has
+  // the shared bus.
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) {
+    return true;
   }
 
-  bool ok = root.isDirectory();
-  root.close();
+  uint8_t sector[512];
+  bool ok = SD.sectorSize() == sizeof(sector) && SD.numSectors() > 0 &&
+            SD.readRAW(sector, 0);
+  SpiBusLock::unlock();
   return ok;
 }
 

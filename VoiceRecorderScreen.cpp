@@ -81,7 +81,7 @@ void VoiceRecorderScreen::handleTouch(const TouchPoint &point) {
 }
 
 void VoiceRecorderScreen::tick(uint32_t nowMs) {
-  handleSdCardEvent(_sdCard.update());
+  handleSdCardEvent(_sdCard.takeEvent());
 
   if (_state == State::Recording) {
     recordChunk();

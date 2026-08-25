@@ -136,7 +136,7 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
 }
 
 void VideoPlayerScreen::tick(uint32_t nowMs) {
-  handleSdCardEvent(_sdCard.update());
+  handleSdCardEvent(_sdCard.takeEvent());
   if (_state == State::Building) {
     if (!buildStep()) {
       if (_state != State::Error) {

@@ -171,7 +171,7 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
 }
 
 void AudioPlayerScreen::tick(uint32_t nowMs) {
-  handleSdCardEvent(_sdCard.update());
+  handleSdCardEvent(_sdCard.takeEvent());
   if (_mp3Analyzing) {
     analyzeMp3Step();
     return;

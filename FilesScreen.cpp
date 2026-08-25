@@ -119,7 +119,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
 
 void FilesScreen::tick(uint32_t nowMs) {
   (void)nowMs;
-  handleSdCardEvent(_sdCard.update());
+  handleSdCardEvent(_sdCard.takeEvent());
 }
 
 void FilesScreen::draw() {

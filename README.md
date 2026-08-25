@@ -354,14 +354,14 @@ Do not connect an external `5V` supply to the ESP32-S3 board's `VIN` while USB i
 
 ## Runtime Eject and Insert
 
-`SdCardController::update()` returns an event when the SD card state changes:
+`SdCardController::update()` records an event when the SD card state changes; the active SD screen receives it through `takeEvent()`:
 
 - `SdCardEvent::Mounted`: a card was mounted.
 - `SdCardEvent::Removed`: the mounted card was removed or stopped responding.
 - `SdCardEvent::MountFailed`: a mount retry failed.
 - `SdCardEvent::None`: no state change.
 
-`HomeScreen` and `VoiceRecorderScreen` call this from their non-blocking `tick()` methods. The main sketch only calls `tick()` on the navigator's active `Screen`, so SD UI behavior stays inside the screen that uses the SD controller.
+The main loop polls `SdCardController::update()` independently of the active screen, so ejecting a card is detected while any screen is open. SD-owning screens call `takeEvent()` from their non-blocking `tick()` methods to react to the pending transition.
 
 For best hot-swap detection, use a socket or module with a card-detect pin and set:
 
@@ -371,7 +371,9 @@ static const int SD_CARD_DETECT_PIN = -1;
 
 to the GPIO connected to the socket's `CD` pin. Most card-detect switches are active-low, which matches the controller default.
 
-If no card-detect pin is available, leave `SD_CARD_DETECT_PIN` as `-1`. The controller will try to mount once during startup, but it will not keep retrying in the background after a failed mount. This avoids watchdog resets when the SD module is absent or under-powered. Insert or fix the card, then reboot the ESP32-S3 to mount it. A physical card-detect pin is the most reliable way to support automatic eject/insert handling.
+If no card-detect pin is available, leave `SD_CARD_DETECT_PIN` as `-1`. The controller retries initialization every three seconds after a failed mount, allowing a card inserted after a runtime eject to mount automatically. A physical card-detect pin remains the most reliable way to support automatic eject/insert handling.
+
+Even without a card-detect pin, a mounted card is probed with a small raw-sector read every 500 ms, so a runtime eject is reported as `Removed` instead of leaving the filesystem marked mounted.
 
 ## SD Card Formatting
 
