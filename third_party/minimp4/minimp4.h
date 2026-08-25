@@ -75,6 +75,10 @@ extern "C" {
 // MPEG-4 ObjectDescriptor. Keep an internal value outside the 8-bit object
 // type range so users of the demuxer can dispatch the stream explicitly.
 #define MP4_OBJECT_TYPE_H263                                   0x100
+// AMR-NB tracks in 3GPP files use a `samr` sample entry rather than an
+// MPEG-4 ObjectDescriptor.  Keep this internal dispatch value outside the
+// standard 8-bit object type range, as with H.263 above.
+#define MP4_OBJECT_TYPE_AMR_NB                                  0x101
 // http://www.mp4ra.org/object.html 0xC0-E0  && 0xE2 - 0xFE are specified as "user private"
 #define MP4_OBJECT_TYPE_USER_PRIVATE                           0xC0
 
@@ -3224,6 +3228,10 @@ broken_android_meta_hack:
                 ERROR("broken file structure!");
             }
             tr->sample_entry = box_name;
+            if (box_name == BOX_samr)
+            {
+                tr->object_type_indication = MP4_OBJECT_TYPE_AMR_NB;
+            }
             break;
 
         case BOX_d263:  // H263ConfigAtomType

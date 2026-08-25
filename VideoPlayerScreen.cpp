@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "third_party/libhelix/libhelix-aac/aacdec.h"
+#include "third_party/opencore-amr/amrnb/interf_dec.h"
 }
 
 #include "VideoPlayerScreen.h"
@@ -56,6 +57,7 @@ const __FlashStringHelper *avcProfileName(unsigned profile) {
 String objectTypeLabel(unsigned objectType) {
   if (!objectType) return F("unknown video sample entry");
   if (objectType == MP4_OBJECT_TYPE_H263) return F("H.263");
+  if (objectType == MP4_OBJECT_TYPE_AMR_NB) return F("AMR-NB");
   if (objectType == MP4_OBJECT_TYPE_HEVC) return F("HEVC/H.265");
   if (objectType == 0x20) return F("MPEG-4 Part 2");
   if (objectType == 0x6a) return F("MPEG-1 video");
@@ -95,7 +97,8 @@ VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touc
     _lastDrawMs(0), _audioSampleRate(0), _audioFramesWritten(0), _audioTailStartedAt(0),
     _audioChannels(0), _sampleBuffer(nullptr),
     _sampleBufferBytes(0), _annexBuffer(nullptr), _annexBufferBytes(0), _pendingFrame(nullptr),
-    _hasPendingFrame(false), _playFrameBuffer(nullptr), _audioScratch(nullptr), _aac(nullptr), _mp3(nullptr) {
+    _hasPendingFrame(false), _playFrameBuffer(nullptr), _audioScratch(nullptr), _aac(nullptr), _mp3(nullptr),
+    _amr(nullptr) {
 }
 
 VideoPlayerScreen::~VideoPlayerScreen() {
@@ -214,7 +217,8 @@ void VideoPlayerScreen::releaseDemux() {
 void VideoPlayerScreen::releaseAudioDecoder() {
   if (_aac) AACFreeDecoder((HAACDecoder)_aac);
   if (_mp3) free(_mp3);
-  _aac = _mp3 = nullptr;
+  if (_amr) Decoder_Interface_exit(_amr);
+  _aac = _mp3 = _amr = nullptr;
 }
 
 bool VideoPlayerScreen::openSource() {
@@ -265,7 +269,7 @@ bool VideoPlayerScreen::inspectSource() {
       _sourceHeight = (uint16_t)track.SampleDescription.video.height;
       videoFound = _videoSamples > 0 && _videoTimeScale > 0;
       if (track.duration_lo) _durationMs = timestampMs(track.duration_lo, _videoTimeScale);
-    } else if (_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 &&
+    } else if (_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 && _audioCodec != AudioCodec::AmrNb &&
                track.handler_type == MP4D_HANDLER_TYPE_SOUN) {
       _audioTrack = index;
       _audioSamples = track.sample_count;
@@ -277,6 +281,11 @@ bool VideoPlayerScreen::inspectSource() {
       } else if (track.object_type_indication == 0x6b) {
         _audioCodec = AudioCodec::Mp3;
         _audioDiagnostic = F("MPEG Layer III supported");
+      } else if (track.object_type_indication == MP4_OBJECT_TYPE_AMR_NB) {
+        _audioCodec = AudioCodec::AmrNb;
+        _audioSampleRate = 8000;
+        _audioChannels = 1;
+        _audioDiagnostic = F("AMR-NB supported (8 kHz mono)");
       } else {
         _audioCodec = AudioCodec::Unsupported;
         String header = String(F("Unsupported ")) + sampleEntryLabel(track.sample_entry) +
@@ -739,7 +748,7 @@ bool VideoPlayerScreen::loadPlaybackFrame(uint32_t frame) {
 bool VideoPlayerScreen::startPlayback() {
   if (!_cacheRead || _state == State::Error || !_sdMounted) return false;
   if (_state == State::Paused) {
-    if (_aac || _mp3) {
+    if (_aac || _mp3 || _amr) {
       if (!_speaker.start(_audioSampleRate)) {
         _audioStatus = F("Speaker unavailable");
       }
@@ -773,8 +782,12 @@ bool VideoPlayerScreen::startPlayback() {
   } else if (_audioCodec == AudioCodec::Mp3) {
     _mp3 = malloc(sizeof(mp3dec_t));
     if (_mp3) mp3dec_init((mp3dec_t *)_mp3);
+  } else if (_audioCodec == AudioCodec::AmrNb) {
+    _amr = Decoder_Interface_init();
+    if (!_amr) _audioStatus = F("AMR-NB decoder unavailable");
   }
-  if ((_audioCodec == AudioCodec::Aac && _aac) || (_audioCodec == AudioCodec::Mp3 && _mp3)) {
+  if ((_audioCodec == AudioCodec::Aac && _aac) || (_audioCodec == AudioCodec::Mp3 && _mp3) ||
+      (_audioCodec == AudioCodec::AmrNb && _amr)) {
     if (!_speaker.start(_audioSampleRate)) _audioStatus = F("Speaker unavailable");
   }
   _playStartedAt = millis();
@@ -830,8 +843,8 @@ void VideoPlayerScreen::tickPlayback(uint32_t nowMs) {
 }
 
 void VideoPlayerScreen::pumpAudio(uint32_t elapsedMs) {
-  if ((_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3) ||
-      (!_aac && !_mp3) || _audioSample >= _audioSamples || !_speaker.isReady()) return;
+  if ((_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 && _audioCodec != AudioCodec::AmrNb) ||
+      (!_aac && !_mp3 && !_amr) || _audioSample >= _audioSamples || !_speaker.isReady()) return;
   if (!_demux || _audioTrack >= _demux->track_count) {
     _audioStatus = F("Audio unavailable");
     releaseAudioDecoder();
@@ -846,7 +859,7 @@ void VideoPlayerScreen::pumpAudio(uint32_t elapsedMs) {
   }
   if (timestampMs(timestamp, _audioTimeScale) > elapsedMs + 80) return;
   if (!decodeAudioSample()) {
-    _audioStatus = F("Audio unavailable");
+    _audioStatus = _audioCodec == AudioCodec::AmrNb ? F("AMR-NB decode failed") : F("Audio unavailable");
     releaseAudioDecoder();
   }
   _audioSample++;
@@ -856,7 +869,9 @@ void VideoPlayerScreen::pumpAudio(uint32_t elapsedMs) {
 bool VideoPlayerScreen::decodeAudioSample() {
   uint32_t bytes, timestamp, duration;
   if (!readSample(_audioTrack, _audioSample, bytes, timestamp, duration)) return false;
-  return _audioCodec == AudioCodec::Aac ? decodeAacSample(_sampleBuffer, bytes) : decodeMp3Sample(_sampleBuffer, bytes);
+  if (_audioCodec == AudioCodec::Aac) return decodeAacSample(_sampleBuffer, bytes);
+  if (_audioCodec == AudioCodec::Mp3) return decodeMp3Sample(_sampleBuffer, bytes);
+  return _audioCodec == AudioCodec::AmrNb && decodeAmrNbSample(_sampleBuffer, bytes);
 }
 
 bool VideoPlayerScreen::decodeAacSample(const uint8_t *bytes, uint32_t length) {
@@ -910,6 +925,27 @@ bool VideoPlayerScreen::decodeMp3Sample(const uint8_t *bytes, uint32_t length) {
   return true;
 }
 
+bool VideoPlayerScreen::decodeAmrNbSample(const uint8_t *bytes, uint32_t length) {
+  // RFC 3267 octet-aligned AMR-NB: one ToC byte plus the packed payload.
+  // 3GP `samr` samples contain exactly one such frame.
+  static const uint8_t FrameBytes[] = { 13, 14, 16, 18, 20, 21, 27, 32, 6 };
+  if (!_amr || !bytes || !length) return false;
+  uint8_t frameType = (bytes[0] >> 3) & 0x0f;
+  if (frameType <= 8) {
+    if (length != FrameBytes[frameType]) return false;
+  } else if (frameType == 15) {
+    if (length != 1) return false; // no-data frame
+  } else {
+    return false; // AMR-WB and reserved AMR-NB frame types are unsupported
+  }
+  if (!_audioScratch) _audioScratch = (int16_t *)ps_malloc(160 * sizeof(int16_t));
+  if (!_audioScratch) return false;
+  Decoder_Interface_Decode(_amr, bytes, _audioScratch, 0);
+  if (_speaker.writePcm16(_audioScratch, 160, 100) != 160) return false;
+  _audioFramesWritten += 160;
+  return true;
+}
+
 uint32_t VideoPlayerScreen::timestampMs(uint32_t timestamp, uint32_t timeScale) const {
   return timeScale ? (uint32_t)(((uint64_t)timestamp * 1000UL) / timeScale) : 0;
 }
@@ -921,7 +957,7 @@ uint32_t VideoPlayerScreen::presentationTimestampMs(int64_t timestamp, uint32_t 
 }
 
 uint32_t VideoPlayerScreen::playbackElapsedMs(uint32_t nowMs) const {
-  if ((_aac || _mp3) && _audioSampleRate && _audioFramesWritten) {
+  if ((_aac || _mp3 || _amr) && _audioSampleRate && _audioFramesWritten) {
     uint32_t elapsed = (uint32_t)(((uint64_t)_audioFramesWritten * 1000UL) / _audioSampleRate);
     // Once all source packets are queued, let the final DMA tail advance so
     // a slightly-shorter audio track cannot hold the last video frame forever.

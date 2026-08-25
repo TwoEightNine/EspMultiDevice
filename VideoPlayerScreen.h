@@ -29,7 +29,7 @@ public:
 
 private:
   enum class State : uint8_t { Ready, Building, Playing, Paused, Finished, Error };
-  enum class AudioCodec : uint8_t { None, Aac, Mp3, Unsupported };
+  enum class AudioCodec : uint8_t { None, Aac, Mp3, AmrNb, Unsupported };
   enum class VideoCodec : uint8_t { None, H264, H263, Mpeg4Part2 };
 
   static const uint16_t MaxVideoWidth = 320;
@@ -106,6 +106,7 @@ private:
   int16_t _pcm[PcmFrames];
   void *_aac;
   void *_mp3;
+  void *_amr;
 
   void reset();
   void releaseDemux();
@@ -130,6 +131,7 @@ private:
   bool decodeAudioSample();
   bool decodeAacSample(const uint8_t *bytes, uint32_t length);
   bool decodeMp3Sample(const uint8_t *bytes, uint32_t length);
+  bool decodeAmrNbSample(const uint8_t *bytes, uint32_t length);
   bool readSample(uint32_t track, uint32_t sample, uint32_t &bytes, uint32_t &timestamp, uint32_t &duration);
   bool ensureSampleBuffer(uint32_t bytes);
   bool ensureAnnexBuffer(uint32_t bytes);
