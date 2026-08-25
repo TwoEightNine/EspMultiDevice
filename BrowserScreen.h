@@ -34,6 +34,8 @@ private:
   static const uint8_t MaxRunsPerRow = 16;
   static const uint8_t MaxLinks = 64;
   static const uint8_t MaxHistory = 8;
+  static const uint8_t MaxSessionPages = MaxHistory + 1;
+  static const uint8_t MaxSessionImages = 48;
   static const uint8_t MaxStyleDepth = 16;
   static const uint8_t MaxCssRules = 32;
   static const uint8_t MaxCssSelectorLength = 48;
@@ -48,6 +50,7 @@ private:
   // bounded allocation on the ESP32.
   static const uint32_t MaxBodyBytes = 512UL * 1024UL;
   static const uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
+  static const uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t ConnectTimeoutMs = 10000;
   static const uint8_t MaxRedirects = 5;
 
@@ -161,7 +164,25 @@ private:
     uint16_t imageIndex;
     uint32_t generation;
     uint16_t backgroundColor;
+    bool useSessionCache;
     char url[ImageUrlMaxLength];
+  };
+
+  struct SessionPageCacheEntry {
+    String url;
+    String contentType;
+    String path;
+    uint32_t bytes;
+    uint32_t lastUse;
+    bool used;
+  };
+
+  struct SessionImageCacheEntry {
+    String url;
+    String path;
+    uint32_t bytes;
+    uint32_t lastUse;
+    bool used;
   };
 
   struct ImageResult {
@@ -207,6 +228,15 @@ private:
   uint32_t _lastLoadingDrawBytes;
   uint8_t _lastLoadingPercent;
   bool _lastLoadingKnownSize;
+  bool _sessionCacheActive;
+  bool _sessionCacheInitialized;
+  bool _usingSessionPage;
+  bool _deferCachedPageDraw;
+  uint32_t _sessionCacheBytes;
+  uint32_t _sessionCacheClock;
+  uint32_t _sessionCacheSequence;
+  SessionPageCacheEntry _sessionPages[MaxSessionPages];
+  SessionImageCacheEntry _sessionImages[MaxSessionImages];
   uint16_t _documentBackgroundColor;
   String _titleBuffer;
   VisualRow _rows[MaxRows];
@@ -257,7 +287,8 @@ private:
   bool pollLoadingCancel();
   String documentLinkAt(int16_t x, int16_t y) const;
   void openUrlInput();
-  bool openUrl(const String &value, bool addToHistory = true, bool addToRecent = false);
+  bool openUrl(const String &value, bool addToHistory = true, bool addToRecent = false,
+               bool useSessionCache = false);
   void goBack();
 
   bool normalizeUrl(const String &value, String &normalized, String &error) const;
@@ -300,8 +331,10 @@ private:
   void updateImageLayout();
   void pumpImageJobs();
   void collectImageResults();
+  bool cachedPageImagesComplete() const;
   bool fetchEmbeddedImageOnWorker(const String &url, uint16_t backgroundColor,
-                                  uint16_t *&pixels, uint8_t &width, uint8_t &height);
+                                  bool useSessionCache, uint16_t *&pixels,
+                                  uint8_t &width, uint8_t &height);
   static void imageWorkerTask(void *context);
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
@@ -337,6 +370,27 @@ private:
   int16_t imageWidth(const String &label) const;
   void addHistory(const String &url);
   void addRecent(const String &url, const String &title);
+
+  void beginSessionCache();
+  void endSessionCache();
+  bool initializeSessionCacheLocked();
+  void resetSessionCacheEntries();
+  bool clearSessionCacheLocked();
+  bool removeSessionFileLocked(const String &path);
+  bool ensureSessionCacheSpaceLocked(uint32_t bytes);
+  bool evictOldestSessionEntryLocked();
+  void removeSessionPageLocked(uint8_t index);
+  void removeSessionImageLocked(uint8_t index);
+  uint32_t nextSessionCacheUse();
+  String nextSessionCachePath(const char *prefix, const char *extension);
+  int8_t sessionPageIndex(const String &url) const;
+  int8_t sessionImageIndex(const String &url) const;
+  bool loadSessionPage(const String &url, String &body, String &contentType);
+  bool storeSessionPage(const String &url, const String &contentType, const String &body);
+  String sessionImagePath(const String &url);
+  void discardSessionImage(const String &url);
+  String adoptSessionImage(const String &url, const String &downloadedPath,
+                           FileFormats::Format format);
 
   void loadState();
   void saveState();

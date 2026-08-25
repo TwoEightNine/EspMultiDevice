@@ -40,6 +40,7 @@ const uint16_t LinkImageColor = TFT_BLUE;
 const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
 const char *DownloadDirectory = "/.system/browser_media";
+const char *SessionCacheDirectory = "/.system/browser_session";
 
 void browserLog(const __FlashStringHelper *message) {
   Serial.print(F("[Browser] "));
@@ -459,6 +460,13 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _lastLoadingDrawBytes(0),
     _lastLoadingPercent(0),
     _lastLoadingKnownSize(false),
+    _sessionCacheActive(false),
+    _sessionCacheInitialized(false),
+    _usingSessionPage(false),
+    _deferCachedPageDraw(false),
+    _sessionCacheBytes(0),
+    _sessionCacheClock(0),
+    _sessionCacheSequence(0),
     _documentBackgroundColor(TFT_WHITE),
     _titleBuffer(),
     _rowCount(0),
@@ -489,6 +497,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _recentBounds[i] = {0, 0, 0, 0};
   }
+  resetSessionCacheEntries();
   if (_imageJobs && _imageResults) {
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
     const BaseType_t workerCore = 0;
@@ -505,6 +514,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
 
 void BrowserScreen::onEnter() {
   browserLog(F("entered"));
+  if (!_sessionCacheActive) beginSessionCache();
   if (!_loaded) {
     browserLog(F("loading saved state"));
     loadState();
@@ -525,6 +535,14 @@ void BrowserScreen::tick(uint32_t nowMs) {
   (void)nowMs;
   collectImageResults();
   pumpImageJobs();
+  if (_deferCachedPageDraw && cachedPageImagesComplete()) {
+    _deferCachedPageDraw = false;
+    updateImageLayout();
+    buildPages();
+    finishLoading();
+    browserLog(F("cached page images ready; drawing page"));
+    draw();
+  }
 }
 
 void BrowserScreen::handleTouch(const TouchPoint &point) {
@@ -537,6 +555,16 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
 
   if (contains(_closeBounds, point.x, point.y)) {
     browserLog(F("close requested"));
+    releaseEmbeddedImages();
+    endSessionCache();
+    _historyCount = 0;
+    _currentUrl = "";
+    _title = "";
+    _message = "";
+    _rowCount = 0;
+    _pageCount = 0;
+    _page = 0;
+    _showStart = true;
     _navigator.pop();
     return;
   }
@@ -911,6 +939,7 @@ void BrowserScreen::cancelLoading() {
   const bool contentIsPending = _foregroundLoading;
   browserLog(F("cancelling active transfer and image jobs"));
   releaseEmbeddedImages();
+  _deferCachedPageDraw = false;
   _plainClient.stop();
   _secureClient.stop();
   _loadCancelled = true;
@@ -973,7 +1002,333 @@ void BrowserScreen::openUrlInput() {
   _navigator.push(ScreenId::TextInput, ScreenData::textInput("Open URL", false));
 }
 
-bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRecent) {
+void BrowserScreen::resetSessionCacheEntries() {
+  _sessionCacheBytes = 0;
+  _sessionCacheClock = 0;
+  _sessionCacheSequence = 0;
+  for (uint8_t i = 0; i < MaxSessionPages; i++) {
+    _sessionPages[i] = {"", "", "", 0, 0, false};
+  }
+  for (uint8_t i = 0; i < MaxSessionImages; i++) {
+    _sessionImages[i] = {"", "", 0, 0, false};
+  }
+}
+
+void BrowserScreen::beginSessionCache() {
+  _sessionCacheActive = true;
+  HttpLock lock(_httpMutex);
+  if (!lock.locked()) return;
+  _sessionCacheInitialized = clearSessionCacheLocked();
+  if (_sessionCacheInitialized) browserLog(F("session cache ready"));
+}
+
+void BrowserScreen::endSessionCache() {
+  // The worker keeps this flag set through local decode as well as network
+  // transfer.  Do not remove an SD source while its decoder still owns it.
+  while (_activeImageGeneration) {
+    delay(1);
+    yield();
+  }
+  HttpLock lock(_httpMutex);
+  if (lock.locked()) clearSessionCacheLocked();
+  resetSessionCacheEntries();
+  _sessionCacheInitialized = false;
+  _sessionCacheActive = false;
+  _usingSessionPage = false;
+  browserLog(F("session cache cleared"));
+}
+
+bool BrowserScreen::initializeSessionCacheLocked() {
+  if (!_sessionCacheActive || !_sdCard.isMounted()) return false;
+  if (_sessionCacheInitialized) return true;
+  _sessionCacheInitialized = clearSessionCacheLocked();
+  return _sessionCacheInitialized;
+}
+
+bool BrowserScreen::clearSessionCacheLocked() {
+  resetSessionCacheEntries();
+  if (!_sdCard.isMounted() || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  File directory = SD.open(SessionCacheDirectory, FILE_READ);
+  if (directory && directory.isDirectory()) {
+    File item = directory.openNextFile();
+    while (item) {
+      String path = item.name();
+      item.close();
+      SD.remove(path.c_str());
+      item = directory.openNextFile();
+    }
+    directory.close();
+    SD.rmdir(SessionCacheDirectory);
+  } else if (directory) {
+    directory.close();
+    SD.remove(SessionCacheDirectory);
+  }
+  const bool ready = (SD.exists("/.system") || SD.mkdir("/.system")) &&
+                     (SD.exists(SessionCacheDirectory) || SD.mkdir(SessionCacheDirectory));
+  SpiBusLock::unlock();
+  return ready;
+}
+
+bool BrowserScreen::removeSessionFileLocked(const String &path) {
+  if (path.length() == 0) return true;
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  const bool removed = !SD.exists(path.c_str()) || SD.remove(path.c_str());
+  SpiBusLock::unlock();
+  return removed;
+}
+
+void BrowserScreen::removeSessionPageLocked(uint8_t index) {
+  if (index >= MaxSessionPages || !_sessionPages[index].used) return;
+  if (_sessionCacheBytes >= _sessionPages[index].bytes) _sessionCacheBytes -= _sessionPages[index].bytes;
+  else _sessionCacheBytes = 0;
+  _sessionPages[index] = {"", "", "", 0, 0, false};
+}
+
+void BrowserScreen::removeSessionImageLocked(uint8_t index) {
+  if (index >= MaxSessionImages || !_sessionImages[index].used) return;
+  if (_sessionCacheBytes >= _sessionImages[index].bytes) _sessionCacheBytes -= _sessionImages[index].bytes;
+  else _sessionCacheBytes = 0;
+  _sessionImages[index] = {"", "", 0, 0, false};
+}
+
+bool BrowserScreen::evictOldestSessionEntryLocked() {
+  bool page = false;
+  int16_t index = -1;
+  uint32_t oldest = 0xffffffffUL;
+  for (uint8_t i = 0; i < MaxSessionPages; i++) {
+    if (_sessionPages[i].used && _sessionPages[i].lastUse <= oldest) {
+      page = true;
+      index = i;
+      oldest = _sessionPages[i].lastUse;
+    }
+  }
+  for (uint8_t i = 0; i < MaxSessionImages; i++) {
+    if (_sessionImages[i].used && _sessionImages[i].lastUse <= oldest) {
+      page = false;
+      index = i;
+      oldest = _sessionImages[i].lastUse;
+    }
+  }
+  if (index < 0) return false;
+  const String path = page ? _sessionPages[index].path : _sessionImages[index].path;
+  if (!removeSessionFileLocked(path)) return false;
+  if (page) removeSessionPageLocked((uint8_t)index);
+  else removeSessionImageLocked((uint8_t)index);
+  browserLog(String(F("session cache evicted: ")) + path);
+  return true;
+}
+
+bool BrowserScreen::ensureSessionCacheSpaceLocked(uint32_t bytes) {
+  if (bytes > MaxSessionCacheBytes) return false;
+  while (_sessionCacheBytes > MaxSessionCacheBytes - bytes) {
+    if (!evictOldestSessionEntryLocked()) return false;
+  }
+  return true;
+}
+
+uint32_t BrowserScreen::nextSessionCacheUse() {
+  _sessionCacheClock++;
+  if (_sessionCacheClock == 0) _sessionCacheClock = 1;
+  return _sessionCacheClock;
+}
+
+String BrowserScreen::nextSessionCachePath(const char *prefix, const char *extension) {
+  _sessionCacheSequence++;
+  if (_sessionCacheSequence == 0) _sessionCacheSequence = 1;
+  return String(SessionCacheDirectory) + "/" + prefix + String((unsigned long)_sessionCacheSequence) + extension;
+}
+
+int8_t BrowserScreen::sessionPageIndex(const String &url) const {
+  for (uint8_t i = 0; i < MaxSessionPages; i++) {
+    if (_sessionPages[i].used && _sessionPages[i].url == url) return (int8_t)i;
+  }
+  return -1;
+}
+
+int8_t BrowserScreen::sessionImageIndex(const String &url) const {
+  for (uint8_t i = 0; i < MaxSessionImages; i++) {
+    if (_sessionImages[i].used && _sessionImages[i].url == url) return (int8_t)i;
+  }
+  return -1;
+}
+
+bool BrowserScreen::loadSessionPage(const String &url, String &body, String &contentType) {
+  body = "";
+  contentType = "";
+  HttpLock lock(_httpMutex);
+  if (!lock.locked() || !initializeSessionCacheLocked()) return false;
+  const int8_t index = sessionPageIndex(url);
+  if (index < 0) return false;
+  SessionPageCacheEntry &entry = _sessionPages[index];
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  File file = SD.open(entry.path.c_str(), FILE_READ);
+  const uint32_t size = file ? (uint32_t)file.size() : 0xffffffffUL;
+  SpiBusLock::unlock();
+  if (!file || size != entry.bytes || size > MaxBodyBytes || !body.reserve(size)) {
+    if (file) {
+      SpiBusLock::lock();
+      file.close();
+      SpiBusLock::unlock();
+    }
+    if (removeSessionFileLocked(entry.path)) removeSessionPageLocked((uint8_t)index);
+    return false;
+  }
+  uint8_t buffer[512];
+  uint32_t offset = 0;
+  bool readOk = true;
+  while (offset < size) {
+    const uint16_t amount = size - offset > sizeof(buffer) ? sizeof(buffer) : (uint16_t)(size - offset);
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { readOk = false; break; }
+    const int received = file.read(buffer, amount);
+    SpiBusLock::unlock();
+    if (received != amount || !body.concat(reinterpret_cast<const char *>(buffer), amount)) {
+      readOk = false;
+      break;
+    }
+    offset += amount;
+  }
+  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    file.close();
+    SpiBusLock::unlock();
+  }
+  if (!readOk) {
+    if (removeSessionFileLocked(entry.path)) removeSessionPageLocked((uint8_t)index);
+    body = "";
+    return false;
+  }
+  entry.lastUse = nextSessionCacheUse();
+  contentType = entry.contentType;
+  return true;
+}
+
+bool BrowserScreen::storeSessionPage(const String &url, const String &contentType, const String &body) {
+  if (body.length() > MaxBodyBytes) return false;
+  HttpLock lock(_httpMutex);
+  if (!lock.locked() || !initializeSessionCacheLocked()) return false;
+  int8_t existing = sessionPageIndex(url);
+  if (existing >= 0) {
+    if (!removeSessionFileLocked(_sessionPages[existing].path)) return false;
+    removeSessionPageLocked((uint8_t)existing);
+  }
+  if (!ensureSessionCacheSpaceLocked(body.length())) return false;
+  int8_t slot = -1;
+  for (uint8_t i = 0; i < MaxSessionPages; i++) {
+    if (!_sessionPages[i].used) { slot = i; break; }
+  }
+  if (slot < 0) {
+    uint8_t oldest = 0;
+    for (uint8_t i = 1; i < MaxSessionPages; i++) {
+      if (_sessionPages[i].lastUse < _sessionPages[oldest].lastUse) oldest = i;
+    }
+    if (!removeSessionFileLocked(_sessionPages[oldest].path)) return false;
+    removeSessionPageLocked(oldest);
+    slot = oldest;
+  }
+  const String path = nextSessionCachePath("page-", ".html");
+  const String temporary = path + F(".tmp");
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  SD.remove(temporary.c_str());
+  File file = SD.open(temporary.c_str(), FILE_WRITE);
+  SpiBusLock::unlock();
+  if (!file) return false;
+  uint32_t offset = 0;
+  bool written = true;
+  while (offset < body.length()) {
+    const uint16_t amount = body.length() - offset > 512 ? 512 : (uint16_t)(body.length() - offset);
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { written = false; break; }
+    const size_t count = file.write(reinterpret_cast<const uint8_t *>(body.c_str()) + offset, amount);
+    SpiBusLock::unlock();
+    if (count != amount) { written = false; break; }
+    offset += amount;
+    yield();
+  }
+  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    file.close();
+    SpiBusLock::unlock();
+  } else {
+    written = false;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  bool committed = written && !SD.exists(path.c_str()) && SD.rename(temporary.c_str(), path.c_str());
+  if (!committed) SD.remove(temporary.c_str());
+  SpiBusLock::unlock();
+  if (!committed) return false;
+  _sessionPages[slot] = {url, contentType, path, body.length(), nextSessionCacheUse(), true};
+  _sessionCacheBytes += body.length();
+  browserLog(String(F("page stored in session cache: ")) + url);
+  return true;
+}
+
+String BrowserScreen::sessionImagePath(const String &url) {
+  HttpLock lock(_httpMutex);
+  if (!lock.locked() || !initializeSessionCacheLocked()) return "";
+  const int8_t index = sessionImageIndex(url);
+  if (index < 0) return "";
+  SessionImageCacheEntry &entry = _sessionImages[index];
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return "";
+  const bool exists = SD.exists(entry.path.c_str());
+  SpiBusLock::unlock();
+  if (!exists) {
+    removeSessionImageLocked((uint8_t)index);
+    return "";
+  }
+  entry.lastUse = nextSessionCacheUse();
+  return entry.path;
+}
+
+void BrowserScreen::discardSessionImage(const String &url) {
+  HttpLock lock(_httpMutex);
+  if (!lock.locked() || !initializeSessionCacheLocked()) return;
+  const int8_t index = sessionImageIndex(url);
+  if (index < 0) return;
+  if (removeSessionFileLocked(_sessionImages[index].path)) {
+    removeSessionImageLocked((uint8_t)index);
+  }
+}
+
+String BrowserScreen::adoptSessionImage(const String &url, const String &downloadedPath,
+                                        FileFormats::Format format) {
+  if (!FileFormats::isImage(format)) return "";
+  HttpLock lock(_httpMutex);
+  if (!lock.locked() || !initializeSessionCacheLocked()) return "";
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return "";
+  File source = SD.open(downloadedPath.c_str(), FILE_READ);
+  const uint32_t bytes = source ? (uint32_t)source.size() : 0;
+  if (source) source.close();
+  SpiBusLock::unlock();
+  if (bytes == 0) return "";
+  const int8_t existing = sessionImageIndex(url);
+  if (existing >= 0) {
+    if (!removeSessionFileLocked(_sessionImages[existing].path)) return "";
+    removeSessionImageLocked((uint8_t)existing);
+  }
+  if (!ensureSessionCacheSpaceLocked(bytes)) return "";
+  int8_t slot = -1;
+  for (uint8_t i = 0; i < MaxSessionImages; i++) {
+    if (!_sessionImages[i].used) { slot = i; break; }
+  }
+  if (slot < 0) {
+    uint8_t oldest = 0;
+    for (uint8_t i = 1; i < MaxSessionImages; i++) {
+      if (_sessionImages[i].lastUse < _sessionImages[oldest].lastUse) oldest = i;
+    }
+    if (!removeSessionFileLocked(_sessionImages[oldest].path)) return "";
+    removeSessionImageLocked(oldest);
+    slot = oldest;
+  }
+  const String path = nextSessionCachePath("image-", FileFormats::extension(format));
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return "";
+  const bool moved = !SD.exists(path.c_str()) && SD.rename(downloadedPath.c_str(), path.c_str());
+  SpiBusLock::unlock();
+  if (!moved) return "";
+  _sessionImages[slot] = {url, path, bytes, nextSessionCacheUse(), true};
+  _sessionCacheBytes += bytes;
+  browserLog(String(F("image stored in session cache: ")) + url);
+  return path;
+}
+
+bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRecent,
+                            bool useSessionCache) {
   const bool hadDocument = !_showStart && _currentUrl.length() > 0;
   const String previousUrl = _currentUrl;
   String url;
@@ -988,9 +1343,14 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     return false;
   }
   browserLog(String(F("navigation requested: ")) + url);
-  _currentUrl = url;
-  _title = "";
-  if (!_wifi.isConnected()) {
+  if (!useSessionCache) _usingSessionPage = false;
+  String finalUrl = url;
+  String body;
+  String contentType;
+  const bool cacheHit = useSessionCache && loadSessionPage(url, body, contentType);
+  if (cacheHit) {
+    browserLog(String(F("session cache hit: ")) + url);
+  } else if (!_wifi.isConnected()) {
     browserLog(F("navigation blocked: Wi-Fi is disconnected"));
     _showStart = false;
     _message = "Connect to Wi-Fi first";
@@ -1014,6 +1374,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   // its result is discarded.
   releaseEmbeddedImages();
 
+  _currentUrl = url;
   _showStart = false;
   _message = "";
   _rowCount = 0;
@@ -1021,19 +1382,18 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   _title = "";
   _page = 0;
   _loadCancelled = false;
+  _usingSessionPage = cacheHit;
+  _deferCachedPageDraw = false;
   // Navigation can be initiated by the Back button itself.  That tap remains
   // down while this synchronous request starts, so treat it as already
   // consumed; otherwise pollLoadingCancel() cancels the Back request at once.
   _loadCancelTouchDown = _lastTouchDown;
-  beginLoading(F("Preparing request"));
+  beginLoading(cacheHit ? F("Restoring cached page") : F("Preparing request"));
   draw();
   yield();
 
-  String finalUrl;
-  String body;
-  String contentType;
   String downloadedPath;
-  if (!fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
+  if (!cacheHit && !fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
     browserLog(String(F("navigation failed: ")) + (_loadCancelled ? String(F("cancelled")) : error));
     finishLoading();
     _message = _loadCancelled ? "Loading cancelled" : error;
@@ -1041,7 +1401,8 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     return false;
   }
   _currentUrl = finalUrl;
-  setLoadingPhase(downloadedPath.length() ? F("Opening downloaded file") : F("Rendering page"));
+  setLoadingPhase(cacheHit ? F("Rendering cached page")
+                            : (downloadedPath.length() ? F("Opening downloaded file") : F("Rendering page")));
   if (downloadedPath.length()) {
     FileFormats::Format format = FileFormats::fromPath(downloadedPath);
     FileFormats::Group group = FileFormats::group(format);
@@ -1065,10 +1426,15 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return true;
   }
-  if (contentType.indexOf("text/html") >= 0 || contentType.indexOf("application/xhtml") >= 0 ||
-      contentType.length() == 0) {
+  const bool htmlPage = contentType.indexOf("text/html") >= 0 ||
+                        contentType.indexOf("application/xhtml") >= 0 || contentType.length() == 0;
+  const bool textPage = contentType.indexOf("text/plain") >= 0;
+  if (!cacheHit && (htmlPage || textPage)) {
+    storeSessionPage(_currentUrl, contentType, body);
+  }
+  if (htmlPage) {
     renderDocument(body);
-  } else if (contentType.indexOf("text/plain") >= 0) {
+  } else if (textPage) {
     renderPlainText(body, "Text page");
   } else {
     renderPlainText("[Unsupported content: " + (contentType.length() ? contentType : String("unknown type")) + "]",
@@ -1076,6 +1442,12 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   }
   if (addToRecent) addRecent(_currentUrl, _title);
   saveState();
+  if (cacheHit && _embeddedImageCount > 0 && _imageJobs && _imageResults) {
+    _deferCachedPageDraw = true;
+    setLoadingPhase(F("Loading cached images"));
+    browserLog(String(F("waiting for cached images: ")) + String(_embeddedImageCount));
+    return true;
+  }
   finishLoading();
   browserLog(String(F("page ready: title=\"")) + _title + F("\", rows=") + String(_rowCount) +
              F(", pages=") + String(_pageCount) + F(", images=") + String(_embeddedImageCount));
@@ -1095,7 +1467,7 @@ void BrowserScreen::goBack() {
   }
   const String target = _historyUrls[_historyCount - 1];
   browserLog(String(F("loading previous page: ")) + target);
-  if (openUrl(target, false)) {
+  if (openUrl(target, false, false, true)) {
     _historyCount--;
     browserLog(F("back navigation complete"));
   }
@@ -2163,7 +2535,7 @@ void BrowserScreen::drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) cons
 }
 
 int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgroundColor) {
-  if (source.length() == 0 || _embeddedImageCount >= MaxEmbeddedImages || !_wifi.isConnected() ||
+  if (source.length() == 0 || _embeddedImageCount >= MaxEmbeddedImages ||
       source.length() >= ImageUrlMaxLength) return -1;
   Url base;
   String resolved;
@@ -2187,23 +2559,43 @@ int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgro
 }
 
 bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backgroundColor,
-                                               uint16_t *&pixels, uint8_t &width, uint8_t &height) {
+                                               bool useSessionCache, uint16_t *&pixels,
+                                               uint8_t &width, uint8_t &height) {
   pixels = nullptr;
   width = height = 0;
 
-  String finalUrl;
-  String body;
-  String contentType;
-  String downloadedPath;
-  String error;
-  if (!fetch(url, finalUrl, body, contentType, downloadedPath, error, MaxEmbeddedImageBytes) ||
-      downloadedPath.length() == 0) {
-    browserLog(String(F("image fetch failed: ")) + error);
-    return false;
+  String sourcePath = useSessionCache ? sessionImagePath(url) : "";
+  bool cachedSource = sourcePath.length() > 0;
+  if (cachedSource) browserLog(String(F("session image cache hit: ")) + url);
+
+  if (!cachedSource) {
+    String finalUrl;
+    String body;
+    String contentType;
+    String downloadedPath;
+    String error;
+    if (!fetch(url, finalUrl, body, contentType, downloadedPath, error, MaxEmbeddedImageBytes) ||
+        downloadedPath.length() == 0) {
+      browserLog(String(F("image fetch failed: ")) + error);
+      return false;
+    }
+    const FileFormats::Format downloadedFormat = FileFormats::fromPath(downloadedPath);
+    if (FileFormats::group(downloadedFormat) != FileFormats::Group::Image) {
+      if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+        SD.remove(downloadedPath.c_str());
+        SpiBusLock::unlock();
+      }
+      return false;
+    }
+    sourcePath = adoptSessionImage(url, downloadedPath, downloadedFormat);
+    cachedSource = sourcePath.length() > 0;
+    if (!cachedSource) sourcePath = downloadedPath;
   }
-  if (FileFormats::group(FileFormats::fromPath(downloadedPath)) != FileFormats::Group::Image) {
+
+  const FileFormats::Format sourceFormat = FileFormats::fromPath(sourcePath);
+  if (FileFormats::group(sourceFormat) != FileFormats::Group::Image) {
     if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-      SD.remove(downloadedPath.c_str());
+      if (!cachedSource) SD.remove(sourcePath.c_str());
       SpiBusLock::unlock();
     }
     return false;
@@ -2213,14 +2605,14 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
   // main Arduino task stack. Browsing loads images serially.
   static ThumbnailDecoder decoder;
   SpiBusLock::lock();
-  const bool decoded = decoder.decode(downloadedPath, FileFormats::fromPath(downloadedPath),
-                                      pixels, width, height, backgroundColor);
+  const bool decoded = decoder.decode(sourcePath, sourceFormat, pixels, width, height, backgroundColor);
   SpiBusLock::unlock();
-  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    SD.remove(downloadedPath.c_str());
+  if (!cachedSource && SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    SD.remove(sourcePath.c_str());
     SpiBusLock::unlock();
   }
   if (!decoded || !pixels || !width || !height) {
+    if (cachedSource) discardSessionImage(url);
     if (pixels) free(pixels);
     pixels = nullptr;
     return false;
@@ -2239,6 +2631,7 @@ void BrowserScreen::releaseEmbeddedImages() {
   }
   _embeddedImageCount = 0;
   _nextImageToQueue = 0;
+  _deferCachedPageDraw = false;
 }
 
 void BrowserScreen::updateImageLayout() {
@@ -2269,6 +2662,7 @@ void BrowserScreen::pumpImageJobs() {
     job.imageIndex = index;
     job.generation = image.generation;
     job.backgroundColor = image.backgroundColor;
+    job.useSessionCache = _usingSessionPage;
     image.url.toCharArray(job.url, sizeof(job.url));
     if (xQueueSend(_imageJobs, &job, 0) != pdTRUE) {
       _nextImageToQueue--;
@@ -2305,12 +2699,20 @@ void BrowserScreen::collectImageResults() {
     }
     if (result.pixels) free(result.pixels);
   }
-  if (redraw && !_showStart && _message.length() == 0) {
+  if (redraw && !_deferCachedPageDraw && !_showStart && _message.length() == 0) {
     updateImageLayout();
     buildPages();
     redrawDocument();
   }
   if (updateControls && !_showStart) drawControls();
+}
+
+bool BrowserScreen::cachedPageImagesComplete() const {
+  if (_nextImageToQueue < _embeddedImageCount || _activeImageGeneration == _imageGeneration) return false;
+  for (uint16_t i = 0; i < _embeddedImageCount; i++) {
+    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].state < 2) return false;
+  }
+  return true;
 }
 
 void BrowserScreen::imageWorkerTask(void *context) {
@@ -2324,7 +2726,7 @@ void BrowserScreen::imageWorkerTask(void *context) {
     if (job.generation == screen->_imageGeneration) {
       browserLog(String(F("image worker started #")) + String(job.imageIndex + 1));
       screen->_activeImageGeneration = job.generation;
-      screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor,
+      screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor, job.useSessionCache,
                                          result.pixels, result.width, result.height);
       screen->_activeImageGeneration = 0;
       browserLog(String(F("image worker finished #")) + String(job.imageIndex + 1));
