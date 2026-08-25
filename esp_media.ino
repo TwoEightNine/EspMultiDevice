@@ -2,6 +2,7 @@
 
 #include "DisplayController.h"
 #include "AudioPlayerScreen.h"
+#include "VideoPlayerScreen.h"
 #include "BrowserScreen.h"
 #include "FilesScreen.h"
 #include "HomeScreen.h"
@@ -69,6 +70,7 @@ SettingsScreen *settingsScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
+VideoPlayerScreen *videoPlayerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
@@ -190,6 +192,7 @@ void setup() {
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
+  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
@@ -220,6 +223,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::AudioPlayer, *audioPlayerScreen)) {
     Serial.println(F("Navigator failed to register Audio Player screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::VideoPlayer, *videoPlayerScreen)) {
+    Serial.println(F("Navigator failed to register Video Player screen."));
   }
   if (!navigator->registerScreen(ScreenId::TextInput, *textInputScreen)) {
     Serial.println(F("Navigator failed to register Text Input screen."));

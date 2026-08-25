@@ -8,6 +8,7 @@ enum class ScreenDataKind : uint8_t {
   None,
   ImagePath,
   AudioPath,
+  VideoPath,
   TextInput
 };
 
@@ -29,6 +30,13 @@ struct ScreenData {
   static ScreenData audioPath(const String &path) {
     ScreenData data;
     data.kind = ScreenDataKind::AudioPath;
+    data.text = path;
+    return data;
+  }
+
+  static ScreenData videoPath(const String &path) {
+    ScreenData data;
+    data.kind = ScreenDataKind::VideoPath;
     data.text = path;
     return data;
   }

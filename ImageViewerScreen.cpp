@@ -1,5 +1,6 @@
 #include "ImageViewerScreen.h"
 
+#include "AnimationCache.h"
 #include "FileFormats.h"
 
 // Arduino's sketch builder does not compile sources below the sketch root;
@@ -20,11 +21,9 @@
 namespace {
 const uint32_t InvalidSourceRow = 0xffffffffUL;
 const uint32_t MaxSupportedDibSize = 124;
-const uint32_t GifCacheMagic = 0x41474d45UL; // "EMGA" little-endian
 // Version 1 used the same display-ready pixels, but its large-animation path
 // never enabled the second-core ring loader. Bump the cache version so old
 // files are rebuilt with the corrected playback contract.
-const uint8_t GifCacheVersion = 4;
 }
 
 ImageViewerScreen *ImageViewerScreen::_decoderOwner = nullptr;
@@ -769,21 +768,9 @@ bool ImageViewerScreen::loadCache() {
 bool ImageViewerScreen::writeAnimationCacheHeader(fs::File &file,
                                                    uint32_t frameCount,
                                                    int32_t loopCount) const {
-  uint8_t header[AnimationCacheHeaderSize] = {};
-  writeLe32(header + 0, GifCacheMagic);
-  header[4] = GifCacheVersion;
-  header[5] = 2; // packed RGB444 pixels
-  writeLe16(header + 8, CacheWidth);
-  writeLe16(header + 10, CacheHeight);
-  writeLe32(header + 12, _sourceFileSize);
-  writeLe32(header + 16, _sourceWriteTime);
-  writeLe32(header + 20, _sourceWidth);
-  writeLe32(header + 24, _sourceHeight);
-  writeLe32(header + 28, frameCount);
-  writeLe32(header + 32, (uint32_t)loopCount);
-  writeLe16(header + 36, _drawWidth);
-  writeLe16(header + 38, _drawHeight);
-  return file.write(header, sizeof(header)) == sizeof(header);
+  return AnimationCache::writeHeader(file, _sourceFileSize, _sourceWriteTime,
+                                     _sourceWidth, _sourceHeight, frameCount,
+                                     loopCount, _drawWidth, _drawHeight);
 }
 
 bool ImageViewerScreen::readAnimationCacheHeader(fs::File &file,
@@ -796,7 +783,7 @@ bool ImageViewerScreen::readAnimationCacheHeader(fs::File &file,
   if (!file || file.size() < AnimationCacheHeaderSize) return false;
   uint8_t header[AnimationCacheHeaderSize];
   if (!file.seek(0) || file.read(header, sizeof(header)) != sizeof(header)) return false;
-  if (readLe32(header + 0) != GifCacheMagic || header[4] != GifCacheVersion ||
+  if (readLe32(header + 0) != AnimationCache::Magic || header[4] != AnimationCache::Version ||
       header[5] != 2 || readLe16(header + 8) != CacheWidth ||
       readLe16(header + 10) != CacheHeight ||
       readLe32(header + 12) != _sourceFileSize ||

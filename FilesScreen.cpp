@@ -13,6 +13,7 @@ const uint16_t FolderColor = TFT_YELLOW;
 const uint16_t FileColor = TFT_LIGHTGREY;
 const uint16_t ImageFileColor = TFT_GREEN;
 const uint16_t AudioFileColor = TFT_BLUE;
+const uint16_t VideoFileColor = TFT_ORANGE;
 }
 
 FilesScreen::FilesScreen(Navigator &navigator,
@@ -107,6 +108,8 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
           _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(nextPath));
         } else if (FileFormats::isAudio(format) && FileFormats::isOpenable(format)) {
           _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(nextPath));
+        } else if (FileFormats::isVideo(format) && FileFormats::isOpenable(format)) {
+          _navigator.push(ScreenId::VideoPlayer, ScreenData::videoPath(nextPath));
         }
       }
     }
@@ -187,7 +190,8 @@ void FilesScreen::drawListing() {
       } else {
         FileFormats::Format format = FileFormats::fromPath(name);
         uint16_t color = FileFormats::isImage(format) ? ImageFileColor
-                           : (FileFormats::isAudio(format) ? AudioFileColor : FileColor);
+                           : (FileFormats::isAudio(format) ? AudioFileColor
+                              : (FileFormats::isVideo(format) ? VideoFileColor : FileColor));
         UiKit::drawListCell(_display.tft(), _display.width(), y,
                              displayName(name), ic_file, color);
       }

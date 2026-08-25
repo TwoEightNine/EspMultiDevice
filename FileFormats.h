@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // Central registry for file formats understood by the application. Every
-// format belongs to an image or audio family when applicable. Custom cache
+// format belongs to an image, audio, or video family when applicable. Custom cache
 // formats retain that family, but are marked internal so callers do not treat
 // cache files as source media.
 class FileFormats {
@@ -11,7 +11,8 @@ public:
   enum class Group : uint8_t {
     Unknown,
     Image,
-    Audio
+    Audio,
+    Video
   };
 
   enum class Format : uint8_t {
@@ -23,6 +24,8 @@ public:
     Webp,
     Wav,
     Mp3,
+    Mp4,
+    ThreeGp,
     Em16,
     Emga,
     Empa
@@ -43,6 +46,8 @@ public:
     if (suffix == F(".webp")) return Format::Webp;
     if (suffix == F(".wav")) return Format::Wav;
     if (suffix == F(".mp3")) return Format::Mp3;
+    if (suffix == F(".mp4") || suffix == F(".m4v")) return Format::Mp4;
+    if (suffix == F(".3gp") || suffix == F(".3gpp")) return Format::ThreeGp;
     if (suffix == F(".em16")) return Format::Em16;
     if (suffix == F(".emga")) return Format::Emga;
     if (suffix == F(".empa")) return Format::Empa;
@@ -63,6 +68,9 @@ public:
     if (type == F("audio/wav") || type == F("audio/x-wav") || type == F("audio/wave") ||
         type == F("audio/vnd.wave") || type == F("audio/x-pn-wav")) return Format::Wav;
     if (type == F("audio/mpeg") || type == F("audio/mp3") || type == F("audio/x-mpeg")) return Format::Mp3;
+    if (type == F("video/mp4") || type == F("application/mp4")) return Format::Mp4;
+    if (type == F("video/3gpp") || type == F("video/3gp") || type == F("application/3gpp") ||
+        type == F("application/x-3gp")) return Format::ThreeGp;
     return Format::Unknown;
   }
 
@@ -83,6 +91,13 @@ public:
         bytes[8] == 'W' && bytes[9] == 'A' && bytes[10] == 'V' && bytes[11] == 'E') return Format::Wav;
     if (length >= 3 && bytes[0] == 'I' && bytes[1] == 'D' && bytes[2] == '3') return Format::Mp3;
     if (length >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0) return Format::Mp3;
+    // MP4 and 3GP are ISO base media files.  The first box is normally
+    // `ftyp`; distinguish 3GPP brands so Browser can reject a response whose
+    // declared type does not match its actual container.
+    if (length >= 12 && bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p') {
+      if (bytes[8] == '3' && bytes[9] == 'g' && (bytes[10] == 'p' || bytes[10] == '2')) return Format::ThreeGp;
+      return Format::Mp4;
+    }
     return Format::Unknown;
   }
 
@@ -100,13 +115,16 @@ public:
       case Format::Mp3:
       case Format::Empa:
         return Group::Audio;
+      case Format::Mp4:
+      case Format::ThreeGp:
+        return Group::Video;
       default:
         return Group::Unknown;
     }
   }
 
   static bool isDownloadable(Format format) {
-    return !isInternal(format) && (isImage(format) || isAudio(format));
+    return !isInternal(format) && (isImage(format) || isAudio(format) || isVideo(format));
   }
 
   static bool isOpenable(Format format) {
@@ -119,6 +137,10 @@ public:
 
   static bool isAudio(Format format) {
     return group(format) == Group::Audio;
+  }
+
+  static bool isVideo(Format format) {
+    return group(format) == Group::Video;
   }
 
   static bool isInternal(Format format) {
@@ -134,6 +156,8 @@ public:
       case Format::Webp: return ".webp";
       case Format::Wav: return ".wav";
       case Format::Mp3: return ".mp3";
+      case Format::Mp4: return ".mp4";
+      case Format::ThreeGp: return ".3gp";
       case Format::Em16: return ".em16";
       case Format::Emga: return ".emga";
       case Format::Empa: return ".empa";

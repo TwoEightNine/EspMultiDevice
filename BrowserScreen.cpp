@@ -870,13 +870,18 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     FileFormats::Group group = FileFormats::group(format);
     renderPlainText(group == FileFormats::Group::Audio
       ? "Downloaded audio opened in player."
-      : "Downloaded image opened in viewer.", group == FileFormats::Group::Audio ? "Audio download" : "Image download");
+      : (group == FileFormats::Group::Video ? "Downloaded video opened in player."
+         : "Downloaded image opened in viewer."),
+      group == FileFormats::Group::Audio ? "Audio download"
+      : (group == FileFormats::Group::Video ? "Video download" : "Image download"));
     if (addToRecent) addRecent(_currentUrl, _title);
     saveState();
     if (group == FileFormats::Group::Image &&
         _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(downloadedPath))) return true;
     if (group == FileFormats::Group::Audio &&
         _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(downloadedPath))) return true;
+    if (group == FileFormats::Group::Video &&
+        _navigator.push(ScreenId::VideoPlayer, ScreenData::videoPath(downloadedPath))) return true;
     _message = "Could not open downloaded file";
     draw();
     return true;
@@ -1217,11 +1222,16 @@ FileFormats::Format BrowserScreen::downloadableFormatForResponse(const String &c
 bool BrowserScreen::isSupportedDownloadFile(const String &path, FileFormats::Format expected) const {
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   File file = SD.open(path.c_str(), FILE_READ);
-  uint8_t signature[12] = {};
+  uint8_t signature[32] = {};
   const int bytes = file ? file.read(signature, sizeof(signature)) : 0;
   if (file) file.close();
   SpiBusLock::unlock();
-  return FileFormats::fromSignature(signature, bytes > 0 ? (size_t)bytes : 0) == expected;
+  FileFormats::Format actual = FileFormats::fromSignature(signature, bytes > 0 ? (size_t)bytes : 0);
+  if (actual == expected) return true;
+  // Some legitimate 3GP writers use a generic ISO-BMFF major brand. Permit
+  // that one ambiguity for a declared .3gp response, but do not accept a
+  // positively identified 3GP file when the response claimed MP4.
+  return expected == FileFormats::Format::ThreeGp && actual == FileFormats::Format::Mp4;
 }
 
 bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
@@ -1592,8 +1602,23 @@ void BrowserScreen::renderDocument(const String &html) {
         }
         appendImage(alt.length() ? alt : "image", styledForTag(tag, attributes), imageLinkIndex != 0,
                     imageLinkIndex, isFullWidthImage(attributes), imageIndex);
-      } else if (tag == "audio" || tag == "video" || tag == "iframe" || tag == "object" ||
-                 tag == "embed" || tag == "canvas") {
+      } else if (tag == "audio" || tag == "video" || tag == "source") {
+        String source = decodeEntities(attributeValue(attributes, "src"));
+        TextStyle mediaStyle = styledForTag(tag, attributes);
+        Url base;
+        String resolved;
+        String normalized;
+        String error;
+        if (source.length() && parseUrl(_currentUrl, base)) resolved = resolveUrl(base, source);
+        if (source.length() && normalizeUrl(resolved, normalized, error)) {
+          mediaStyle.link = true;
+          mediaStyle.linkIndex = registerLink(normalized);
+        }
+        appendBreak();
+        appendWord(source.length() ? String(F("[")) + (tag == "source" ? String("media") : tag) + F("]")
+                                  : String(F("(")) + tag + F(")"), mediaStyle);
+        appendBreak();
+      } else if (tag == "iframe" || tag == "object" || tag == "embed" || tag == "canvas") {
         appendStub(tag);
       } else if (tag == "form" || tag == "input" || tag == "button" || tag == "textarea" || tag == "select") {
         appendStub(formStubLabel(tag, attributes));
