@@ -1,6 +1,8 @@
 #include <Arduino.h>
 
 #include "DisplayController.h"
+#include "AudioSettings.h"
+#include "AudioSettingsScreen.h"
 #include "AudioPlayerScreen.h"
 #include "VideoPlayerScreen.h"
 #include "BrowserScreen.h"
@@ -58,6 +60,7 @@ SdCardController *sdCard = nullptr;
 TouchController *touch = nullptr;
 MicController *mic = nullptr;
 SpeakerController *speaker = nullptr;
+AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 
@@ -67,6 +70,7 @@ SplashScreen *splashScreen = nullptr;
 VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
+AudioSettingsScreen *audioSettingsScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
@@ -175,6 +179,11 @@ void setup() {
   );
   Serial.println(F("MAX98357A speaker configured for lazy startup."));
 
+  audioSettings = new AudioSettings(*speaker);
+  audioSettings->begin();
+  Serial.print(F("Audio volume: "));
+  Serial.println(audioSettings->volume());
+
   wifiController = new WiFiController();
   wifiController->begin();
   Serial.println(F("Wi-Fi controller ready."));
@@ -189,9 +198,10 @@ void setup() {
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
+  audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
-  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
+  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings);
   videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
@@ -211,6 +221,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Settings, *settingsScreen)) {
     Serial.println(F("Navigator failed to register Settings screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::AudioSettings, *audioSettingsScreen)) {
+    Serial.println(F("Navigator failed to register Audio Settings screen."));
   }
   if (!navigator->registerScreen(ScreenId::WiFi, *wifiScreen)) {
     Serial.println(F("Navigator failed to register Wi-Fi screen."));

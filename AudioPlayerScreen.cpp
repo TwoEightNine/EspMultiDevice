@@ -76,14 +76,17 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
                                      TouchController &touch,
                                      DisplayController &display,
                                      SdCardController &sdCard,
-                                     SpeakerController &speaker)
+                                     SpeakerController &speaker,
+                                     AudioSettings &audioSettings)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _speaker(speaker),
+    _audioSettings(audioSettings),
     _state(State::Ready),
     _format(SourceFormat::None),
     _sdMounted(false),
     _lastTouchDown(false),
+    _volumePickerVisible(false),
     _lastDrawMs(0),
     _finishAtMs(0),
     _dataOffset(0),
@@ -110,6 +113,7 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
 void AudioPlayerScreen::onEnter(const ScreenData &data) {
   reset();
   _lastTouchDown = false;
+  _volumePickerVisible = false;
   _path = data.kind == ScreenDataKind::AudioPath ? data.text : "";
   _fileName = displayName(_path);
   _sdMounted = _sdCard.isMounted();
@@ -143,6 +147,20 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
     _navigator.pop();
     return;
   }
+  if (_volumePickerVisible) {
+    int8_t level = volumePickerLevelAt(point.x, point.y);
+    if (level >= AudioSettings::MinVolume) {
+      _audioSettings.setVolume((uint8_t)level);
+      _volumePickerVisible = false;
+      draw();
+    }
+    return;
+  }
+  if (volumeButtonContains(point.x, point.y)) {
+    _volumePickerVisible = true;
+    drawVolumePicker();
+    return;
+  }
   if (controlContains(point.x, point.y)) {
     if (_state == State::Playing) {
       pausePlayback();
@@ -165,7 +183,7 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
       streamChunk();
     }
   }
-  if (_state == State::Playing && nowMs - _lastDrawMs >= 200) {
+  if (_state == State::Playing && !_volumePickerVisible && nowMs - _lastDrawMs >= 200) {
     drawDynamic(false);
   }
 }
@@ -817,7 +835,9 @@ void AudioPlayerScreen::draw(bool force) {
   tft.drawString(truncateLabel(_fileName, _display.width() - 32), _display.width() / 2, 65, 2);
   tft.setTextDatum(TL_DATUM);
   drawPlayButton();
+  drawVolumeButton();
   drawDynamic(true);
+  if (_volumePickerVisible) drawVolumePicker();
   if (_state == State::Error) drawError();
 }
 
@@ -862,6 +882,62 @@ void AudioPlayerScreen::drawPlayButton() {
   } else {
     tft.fillTriangle(cx - 7, cy - 11, cx - 7, cy + 11, cx + 11, cy, TFT_WHITE);
   }
+}
+
+void AudioPlayerScreen::drawVolumeButton() {
+  TFT_eSPI &tft = _display.tft();
+  const int16_t x = 20;
+  const int16_t y = 142;
+  const int16_t width = _display.width() - 40;
+  const int16_t height = 28;
+  tft.fillRoundRect(x, y, width, height, 5, TFT_DARKGREY);
+  tft.drawRoundRect(x, y, width, height, 5, TFT_WHITE);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  String label = F("Volume: ");
+  label += _audioSettings.volume();
+  label += F(" / 10");
+  tft.drawString(label, _display.width() / 2, y + height / 2, 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void AudioPlayerScreen::drawVolumePicker() {
+  TFT_eSPI &tft = _display.tft();
+  const uint8_t columns = 6;
+  const int16_t panelX = 16;
+  const int16_t panelY = 54;
+  const int16_t panelWidth = _display.width() - panelX * 2;
+  const int16_t panelHeight = 206;
+  const int16_t gridLeft = panelX + 16;
+  const int16_t gridTop = panelY + 60;
+  const int16_t gap = 8;
+  const int16_t cellHeight = 44;
+  const int16_t availableWidth = panelWidth - 32 - gap * (columns - 1);
+  const int16_t cellWidth = availableWidth / columns;
+  const uint8_t selected = _audioSettings.volume();
+
+  tft.fillRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_BLACK);
+  tft.drawRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_WHITE);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  String title = F("Volume ");
+  title += selected;
+  title += F(" / 10");
+  tft.drawString(title, _display.width() / 2, panelY + 28, 2);
+
+  for (uint8_t level = AudioSettings::MinVolume; level <= AudioSettings::MaxVolume; level++) {
+    uint8_t column = level % columns;
+    uint8_t row = level / columns;
+    int16_t x = gridLeft + column * (cellWidth + gap);
+    int16_t y = gridTop + row * (cellHeight + gap);
+    bool isSelected = level == selected;
+    uint16_t fill = isSelected ? TFT_CYAN : TFT_DARKGREY;
+    tft.fillRoundRect(x, y, cellWidth, cellHeight, 5, fill);
+    tft.drawRoundRect(x, y, cellWidth, cellHeight, 5, TFT_WHITE);
+    tft.setTextColor(isSelected ? TFT_BLACK : TFT_WHITE, fill);
+    tft.drawNumber(level, x + cellWidth / 2, y + cellHeight / 2, 2);
+  }
+  tft.setTextDatum(TL_DATUM);
 }
 
 void AudioPlayerScreen::drawProgress() {
@@ -920,4 +996,31 @@ String AudioPlayerScreen::timeText(uint32_t frames) const {
 bool AudioPlayerScreen::controlContains(int16_t x, int16_t y) const {
   int16_t left = _display.width() / 2 - 24;
   return x >= left && x < left + 48 && y >= 94 && y < 142;
+}
+
+bool AudioPlayerScreen::volumeButtonContains(int16_t x, int16_t y) const {
+  return x >= 20 && x < _display.width() - 20 && y >= 142 && y < 170;
+}
+
+int8_t AudioPlayerScreen::volumePickerLevelAt(int16_t x, int16_t y) const {
+  const uint8_t columns = 6;
+  const int16_t panelX = 16;
+  const int16_t panelY = 54;
+  const int16_t panelWidth = _display.width() - panelX * 2;
+  const int16_t gridLeft = panelX + 16;
+  const int16_t gridTop = panelY + 60;
+  const int16_t gap = 8;
+  const int16_t cellHeight = 44;
+  const int16_t availableWidth = panelWidth - 32 - gap * (columns - 1);
+  const int16_t cellWidth = availableWidth / columns;
+  for (uint8_t level = AudioSettings::MinVolume; level <= AudioSettings::MaxVolume; level++) {
+    uint8_t column = level % columns;
+    uint8_t row = level / columns;
+    int16_t left = gridLeft + column * (cellWidth + gap);
+    int16_t top = gridTop + row * (cellHeight + gap);
+    if (x >= left && x < left + cellWidth && y >= top && y < top + cellHeight) {
+      return (int8_t)level;
+    }
+  }
+  return -1;
 }

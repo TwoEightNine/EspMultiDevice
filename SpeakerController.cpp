@@ -23,6 +23,7 @@ SpeakerController::SpeakerController(int bclkPin,
     _enablePin(enablePin),
     _port(port),
     _sampleRate(sampleRate),
+    _volume(10),
     _ready(false),
     _controlStarted(false),
     _lastError(F("Not initialized")) {
@@ -95,6 +96,14 @@ uint32_t SpeakerController::sampleRate() const {
   return _sampleRate;
 }
 
+void SpeakerController::setVolume(uint8_t level) {
+  _volume = level > 10 ? 10 : level;
+}
+
+uint8_t SpeakerController::volume() const {
+  return _volume;
+}
+
 const String &SpeakerController::lastError() const {
   return _lastError;
 }
@@ -104,21 +113,49 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
     return 0;
   }
 
-  size_t bytesWritten = 0;
-  esp_err_t result = i2s_write(
-    _port,
-    samples,
-    sampleCount * sizeof(samples[0]),
-    &bytesWritten,
-    timeoutMs / portTICK_PERIOD_MS
-  );
-
-  if (result != ESP_OK) {
-    setError(F("Speaker I2S write failed"));
-    return 0;
+  if (_volume == 10) {
+    size_t bytesWritten = 0;
+    esp_err_t result = i2s_write(
+      _port,
+      samples,
+      sampleCount * sizeof(samples[0]),
+      &bytesWritten,
+      timeoutMs / portTICK_PERIOD_MS
+    );
+    if (result != ESP_OK) {
+      setError(F("Speaker I2S write failed"));
+      return 0;
+    }
+    return bytesWritten / sizeof(samples[0]);
   }
 
-  return bytesWritten / sizeof(samples[0]);
+  size_t writtenSamples = 0;
+  while (writtenSamples < sampleCount) {
+    size_t count = sampleCount - writtenSamples;
+    if (count > VolumeBufferSamples) count = VolumeBufferSamples;
+
+    for (size_t i = 0; i < count; i++) {
+      _volumeBuffer[i] = (int16_t)(((int32_t)samples[writtenSamples + i] * _volume) / 10);
+    }
+
+    size_t bytesWritten = 0;
+    esp_err_t result = i2s_write(
+      _port,
+      _volumeBuffer,
+      count * sizeof(_volumeBuffer[0]),
+      &bytesWritten,
+      timeoutMs / portTICK_PERIOD_MS
+    );
+    size_t chunkSamples = bytesWritten / sizeof(_volumeBuffer[0]);
+    writtenSamples += chunkSamples;
+    if (result != ESP_OK) {
+      setError(F("Speaker I2S write failed"));
+      break;
+    }
+    if (chunkSamples < count) break;
+  }
+
+  return writtenSamples;
 }
 
 void SpeakerController::stop() {

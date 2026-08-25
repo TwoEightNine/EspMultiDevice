@@ -21,6 +21,8 @@ public:
   void unmute();
   bool setSampleRate(uint32_t sampleRate);
   uint32_t sampleRate() const;
+  void setVolume(uint8_t level);
+  uint8_t volume() const;
   const String &lastError() const;
 
   size_t writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs = 100);
@@ -33,9 +35,13 @@ private:
   int _enablePin;
   i2s_port_t _port;
   uint32_t _sampleRate;
+  uint8_t _volume;
   bool _ready;
   bool _controlStarted;
   String _lastError;
+
+  static const size_t VolumeBufferSamples = 256;
+  int16_t _volumeBuffer[VolumeBufferSamples];
 
   bool configureI2s();
   void setError(const __FlashStringHelper *message);

@@ -6,6 +6,7 @@
 #include "third_party/minimp3/minimp3.h"
 
 #include "Screen.h"
+#include "AudioSettings.h"
 #include "SdCardController.h"
 #include "SpeakerController.h"
 
@@ -15,7 +16,8 @@ public:
                     TouchController &touch,
                     DisplayController &display,
                     SdCardController &sdCard,
-                    SpeakerController &speaker);
+                    SpeakerController &speaker,
+                    AudioSettings &audioSettings);
 
   void onEnter(const ScreenData &data) override;
   void onExit() override;
@@ -45,6 +47,7 @@ private:
   static const uint16_t OutputFrames = 256;
   SdCardController &_sdCard;
   SpeakerController &_speaker;
+  AudioSettings &_audioSettings;
   fs::File _file;
   String _path;
   String _fileName;
@@ -53,6 +56,7 @@ private:
   SourceFormat _format;
   bool _sdMounted;
   bool _lastTouchDown;
+  bool _volumePickerVisible;
   uint32_t _lastDrawMs;
   uint32_t _finishAtMs;
   uint32_t _dataOffset;
@@ -115,6 +119,8 @@ private:
   void drawTopBar();
   void drawDynamic(bool force);
   void drawPlayButton();
+  void drawVolumeButton();
+  void drawVolumePicker();
   void drawProgress();
   void drawStatus();
   void drawError();
@@ -122,4 +128,6 @@ private:
   String truncateLabel(const String &label, int16_t maxWidth);
   String timeText(uint32_t frames) const;
   bool controlContains(int16_t x, int16_t y) const;
+  bool volumeButtonContains(int16_t x, int16_t y) const;
+  int8_t volumePickerLevelAt(int16_t x, int16_t y) const;
 };
