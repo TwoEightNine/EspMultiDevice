@@ -34,7 +34,7 @@ const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
 const int16_t StartOpenButtonTop = HeaderHeight + 8;
 const int16_t StartOpenButtonHeight = 32;
 const int16_t RecentListTop = StartOpenButtonTop + StartOpenButtonHeight + 24;
-const uint16_t DefaultTextColor = TFT_WHITE;
+const uint16_t DefaultTextColor = TFT_BLACK;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
 const char *StatePath = "/.system/browser_state.txt";
@@ -45,13 +45,6 @@ String trimCopy(const String &value) {
   String result = value;
   result.trim();
   return result;
-}
-
-bool isLightColor(uint16_t color) {
-  const uint8_t red = color >> 8;
-  const uint8_t green = color >> 3;
-  const uint8_t blue = color << 3;
-  return (uint32_t)red * 299 + (uint32_t)green * 587 + (uint32_t)blue * 114 >= 128000;
 }
 
 bool startsWithIgnoreCase(const String &value, const char *prefix) {
@@ -147,10 +140,11 @@ uint64_t parseHttpDate(const String &source) {
 class ThumbnailDecoder {
 public:
   bool decode(const String &path, FileFormats::Format format, uint16_t *&pixels,
-              uint8_t &width, uint8_t &height) {
+              uint8_t &width, uint8_t &height, uint16_t backgroundColor) {
     pixels = nullptr;
     width = 0;
     height = 0;
+    _backgroundColor = backgroundColor;
     if (format == FileFormats::Format::Jpeg) return decodeJpeg(path, pixels, width, height);
     if (format == FileFormats::Format::Png) return decodePng(path, pixels, width, height);
     if (format == FileFormats::Format::Gif) return decodeGif(path, pixels, width, height);
@@ -170,6 +164,7 @@ private:
   uint16_t _sourceHeight = 0;
   uint16_t _decodedWidth = 0;
   uint16_t _decodedHeight = 0;
+  uint16_t _backgroundColor = TFT_WHITE;
 
   bool prepare(uint16_t sourceWidth, uint16_t sourceHeight, uint16_t decodedWidth,
                uint16_t decodedHeight, uint16_t *&pixels, uint8_t &width, uint8_t &height) {
@@ -192,7 +187,9 @@ private:
     // RAM on PSRAM-equipped ESP32-S3 boards.
     _pixels = static_cast<uint16_t *>(psramFound() ? ps_malloc(byteCount) : malloc(byteCount));
     if (!_pixels) return false;
-    memset(_pixels, 0, byteCount);
+    for (uint32_t index = 0; index < (uint32_t)scaledWidth * scaledHeight; index++) {
+      _pixels[index] = _backgroundColor;
+    }
     _width = (uint8_t)scaledWidth;
     _height = (uint8_t)scaledHeight;
     _sourceWidth = sourceWidth;
@@ -367,7 +364,11 @@ private:
     if (!_owner || !draw) return 0;
     uint16_t *line = static_cast<uint16_t *>(malloc((size_t)draw->iWidth * sizeof(uint16_t)));
     if (!line) return 0;
-    _owner->_png.getLineAsRGB565(draw, line, PNG_RGB565_LITTLE_ENDIAN, 0);
+    const uint16_t background = _owner->_backgroundColor;
+    const uint32_t backgroundRgb = ((uint32_t)(background >> 8 & 0xf8)) |
+                                   ((uint32_t)(background >> 3 & 0xfc) << 8) |
+                                   ((uint32_t)(background << 3 & 0xf8) << 16);
+    _owner->_png.getLineAsRGB565(draw, line, PNG_RGB565_LITTLE_ENDIAN, backgroundRgb);
     for (int x = 0; x < draw->iWidth; x++) _owner->store(x, draw->y, line[x], false);
     free(line);
     return 1;
@@ -439,7 +440,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _currentUrl(),
     _title(),
     _message(),
-    _documentBackgroundColor(TFT_BLACK),
+    _documentBackgroundColor(TFT_WHITE),
     _titleBuffer(),
     _rowCount(0),
     _embeddedImageCount(0),
@@ -451,8 +452,10 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _imageWorker(nullptr),
     _httpMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
-    _currentStyle{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0},
+    _currentStyle{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false},
     _styleDepth(0),
+    _cssRuleCount(0),
+    _cssSourceOrder(0),
     _pendingSpace(false),
     _renderedCharacters(0),
     _closeBounds{0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize},
@@ -462,7 +465,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _previousBounds{0, 0, 0, 0},
     _nextBounds{0, 0, 0, 0} {
   for (uint16_t i = 0; i < MaxEmbeddedImages; i++) {
-    _embeddedImages[i] = {nullptr, 0, 0, "", 0, 0};
+    _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _recentBounds[i] = {0, 0, 0, 0};
@@ -623,9 +626,16 @@ void BrowserScreen::drawDocument() {
                _display.height() - HeaderHeight - ControlsHeight, _documentBackgroundColor);
   const int16_t textTop = HeaderHeight + DocumentPadding;
   if (_message.length() > 0) {
-    tft.setTextColor(_message == "Loading..." ? TFT_CYAN : TFT_RED, _documentBackgroundColor);
-    tft.setTextDatum(TC_DATUM);
-    tft.drawString(shortText(_message, _display.width() - 18), _display.width() / 2, textTop + 20, 2);
+    const bool loading = _message == "Loading...";
+    const String hint = shortText(_message, _display.width() - 28);
+    const int16_t hintWidth = tft.textWidth(hint, 2) + 14;
+    const int16_t hintX = (_display.width() - hintWidth) / 2;
+    const uint16_t hintBackground = loading ? TFT_YELLOW : TFT_RED;
+    const uint16_t hintForeground = loading ? TFT_BLACK : TFT_WHITE;
+    tft.fillRoundRect(hintX, textTop + 7, hintWidth, 26, 5, hintBackground);
+    tft.setTextColor(hintForeground, hintBackground);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(hint, _display.width() / 2, textTop + 20, 2);
     tft.setTextDatum(TL_DATUM);
     return;
   }
@@ -1564,6 +1574,7 @@ uint64_t BrowserScreen::nowEpoch() const {
 
 void BrowserScreen::renderDocument(const String &html) {
   resetRenderedRows();
+  collectCssRules(html);
   _titleBuffer = "";
   _title = "";
   bool inScript = false;
@@ -1608,7 +1619,10 @@ void BrowserScreen::renderDocument(const String &html) {
       } else if (tag == "img") {
         String alt = decodeEntities(attributeValue(attributes, "alt"));
         String source = decodeEntities(attributeValue(attributes, "src"));
-        int16_t imageIndex = fetchEmbeddedImage(source);
+        TextStyle imageStyle = styledForTag(tag, attributes);
+        const uint16_t imageBackground = imageStyle.hasBackground ? imageStyle.backgroundColor :
+          (imageStyle.hasBlockBackground ? imageStyle.blockBackgroundColor : _documentBackgroundColor);
+        int16_t imageIndex = fetchEmbeddedImage(source, imageBackground);
         uint8_t imageLinkIndex = _currentStyle.linkIndex;
         if (imageLinkIndex == 0 && source.length()) {
           Url base;
@@ -1618,8 +1632,8 @@ void BrowserScreen::renderDocument(const String &html) {
           if (parseUrl(_currentUrl, base)) resolved = resolveUrl(base, source);
           if (normalizeUrl(resolved, normalized, error)) imageLinkIndex = registerLink(normalized);
         }
-        appendImage(alt.length() ? alt : "image", styledForTag(tag, attributes), imageLinkIndex != 0,
-                    imageLinkIndex, isFullWidthImage(attributes), imageIndex);
+        appendImage(alt.length() ? alt : "image", imageStyle, imageLinkIndex != 0,
+                    imageLinkIndex, imageStyle.fullWidthImage, imageIndex);
       } else if (tag == "audio" || tag == "video" || tag == "source") {
         String source = decodeEntities(attributeValue(attributes, "src"));
         TextStyle mediaStyle = styledForTag(tag, attributes);
@@ -1647,10 +1661,6 @@ void BrowserScreen::renderDocument(const String &html) {
           TextStyle tagStyle = styledForTag(tag, attributes);
           if ((tag == "html" || tag == "body") && tagStyle.hasBackground) {
             _documentBackgroundColor = tagStyle.backgroundColor;
-            // The browser's normal foreground is white for its dark UI. A
-            // page-level light background has the web default of dark text.
-            if (_currentStyle.color == DefaultTextColor && tagStyle.color == DefaultTextColor &&
-                isLightColor(_documentBackgroundColor)) tagStyle.color = TFT_BLACK;
           }
           pushStyle(tag, tagStyle);
         }
@@ -1678,9 +1688,11 @@ void BrowserScreen::resetRenderedRows() {
   releaseEmbeddedImages();
   _rowCount = 0;
   _pageCount = 0;
-  _documentBackgroundColor = TFT_BLACK;
+  _documentBackgroundColor = TFT_WHITE;
   _styleDepth = 0;
-  _currentStyle = {DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
+  _currentStyle = {DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
+  _cssRuleCount = 0;
+  _cssSourceOrder = 0;
   _linkCount = 0;
   _pendingSpace = false;
   _renderedCharacters = 0;
@@ -1902,7 +1914,7 @@ void BrowserScreen::drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) cons
   _display.tft().pushImage(x, y, image.width, image.height, image.pixels);
 }
 
-int16_t BrowserScreen::fetchEmbeddedImage(const String &source) {
+int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgroundColor) {
   if (source.length() == 0 || _embeddedImageCount >= MaxEmbeddedImages || !_wifi.isConnected() ||
       source.length() >= ImageUrlMaxLength) return -1;
   Url base;
@@ -1913,20 +1925,20 @@ int16_t BrowserScreen::fetchEmbeddedImage(const String &source) {
   resolved = resolveUrl(base, source);
   if (!normalizeUrl(resolved, url, error)) return -1;
 
-  // Pages commonly repeat logos, tracking pixels, and article thumbnails.
-  // Reuse the same pending or decoded slot by canonical URL rather than
-  // downloading and allocating it again.
+  // Reuse a preview only when it will be composited against the same page
+  // color; transparent PNG/GIF pixels are resolved by the worker.
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
-    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].url == url) return i;
+    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].url == url &&
+        _embeddedImages[i].backgroundColor == backgroundColor) return i;
   }
 
   const uint16_t index = _embeddedImageCount++;
-  _embeddedImages[index] = {nullptr, 0, 0, url, _imageGeneration, 0};
+  _embeddedImages[index] = {nullptr, 0, 0, backgroundColor, url, _imageGeneration, 0};
   return index;
 }
 
-bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t *&pixels,
-                                               uint8_t &width, uint8_t &height) {
+bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backgroundColor,
+                                               uint16_t *&pixels, uint8_t &width, uint8_t &height) {
   pixels = nullptr;
   width = height = 0;
 
@@ -1951,7 +1963,8 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t *&pix
   // main Arduino task stack. Browsing loads images serially.
   static ThumbnailDecoder decoder;
   SpiBusLock::lock();
-  const bool decoded = decoder.decode(downloadedPath, FileFormats::fromPath(downloadedPath), pixels, width, height);
+  const bool decoded = decoder.decode(downloadedPath, FileFormats::fromPath(downloadedPath),
+                                      pixels, width, height, backgroundColor);
   SpiBusLock::unlock();
   if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
     SD.remove(downloadedPath.c_str());
@@ -1970,7 +1983,7 @@ void BrowserScreen::releaseEmbeddedImages() {
   if (_imageGeneration == 0) _imageGeneration = 1;
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
     if (_embeddedImages[i].pixels) free(_embeddedImages[i].pixels);
-    _embeddedImages[i] = {nullptr, 0, 0, "", 0, 0};
+    _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
   }
   _embeddedImageCount = 0;
   _nextImageToQueue = 0;
@@ -2003,6 +2016,7 @@ void BrowserScreen::pumpImageJobs() {
     ImageJob job{};
     job.imageIndex = index;
     job.generation = image.generation;
+    job.backgroundColor = image.backgroundColor;
     image.url.toCharArray(job.url, sizeof(job.url));
     if (xQueueSend(_imageJobs, &job, 0) != pdTRUE) {
       _nextImageToQueue--;
@@ -2051,7 +2065,8 @@ void BrowserScreen::imageWorkerTask(void *context) {
     result.generation = job.generation;
     if (job.generation == screen->_imageGeneration) {
       screen->_activeImageGeneration = job.generation;
-      screen->fetchEmbeddedImageOnWorker(String(job.url), result.pixels, result.width, result.height);
+      screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor,
+                                         result.pixels, result.width, result.height);
       screen->_activeImageGeneration = 0;
     }
     xQueueSend(screen->_imageResults, &result, portMAX_DELAY);
@@ -2104,12 +2119,14 @@ bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) c
   return left.color == right.color && left.backgroundColor == right.backgroundColor &&
          left.hasBackground == right.hasBackground && left.blockBackgroundColor == right.blockBackgroundColor &&
          left.hasBlockBackground == right.hasBlockBackground && left.bold == right.bold && left.italic == right.italic &&
-         left.underline == right.underline && left.link == right.link && left.linkIndex == right.linkIndex;
+         left.underline == right.underline && left.link == right.link && left.linkIndex == right.linkIndex &&
+         left.fullWidthImage == right.fullWidthImage;
 }
 
 BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) {
   TextStyle style = _currentStyle;
   const bool isBlock = isBlockTag(tag);
+  if (tag == "img") style.fullWidthImage = false;
   if (tag == "b" || tag == "strong") style.bold = true;
   if (tag == "i" || tag == "em") style.italic = true;
   if (tag == "a") {
@@ -2136,23 +2153,16 @@ BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const St
   String background = attributeValue(attributes, "bgcolor");
   if (background.length()) applyBackground(style, background);
 
-  String inlineStyle = attributeValue(attributes, "style");
-  int start = 0;
-  while (start < (int)inlineStyle.length()) {
-    int end = inlineStyle.indexOf(';', start);
-    String declaration = trimCopy(inlineStyle.substring(start, end < 0 ? inlineStyle.length() : end));
-    int colon = declaration.indexOf(':');
-    if (colon > 0) {
-      String property = lower(trimCopy(declaration.substring(0, colon)));
-      String value = lower(trimCopy(declaration.substring(colon + 1)));
-      if (property == "color") style.color = parseColor(value, style.color);
-      else if (property == "background" || property == "background-color") applyBackground(style, value);
-      else if (property == "font-weight") style.bold = value.indexOf("bold") >= 0 || value.toInt() >= 600;
-      else if (property == "font-style") style.italic = value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0;
-    }
-    if (end < 0) break;
-    start = end + 1;
+  if (tag == "img" && lower(trimCopy(attributeValue(attributes, "width"))) == "100%") {
+    style.fullWidthImage = true;
   }
+
+  applyCssRules(style, tag, attributes);
+
+  String inlineStyle = attributeValue(attributes, "style");
+  StyleOverride inlineOverride = {};
+  parseCssDeclarations(inlineStyle, inlineOverride);
+  applyStyleOverride(style, inlineOverride, tag == "img");
   if (isBlock) {
     if (style.hasBackground) {
       style.blockBackgroundColor = style.backgroundColor;
@@ -2160,6 +2170,315 @@ BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const St
     }
   }
   return style;
+}
+
+void BrowserScreen::collectCssRules(const String &html) {
+  bool inStyle = false;
+  bool inScript = false;
+  uint32_t styleStart = 0;
+  uint32_t position = 0;
+  while (position < html.length() && _cssRuleCount < MaxCssRules) {
+    int nextTag = html.indexOf('<', position);
+    if (nextTag < 0) break;
+    int endTag = findTagEnd(html, nextTag + 1);
+    if (endTag < 0) break;
+    String inside = trimCopy(html.substring(nextTag + 1, endTag));
+    bool closing = inside.startsWith("/");
+    if (closing) inside.remove(0, 1);
+    inside.trim();
+    int space = inside.indexOf(' ');
+    String tag = lower(space < 0 ? inside : inside.substring(0, space));
+    if (tag.endsWith("/")) tag.remove(tag.length() - 1);
+    if (tag == "script") {
+      inScript = !closing;
+    } else if (tag == "style" && !inScript) {
+      if (!closing && !inStyle) {
+        inStyle = true;
+        styleStart = endTag + 1;
+      } else if (closing && inStyle) {
+        parseCssRules(html, styleStart, nextTag);
+        inStyle = false;
+      }
+    }
+    position = endTag + 1;
+  }
+}
+
+void BrowserScreen::skipCssSpaceAndComments(const String &source, uint32_t &position, uint32_t end) const {
+  while (position < end) {
+    if (isspace((unsigned char)source[position])) {
+      position++;
+      continue;
+    }
+    if (position + 1 < end && source[position] == '/' && source[position + 1] == '*') {
+      position += 2;
+      while (position + 1 < end && !(source[position] == '*' && source[position + 1] == '/')) position++;
+      position = position + 1 < end ? position + 2 : end;
+      continue;
+    }
+    break;
+  }
+}
+
+bool BrowserScreen::cssSlice(const String &source, uint32_t start, uint32_t end, uint16_t limit,
+                             String &result) const {
+  result = "";
+  for (uint32_t position = start; position < end; position++) {
+    if (position + 1 < end && source[position] == '/' && source[position + 1] == '*') {
+      position += 2;
+      while (position + 1 < end && !(source[position] == '*' && source[position + 1] == '/')) position++;
+      if (position + 1 < end) position++;
+      continue;
+    }
+    if (result.length() >= limit) return false;
+    result += source[position];
+  }
+  result.trim();
+  return true;
+}
+
+void BrowserScreen::parseCssRules(const String &source, uint32_t start, uint32_t end) {
+  uint32_t position = start;
+  while (position < end && _cssRuleCount < MaxCssRules) {
+    skipCssSpaceAndComments(source, position, end);
+    const uint32_t selectorStart = position;
+    while (position < end) {
+      if (position + 1 < end && source[position] == '/' && source[position + 1] == '*') {
+        position += 2;
+        while (position + 1 < end && !(source[position] == '*' && source[position + 1] == '/')) position++;
+        position = position + 1 < end ? position + 2 : end;
+        continue;
+      }
+      if (source[position] == '{' || source[position] == '}') break;
+      position++;
+    }
+    if (position >= end) break;
+    if (source[position] != '{') {
+      position++;
+      continue;
+    }
+    const uint32_t selectorEnd = position++;
+    const uint32_t declarationsStart = position;
+    while (position < end) {
+      if (position + 1 < end && source[position] == '/' && source[position + 1] == '*') {
+        position += 2;
+        while (position + 1 < end && !(source[position] == '*' && source[position + 1] == '/')) position++;
+        position = position + 1 < end ? position + 2 : end;
+        continue;
+      }
+      if (source[position] == '}') break;
+      position++;
+    }
+    if (position >= end) break;
+    const uint32_t declarationsEnd = position++;
+    String selectors;
+    String declarations;
+    if (!cssSlice(source, selectorStart, selectorEnd, MaxCssSelectorLength, selectors) ||
+        !cssSlice(source, declarationsStart, declarationsEnd, MaxCssDeclarationLength, declarations)) continue;
+    StyleOverride style = {};
+    if (!parseCssDeclarations(declarations, style)) continue;
+    const uint16_t sourceOrder = _cssSourceOrder++;
+    int selectorStartIndex = 0;
+    while (selectorStartIndex < (int)selectors.length() && _cssRuleCount < MaxCssRules) {
+      int selectorEndIndex = selectors.indexOf(',', selectorStartIndex);
+      String selector = trimCopy(selectors.substring(selectorStartIndex,
+        selectorEndIndex < 0 ? selectors.length() : selectorEndIndex));
+      addCssRule(selector, style, sourceOrder);
+      if (selectorEndIndex < 0) break;
+      selectorStartIndex = selectorEndIndex + 1;
+    }
+  }
+}
+
+bool BrowserScreen::addCssRule(const String &rawSelector, const StyleOverride &style, uint16_t sourceOrder) {
+  if (_cssRuleCount >= MaxCssRules) return false;
+  String selector = trimCopy(rawSelector);
+  if (!selector.length()) return false;
+  uint8_t selectorType = 0;
+  uint8_t specificity = 1;
+  if (selector[0] == '.') {
+    selectorType = 1;
+    specificity = 10;
+    selector.remove(0, 1);
+  } else if (selector[0] == '#') {
+    selectorType = 2;
+    specificity = 100;
+    selector.remove(0, 1);
+  } else {
+    selector = lower(selector);
+  }
+  if (!selector.length() || selector.length() > MaxCssSelectorLength) return false;
+  for (uint16_t index = 0; index < selector.length(); index++) {
+    char value = selector[index];
+    if (!isalnum((unsigned char)value) && value != '-' && value != '_') return false;
+  }
+  _cssRules[_cssRuleCount] = {selector, style, sourceOrder, specificity, selectorType};
+  _cssRuleCount++;
+  return true;
+}
+
+bool BrowserScreen::parseCssDeclarations(const String &declarations, StyleOverride &style) const {
+  bool found = false;
+  int start = 0;
+  while (start < (int)declarations.length()) {
+    int end = declarations.indexOf(';', start);
+    String declaration = trimCopy(declarations.substring(start, end < 0 ? declarations.length() : end));
+    int colon = declaration.indexOf(':');
+    if (colon > 0) {
+      String property = lower(trimCopy(declaration.substring(0, colon)));
+      String value = lower(trimCopy(declaration.substring(colon + 1)));
+      value.replace("!important", "");
+      value.trim();
+      if (property == "color") {
+        uint16_t color;
+        if (parseCssColor(value, color)) {
+          style.hasColor = true;
+          style.color = color;
+          found = true;
+        }
+      } else if (property == "background" || property == "background-color") {
+        uint16_t color;
+        bool enabled;
+        if (parseBackground(value, color, enabled)) {
+          style.hasBackground = true;
+          style.backgroundColor = color;
+          style.backgroundEnabled = enabled;
+          found = true;
+        }
+      } else if (property == "font-weight") {
+        bool digits = value.length() > 0;
+        for (uint16_t index = 0; index < value.length(); index++) {
+          if (!isdigit((unsigned char)value[index])) digits = false;
+        }
+        if (value == "normal" || value.indexOf("bold") >= 0 || digits) {
+          style.hasBold = true;
+          style.bold = value.indexOf("bold") >= 0 || (digits && value.toInt() >= 600);
+          found = true;
+        }
+      } else if (property == "font-style") {
+        if (value == "normal" || value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0) {
+          style.hasItalic = true;
+          style.italic = value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0;
+          found = true;
+        }
+      } else if (property == "text-decoration") {
+        if (value.length()) {
+          style.hasUnderline = true;
+          style.underline = value.indexOf("underline") >= 0;
+          found = true;
+        }
+      } else if (property == "display" && value == "block") {
+        style.hasFullWidthImage = true;
+        style.fullWidthImage = true;
+        found = true;
+      } else if (property == "width" && value == "100%") {
+        style.hasFullWidthImage = true;
+        style.fullWidthImage = true;
+        found = true;
+      }
+    }
+    if (end < 0) break;
+    start = end + 1;
+  }
+  return found;
+}
+
+bool BrowserScreen::parseBackground(const String &rawValue, uint16_t &color, bool &enabled) const {
+  String value = lower(trimCopy(rawValue));
+  value.replace("!important", "");
+  value.trim();
+  if (value == "transparent") {
+    enabled = false;
+    return true;
+  }
+  if (parseCssColor(value, color)) {
+    enabled = true;
+    return true;
+  }
+  int start = 0;
+  while (start < (int)value.length()) {
+    while (start < (int)value.length() && isspace((unsigned char)value[start])) start++;
+    int end = start;
+    while (end < (int)value.length() && !isspace((unsigned char)value[end])) end++;
+    if (parseCssColor(value.substring(start, end), color)) {
+      enabled = true;
+      return true;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+
+bool BrowserScreen::matchesCssRule(const CssRule &rule, const String &tag, const String &attributes) const {
+  if (rule.selectorType == 0) return rule.selector == tag;
+  String value = attributeValue(attributes, rule.selectorType == 1 ? "class" : "id");
+  if (rule.selectorType == 2) return value == rule.selector;
+  int start = 0;
+  while (start < (int)value.length()) {
+    while (start < (int)value.length() && isspace((unsigned char)value[start])) start++;
+    int end = start;
+    while (end < (int)value.length() && !isspace((unsigned char)value[end])) end++;
+    if (value.substring(start, end) == rule.selector) return true;
+    start = end + 1;
+  }
+  return false;
+}
+
+void BrowserScreen::applyStyleOverride(TextStyle &style, const StyleOverride &override, bool imageTag) const {
+  if (override.hasColor) style.color = override.color;
+  if (override.hasBackground) {
+    style.hasBackground = override.backgroundEnabled;
+    if (override.backgroundEnabled) style.backgroundColor = override.backgroundColor;
+  }
+  if (override.hasBold) style.bold = override.bold;
+  if (override.hasItalic) style.italic = override.italic;
+  if (override.hasUnderline) style.underline = override.underline;
+  if (imageTag && override.hasFullWidthImage) style.fullWidthImage = override.fullWidthImage;
+}
+
+void BrowserScreen::applyCssRules(TextStyle &style, const String &tag, const String &attributes) const {
+  StyleOverride resolved = {};
+  int16_t colorSpecificity = -1, backgroundSpecificity = -1, boldSpecificity = -1;
+  int16_t italicSpecificity = -1, underlineSpecificity = -1, imageSpecificity = -1;
+  uint16_t colorOrder = 0, backgroundOrder = 0, boldOrder = 0;
+  uint16_t italicOrder = 0, underlineOrder = 0, imageOrder = 0;
+  for (uint8_t index = 0; index < _cssRuleCount; index++) {
+    const CssRule &rule = _cssRules[index];
+    if (!matchesCssRule(rule, tag, attributes)) continue;
+    const StyleOverride &candidate = rule.style;
+    if (candidate.hasColor && (rule.specificity > colorSpecificity ||
+        (rule.specificity == colorSpecificity && rule.sourceOrder >= colorOrder))) {
+      resolved.hasColor = true; resolved.color = candidate.color;
+      colorSpecificity = rule.specificity; colorOrder = rule.sourceOrder;
+    }
+    if (candidate.hasBackground && (rule.specificity > backgroundSpecificity ||
+        (rule.specificity == backgroundSpecificity && rule.sourceOrder >= backgroundOrder))) {
+      resolved.hasBackground = true; resolved.backgroundEnabled = candidate.backgroundEnabled;
+      resolved.backgroundColor = candidate.backgroundColor;
+      backgroundSpecificity = rule.specificity; backgroundOrder = rule.sourceOrder;
+    }
+    if (candidate.hasBold && (rule.specificity > boldSpecificity ||
+        (rule.specificity == boldSpecificity && rule.sourceOrder >= boldOrder))) {
+      resolved.hasBold = true; resolved.bold = candidate.bold;
+      boldSpecificity = rule.specificity; boldOrder = rule.sourceOrder;
+    }
+    if (candidate.hasItalic && (rule.specificity > italicSpecificity ||
+        (rule.specificity == italicSpecificity && rule.sourceOrder >= italicOrder))) {
+      resolved.hasItalic = true; resolved.italic = candidate.italic;
+      italicSpecificity = rule.specificity; italicOrder = rule.sourceOrder;
+    }
+    if (candidate.hasUnderline && (rule.specificity > underlineSpecificity ||
+        (rule.specificity == underlineSpecificity && rule.sourceOrder >= underlineOrder))) {
+      resolved.hasUnderline = true; resolved.underline = candidate.underline;
+      underlineSpecificity = rule.specificity; underlineOrder = rule.sourceOrder;
+    }
+    if (candidate.hasFullWidthImage && (rule.specificity > imageSpecificity ||
+        (rule.specificity == imageSpecificity && rule.sourceOrder >= imageOrder))) {
+      resolved.hasFullWidthImage = true; resolved.fullWidthImage = candidate.fullWidthImage;
+      imageSpecificity = rule.specificity; imageOrder = rule.sourceOrder;
+    }
+  }
+  applyStyleOverride(style, resolved, tag == "img");
 }
 
 uint8_t BrowserScreen::registerLink(const String &url) {
@@ -2276,37 +2595,11 @@ bool BrowserScreen::parseCssColor(const String &rawValue, uint16_t &color) const
 }
 
 void BrowserScreen::applyBackground(TextStyle &style, const String &rawValue) const {
-  String value = lower(trimCopy(rawValue));
-  value.replace("!important", "");
-  value.trim();
-  if (value == "transparent") {
-    style.hasBackground = false;
-    return;
-  }
-
   uint16_t color = TFT_BLACK;
-  if (parseCssColor(value, color)) {
-    style.backgroundColor = color;
-    style.hasBackground = true;
-    return;
-  }
-
-  // `background` often contains layout keywords alongside the color. Look
-  // through its tokens, while preserving the more precise background-color
-  // behaviour for a single color value.
-  int start = 0;
-  while (start < (int)value.length()) {
-    while (start < (int)value.length() && isspace((unsigned char)value[start])) start++;
-    int end = start;
-    while (end < (int)value.length() && !isspace((unsigned char)value[end])) end++;
-    color = TFT_BLACK;
-    if (parseCssColor(value.substring(start, end), color)) {
-      style.backgroundColor = color;
-      style.hasBackground = true;
-      return;
-    }
-    start = end + 1;
-  }
+  bool enabled = false;
+  if (!parseBackground(rawValue, color, enabled)) return;
+  style.hasBackground = enabled;
+  if (enabled) style.backgroundColor = color;
 }
 
 int BrowserScreen::findTagEnd(const String &html, int start) const {
@@ -2337,7 +2630,7 @@ void BrowserScreen::popStyle(const String &tag) {
     if (_styleStack[index].tag != tag) continue;
     _styleDepth = index;
     _currentStyle = index > 0 ? _styleStack[index - 1].style :
-      TextStyle{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
+      TextStyle{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
     return;
   }
 }
@@ -2435,7 +2728,7 @@ String BrowserScreen::shortText(const String &value, int16_t maxWidth) const {
 }
 
 String BrowserScreen::shortImageLabel(const String &value, int16_t maxWidth) const {
-  TextStyle style{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
+  TextStyle style{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
   if (textWidth(value, style) <= maxWidth) return value;
   String result = value;
   while (result.length() > 3 && textWidth(result + "...", style) > maxWidth) {
@@ -2457,29 +2750,8 @@ bool BrowserScreen::isBlockTag(const String &tag) const {
          tag == "table" || tag == "tr" || tag == "td" || tag == "th" || tag == "blockquote" || tag == "hr";
 }
 
-bool BrowserScreen::isFullWidthImage(const String &attributes) const {
-  String width = lower(trimCopy(attributeValue(attributes, "width")));
-  if (width == "100%") return true;
-  String inlineStyle = attributeValue(attributes, "style");
-  int start = 0;
-  while (start < (int)inlineStyle.length()) {
-    int end = inlineStyle.indexOf(';', start);
-    String declaration = trimCopy(inlineStyle.substring(start, end < 0 ? inlineStyle.length() : end));
-    int colon = declaration.indexOf(':');
-    if (colon > 0) {
-      String property = lower(trimCopy(declaration.substring(0, colon)));
-      String value = lower(trimCopy(declaration.substring(colon + 1)));
-      if ((property == "width" && value == "100%") ||
-          (property == "display" && (value == "block" || value.startsWith("block ")))) return true;
-    }
-    if (end < 0) break;
-    start = end + 1;
-  }
-  return false;
-}
-
 int16_t BrowserScreen::imageWidth(const String &label) const {
-  TextStyle style{DefaultTextColor, TFT_BLACK, false, TFT_BLACK, false, false, false, false, false, 0};
+  TextStyle style{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
   return 26 + textWidth(label, style);
 }
 

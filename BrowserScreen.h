@@ -35,6 +35,9 @@ private:
   static const uint8_t MaxLinks = 64;
   static const uint8_t MaxHistory = 8;
   static const uint8_t MaxStyleDepth = 16;
+  static const uint8_t MaxCssRules = 32;
+  static const uint8_t MaxCssSelectorLength = 48;
+  static const uint16_t MaxCssDeclarationLength = 256;
   static const uint8_t MaxPages = 32;
   // A thumbnail is kept only while there is enough memory for it. The row
   // limit still bounds metadata and placeholders for pathological pages.
@@ -96,6 +99,31 @@ private:
     bool underline;
     bool link;
     uint8_t linkIndex;
+    bool fullWidthImage;
+  };
+
+  struct StyleOverride {
+    bool hasColor;
+    uint16_t color;
+    bool hasBackground;
+    bool backgroundEnabled;
+    uint16_t backgroundColor;
+    bool hasBold;
+    bool bold;
+    bool hasItalic;
+    bool italic;
+    bool hasUnderline;
+    bool underline;
+    bool hasFullWidthImage;
+    bool fullWidthImage;
+  };
+
+  struct CssRule {
+    String selector;
+    StyleOverride style;
+    uint16_t sourceOrder;
+    uint8_t specificity;
+    uint8_t selectorType;
   };
 
   struct VisualRun {
@@ -123,6 +151,7 @@ private:
     uint16_t *pixels;
     uint8_t width;
     uint8_t height;
+    uint16_t backgroundColor;
     String url;
     uint32_t generation;
     uint8_t state;
@@ -131,6 +160,7 @@ private:
   struct ImageJob {
     uint16_t imageIndex;
     uint32_t generation;
+    uint16_t backgroundColor;
     char url[ImageUrlMaxLength];
   };
 
@@ -186,6 +216,9 @@ private:
   TextStyle _currentStyle;
   StyleFrame _styleStack[MaxStyleDepth];
   uint8_t _styleDepth;
+  CssRule _cssRules[MaxCssRules];
+  uint8_t _cssRuleCount;
+  uint16_t _cssSourceOrder;
   bool _pendingSpace;
   uint16_t _renderedCharacters;
   Rect _closeBounds;
@@ -247,12 +280,13 @@ private:
   void beginTextRow();
   int16_t rowHeight(const VisualRow &row) const;
   void drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) const;
-  int16_t fetchEmbeddedImage(const String &source);
+  int16_t fetchEmbeddedImage(const String &source, uint16_t backgroundColor);
   void releaseEmbeddedImages();
   void updateImageLayout();
   void pumpImageJobs();
   void collectImageResults();
-  bool fetchEmbeddedImageOnWorker(const String &url, uint16_t *&pixels, uint8_t &width, uint8_t &height);
+  bool fetchEmbeddedImageOnWorker(const String &url, uint16_t backgroundColor,
+                                  uint16_t *&pixels, uint8_t &width, uint8_t &height);
   static void imageWorkerTask(void *context);
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
@@ -261,6 +295,16 @@ private:
   void applyFont(const TextStyle &style) const;
   bool stylesEqual(const TextStyle &left, const TextStyle &right) const;
   TextStyle styledForTag(const String &tag, const String &attributes);
+  void collectCssRules(const String &html);
+  void parseCssRules(const String &source, uint32_t start, uint32_t end);
+  bool cssSlice(const String &source, uint32_t start, uint32_t end, uint16_t limit, String &result) const;
+  void skipCssSpaceAndComments(const String &source, uint32_t &position, uint32_t end) const;
+  bool addCssRule(const String &selector, const StyleOverride &style, uint16_t sourceOrder);
+  bool parseCssDeclarations(const String &declarations, StyleOverride &style) const;
+  bool parseBackground(const String &value, uint16_t &color, bool &enabled) const;
+  bool matchesCssRule(const CssRule &rule, const String &tag, const String &attributes) const;
+  void applyCssRules(TextStyle &style, const String &tag, const String &attributes) const;
+  void applyStyleOverride(TextStyle &style, const StyleOverride &override, bool imageTag) const;
   uint8_t registerLink(const String &url);
   String attributeValue(const String &attributes, const char *name) const;
   uint16_t parseColor(const String &value, uint16_t fallback) const;
@@ -275,7 +319,6 @@ private:
   String shortImageLabel(const String &value, int16_t maxWidth) const;
   String lower(const String &value) const;
   bool isBlockTag(const String &tag) const;
-  bool isFullWidthImage(const String &attributes) const;
   int16_t imageWidth(const String &label) const;
   void addHistory(const String &url);
   void addRecent(const String &url, const String &title);
