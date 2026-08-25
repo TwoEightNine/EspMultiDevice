@@ -655,7 +655,7 @@ bool AudioPlayerScreen::startPlayback() {
     draw();
     return false;
   }
-  if (!_speaker.isReady() && !_speaker.begin()) {
+  if (!_speaker.start(_sampleRate)) {
     _error = _speaker.lastError();
     _state = State::Error;
     stopSpeaker();
@@ -663,15 +663,6 @@ bool AudioPlayerScreen::startPlayback() {
     draw();
     return false;
   }
-  if (!_speaker.setSampleRate(_sampleRate)) {
-    _error = _speaker.lastError();
-    _state = State::Error;
-    stopSpeaker();
-    if (_file) _file.close();
-    draw();
-    return false;
-  }
-  _speaker.unmute();
   _state = State::Playing;
   drawPlayButton();
   return true;
@@ -693,7 +684,6 @@ void AudioPlayerScreen::finishPlayback() {
 
 void AudioPlayerScreen::stopSpeaker() {
   _speaker.stop();
-  _speaker.mute();
 }
 
 void AudioPlayerScreen::streamChunk() {

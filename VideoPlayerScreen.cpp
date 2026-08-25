@@ -631,12 +631,11 @@ bool VideoPlayerScreen::loadPlaybackFrame(uint32_t frame) {
 bool VideoPlayerScreen::startPlayback() {
   if (!_cacheRead || _state == State::Error || !_sdMounted) return false;
   if (_state == State::Paused) {
-    if ((_aac || _mp3) && !_speaker.isReady()) {
-      if (!_speaker.begin() || (_audioSampleRate && !_speaker.setSampleRate(_audioSampleRate))) {
+    if (_aac || _mp3) {
+      if (!_speaker.start(_audioSampleRate)) {
         _audioStatus = F("Speaker unavailable");
       }
     }
-    if (_speaker.isReady()) _speaker.unmute();
     _playStartedAt = millis() - _pauseElapsedMs;
     _nextFrameAt = _pauseElapsedMs + _pauseFrameRemainingMs;
     if (_audioTailStartedAt) _audioTailStartedAt = millis();
@@ -668,9 +667,7 @@ bool VideoPlayerScreen::startPlayback() {
     if (_mp3) mp3dec_init((mp3dec_t *)_mp3);
   }
   if ((_audioCodec == AudioCodec::Aac && _aac) || (_audioCodec == AudioCodec::Mp3 && _mp3)) {
-    if (!_speaker.isReady() && !_speaker.begin()) _audioStatus = F("Speaker unavailable");
-    else if (_audioSampleRate && !_speaker.setSampleRate(_audioSampleRate)) _audioStatus = F("Speaker unavailable");
-    else _speaker.unmute();
+    if (!_speaker.start(_audioSampleRate)) _audioStatus = F("Speaker unavailable");
   }
   _playStartedAt = millis();
   _nextFrameAt = _playDelay;
@@ -851,7 +848,6 @@ void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
 
 void VideoPlayerScreen::stopSpeaker() {
   _speaker.stop();
-  _speaker.mute();
 }
 
 String VideoPlayerScreen::displayName(const String &path) const {

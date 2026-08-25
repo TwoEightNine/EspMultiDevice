@@ -56,6 +56,25 @@ bool SpeakerController::begin() {
   return _ready;
 }
 
+bool SpeakerController::start(uint32_t sampleRate) {
+  // Keep the amplifier disabled until I2S is outputting a stable stream of
+  // silence. This avoids exposing I2S startup transients at the speaker.
+  mute();
+
+  if (!begin()) {
+    return false;
+  }
+  if (sampleRate && !setSampleRate(sampleRate)) {
+    stop();
+    return false;
+  }
+
+  i2s_zero_dma_buffer(_port);
+  delay(StartupSilenceMs);
+  unmute();
+  return true;
+}
+
 bool SpeakerController::isReady() const {
   return _ready;
 }
@@ -159,11 +178,13 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
 }
 
 void SpeakerController::stop() {
+  // Disable the amplifier before changing the I2S peripheral or pins.
+  mute();
+
   if (!_ready) {
     return;
   }
 
-  mute();
   i2s_driver_uninstall(_port);
   _ready = false;
   pinMode(_bclkPin, INPUT);

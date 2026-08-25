@@ -306,7 +306,6 @@ void VoiceRecorderScreen::setStatus(const String &status) {
 void VoiceRecorderScreen::startRecording() {
   refreshStorageState();
   _speaker.stop();
-  _speaker.mute();
 
   if (!_sdMounted) {
     setStatus(F("Insert SD card before recording"));
@@ -407,22 +406,11 @@ void VoiceRecorderScreen::startPlayback() {
     return;
   }
 
-  if (!_speaker.isReady() && !_speaker.begin()) {
+  if (!_speaker.start(sampleRate)) {
     _playbackFile.close();
     setStatus(_speaker.lastError());
     return;
   }
-
-  if (!_speaker.setSampleRate(sampleRate)) {
-    _playbackFile.close();
-    setStatus(_speaker.lastError());
-    return;
-  }
-
-  int16_t silence[AudioBufferSamples];
-  memset(silence, 0, sizeof(silence));
-  _speaker.writePcm16(silence, AudioBufferSamples, 20);
-  _speaker.unmute();
 
   _state = State::Playing;
   _playStartedMs = millis();

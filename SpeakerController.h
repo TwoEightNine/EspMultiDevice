@@ -16,6 +16,8 @@ public:
 
   void beginControl();
   bool begin();
+  // A zero sample rate retains the currently configured I2S rate.
+  bool start(uint32_t sampleRate);
   bool isReady() const;
   void mute();
   void unmute();
@@ -41,6 +43,7 @@ private:
   String _lastError;
 
   static const size_t VolumeBufferSamples = 256;
+  static const uint32_t StartupSilenceMs = 10;
   int16_t _volumeBuffer[VolumeBufferSamples];
 
   bool configureI2s();

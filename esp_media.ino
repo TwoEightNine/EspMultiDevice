@@ -177,7 +177,8 @@ void setup() {
     SPEAKER_DATA_PIN,
     SPEAKER_ENABLE_PIN
   );
-  Serial.println(F("MAX98357A speaker configured for lazy startup."));
+  speaker->beginControl();
+  Serial.println(F("MAX98357A speaker muted; I2S configured on playback."));
 
   audioSettings = new AudioSettings(*speaker);
   audioSettings->begin();
