@@ -71,6 +71,10 @@ extern "C" {
 #define MP4_OBJECT_TYPE_AVC                                    0x21
 // H.265 (HEVC) video
 #define MP4_OBJECT_TYPE_HEVC                                   0x23
+// H.263 tracks in 3GPP files use an `s263` sample entry rather than an
+// MPEG-4 ObjectDescriptor. Keep an internal value outside the 8-bit object
+// type range so users of the demuxer can dispatch the stream explicitly.
+#define MP4_OBJECT_TYPE_H263                                   0x100
 // http://www.mp4ra.org/object.html 0xC0-E0  && 0xE2 - 0xFE are specified as "user private"
 #define MP4_OBJECT_TYPE_USER_PRIVATE                           0xC0
 
@@ -180,6 +184,10 @@ typedef struct
 
     // DSI data size
     unsigned dsi_bytes;
+
+    // FourCC of the selected media sample entry (for example mp4a, samr, or
+    // s263). It lets applications report entries with no ObjectDescriptor.
+    unsigned sample_entry;
 
     // MP4 object type code
     // case 0x00: return "Forbidden";
@@ -2705,6 +2713,7 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
 #if MP4D_AVC_SUPPORTED
             {BOX_mp4v, BOX_ATOM},
             {BOX_avc1, BOX_ATOM},
+            {BOX_s263, BOX_ATOM},
             //{BOX_avc2, BOX_ATOM},
             //{BOX_svc1, BOX_ATOM},
 #endif
@@ -3161,6 +3170,7 @@ broken_android_meta_hack:
             {
                 ERROR("broken file structure!");
             }
+            tr->sample_entry = box_name;
 #if MP4D_INFO_SUPPORTED
             SKIP(6*1+2/*Base SampleEntry*/  + 4*2);
             tr->SampleDescription.audio.channelcount = READ(2);
@@ -3176,10 +3186,16 @@ broken_android_meta_hack:
 //         case BOX_avc2:   - no test
 //         case BOX_svc1:   - no test
         case BOX_mp4v:
+        case BOX_s263:  // H263SampleEntry also extends VisualSampleEntry
             if (!tr)
             {
                 ERROR("broken file structure!");
             }
+            if (box_name == BOX_s263)
+            {
+                tr->object_type_indication = MP4_OBJECT_TYPE_H263;
+            }
+            tr->sample_entry = box_name;
 #if MP4D_INFO_SUPPORTED
             SKIP(6*1 + 2/*Base SampleEntry*/ + 2 + 2 + 4*3);
             tr->SampleDescription.video.width  = READ(2);
@@ -3197,6 +3213,38 @@ broken_android_meta_hack:
             //      BOX_m4ds (optional)
             // for BOX_mp4v:
             //      BOX_esds
+            // for BOX_s263:
+            //      BOX_d263
+            break;
+
+        case BOX_samr:
+        case BOX_sawb:
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+            tr->sample_entry = box_name;
+            break;
+
+        case BOX_d263:  // H263ConfigAtomType
+            if (!tr)
+            {
+                ERROR("broken file structure!");
+            }
+            tr->object_type_indication = MP4_OBJECT_TYPE_H263;
+            if (!tr->dsi && payload_bytes)
+            {
+                tr->dsi = (unsigned char*)minimp4_bounded_malloc((size_t)payload_bytes);
+                if (!tr->dsi)
+                {
+                    ERROR("out of memory");
+                }
+                tr->dsi_bytes = (unsigned)payload_bytes;
+                for (i = 0; i < payload_bytes; i++)
+                {
+                    tr->dsi[i] = READ(1);
+                }
+            }
             break;
 
         case BOX_avcC:  // AVCDecoderConfigurationRecord()

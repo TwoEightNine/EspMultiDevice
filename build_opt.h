@@ -1,7 +1,9 @@
 -DPNG_MAX_BUFFERED_PIXELS=32770
+-DHAVE_AV_CONFIG_H
 -I{build.source.path}/third_party/libhelix
 -I{build.source.path}/third_party/libhelix/libhelix-aac
 -I{build.source.path}/third_party/lib264/common
 -I{build.source.path}/third_party/lib264/decoder
 -I{build.source.path}/third_party/lib264/decoder/api
 -I{build.source.path}/third_party/lib264/libthread/include
+-I{build.source.path}/third_party/ffmpeg

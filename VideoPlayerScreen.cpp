@@ -54,10 +54,22 @@ const __FlashStringHelper *avcProfileName(unsigned profile) {
 }
 
 String objectTypeLabel(unsigned objectType) {
+  if (!objectType) return F("unknown video sample entry");
+  if (objectType == MP4_OBJECT_TYPE_H263) return F("H.263");
   if (objectType == MP4_OBJECT_TYPE_HEVC) return F("HEVC/H.265");
   if (objectType == 0x20) return F("MPEG-4 Part 2");
   if (objectType == 0x6a) return F("MPEG-1 video");
   return String(F("object 0x")) + String(objectType, HEX);
+}
+
+String sampleEntryLabel(unsigned sampleEntry) {
+  if (!sampleEntry) return F("unknown entry");
+  String label;
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    char value = (char)((sampleEntry >> shift) & 0xff);
+    label += value >= 0x20 && value <= 0x7e ? value : '?';
+  }
+  return label;
 }
 
 int comparePresentationPoints(const void *left, const void *right) {
@@ -71,7 +83,7 @@ VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touc
                                      DisplayController &display, SdCardController &sdCard,
                                      SpeakerController &speaker)
   : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _demux(nullptr),
-    _state(State::Ready), _audioCodec(AudioCodec::None), _sdMounted(false),
+    _state(State::Ready), _audioCodec(AudioCodec::None), _videoCodec(VideoCodec::None), _sdMounted(false),
     _lastTouchDown(false), _sourceSize(0), _sourceWriteTime(0), _sourceWidth(0),
     _sourceHeight(0), _drawWidth(0), _drawHeight(0), _drawLeft(0), _drawTop(0),
     _videoTrack(0), _audioTrack(0), _videoSamples(0), _audioSamples(0), _videoSample(0),
@@ -140,7 +152,8 @@ void VideoPlayerScreen::tick(uint32_t nowMs) {
   if (_state == State::Building) {
     if (!buildStep()) {
       if (_state != State::Error) {
-        fail(_h264.lastError().length() ? _h264.lastError() : String(F("Video conversion failed")));
+        const String &decoderError = _videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError();
+        fail(decoderError.length() ? decoderError : String(F("Video conversion failed")));
       }
       draw();
     }
@@ -152,6 +165,7 @@ void VideoPlayerScreen::tick(uint32_t nowMs) {
 void VideoPlayerScreen::reset() {
   stopSpeaker();
   _h264.end();
+  _legacy.end();
   releasePresentationTimeline();
   releaseAudioDecoder();
   releaseDemux();
@@ -171,9 +185,10 @@ void VideoPlayerScreen::reset() {
   _pendingFrame = _playFrameBuffer = nullptr;
   _audioScratch = nullptr;
   _sampleBufferBytes = _annexBufferBytes = 0;
-  _path = _fileName = _cachePath = _cacheTempPath = _error = _audioStatus = "";
+  _path = _fileName = _cachePath = _cacheTempPath = _error = _audioStatus = _audioDiagnostic = "";
   _state = State::Ready;
   _audioCodec = AudioCodec::None;
+  _videoCodec = VideoCodec::None;
   _sourceSize = _sourceWriteTime = 0;
   _sourceWidth = _sourceHeight = _drawWidth = _drawHeight = 0;
   _drawLeft = _drawTop = 0;
@@ -220,17 +235,29 @@ bool VideoPlayerScreen::inspectSource() {
   for (unsigned index = 0; index < _demux->track_count; index++) {
     const MP4D_track_t &track = _demux->track[index];
     if (!videoFound && track.handler_type == MP4D_HANDLER_TYPE_VIDE) {
-      if (track.object_type_indication != MP4_OBJECT_TYPE_AVC) {
+      VideoCodec codec = VideoCodec::None;
+      if (track.object_type_indication == MP4_OBJECT_TYPE_AVC) {
+        codec = VideoCodec::H264;
+      } else if (track.object_type_indication == MP4_OBJECT_TYPE_H263) {
+        codec = VideoCodec::H263;
+      } else if (track.object_type_indication == 0x20) {
+        codec = VideoCodec::Mpeg4Part2;
+      } else {
         unsupportedVideo = objectTypeLabel(track.object_type_indication);
         continue;
       }
-      if (!track.dsi_bytes || track.avc_nal_length_size < 1 || track.avc_nal_length_size > 4) {
-        return fail(F("Invalid H.264 config\nMissing AVC parameters"));
+      if (codec == VideoCodec::H264) {
+        if (!track.dsi_bytes || track.avc_nal_length_size < 1 || track.avc_nal_length_size > 4) {
+          return fail(F("Invalid H.264 config\nMissing AVC parameters"));
+        }
+        if (track.avc_profile != 66 && track.avc_profile != 77 && track.avc_profile != 100) {
+          return fail(String(F("H.264 ")) + avcProfileName(track.avc_profile) + F(" (") +
+                      String(track.avc_profile) + F(")\nNeed Baseline, Main, or High"));
+        }
+      } else if (codec == VideoCodec::H263 && (!track.dsi || track.dsi_bytes < 7)) {
+        return fail(F("Malformed H.263 config"));
       }
-      if (track.avc_profile != 66 && track.avc_profile != 77 && track.avc_profile != 100) {
-        return fail(String(F("H.264 ")) + avcProfileName(track.avc_profile) + F(" (") +
-                    String(track.avc_profile) + F(")\nNeed Baseline, Main, or High"));
-      }
+      _videoCodec = codec;
       _videoTrack = index;
       _videoSamples = track.sample_count;
       _videoTimeScale = track.timescale;
@@ -246,11 +273,17 @@ bool VideoPlayerScreen::inspectSource() {
       _audioChannels = (uint16_t)track.SampleDescription.audio.channelcount;
       if (track.object_type_indication == MP4_OBJECT_TYPE_AUDIO_ISO_IEC_14496_3 && parseAacConfig()) {
         _audioCodec = AudioCodec::Aac;
+        _audioDiagnostic = F("AAC-LC supported");
       } else if (track.object_type_indication == 0x6b) {
         _audioCodec = AudioCodec::Mp3;
+        _audioDiagnostic = F("MPEG Layer III supported");
       } else {
         _audioCodec = AudioCodec::Unsupported;
+        String header = String(F("Unsupported ")) + sampleEntryLabel(track.sample_entry) +
+                        F(" / ") + objectTypeLabel(track.object_type_indication);
+        _audioDiagnostic = _audioDiagnostic.length() ? header + F(": ") + _audioDiagnostic : header;
       }
+      logAudioTrack();
     }
   }
   if (!videoFound || !_sourceWidth || !_sourceHeight) {
@@ -265,21 +298,76 @@ bool VideoPlayerScreen::inspectSource() {
   _drawHeight = _sourceHeight;
   _drawLeft = (_display.width() - _drawWidth) / 2;
   _drawTop = UiKit::AppBarHeight + 4 + (MaxVideoHeight - _drawHeight) / 2;
-  if (_audioCodec == AudioCodec::Unsupported) _audioStatus = F("Audio codec unsupported");
+  if (_audioCodec == AudioCodec::Unsupported && _demux && _audioTrack < _demux->track_count) {
+    const MP4D_track_t &track = _demux->track[_audioTrack];
+    _audioStatus = String(F("Audio ")) + sampleEntryLabel(track.sample_entry) + F(" 0x") +
+                   String(track.object_type_indication, HEX) + F(" unsupported");
+  }
   return true;
 }
 
 bool VideoPlayerScreen::parseAacConfig() {
-  if (!_demux || _audioTrack >= _demux->track_count) return false;
+  if (!_demux || _audioTrack >= _demux->track_count) {
+    _audioDiagnostic = F("AAC track is unavailable");
+    return false;
+  }
   const MP4D_track_t &track = _demux->track[_audioTrack];
-  if (!track.dsi || track.dsi_bytes < 2) return false;
+  if (!track.dsi || track.dsi_bytes < 2) {
+    _audioDiagnostic = F("AAC AudioSpecificConfig is missing");
+    return false;
+  }
   uint8_t objectType = track.dsi[0] >> 3;
   uint8_t rateIndex = (uint8_t)(((track.dsi[0] & 0x07) << 1) | (track.dsi[1] >> 7));
   uint8_t channels = (track.dsi[1] >> 3) & 0x0f;
-  if (objectType != 2 || rateIndex >= sizeof(AacSampleRates) || channels == 0 || channels > 2) return false;
+  if (objectType != 2) {
+    _audioDiagnostic = String(F("AAC object type ")) + String(objectType) + F(" (need LC 2)");
+    return false;
+  }
+  if (rateIndex >= sizeof(AacSampleRates)) {
+    _audioDiagnostic = String(F("AAC sample-rate index ")) + String(rateIndex) + F(" unsupported");
+    return false;
+  }
+  if (channels == 0 || channels > 2) {
+    _audioDiagnostic = String(F("AAC channel config ")) + String(channels) + F(" unsupported");
+    return false;
+  }
   _audioSampleRate = AacSampleRates[rateIndex];
   _audioChannels = channels;
   return true;
+}
+
+void VideoPlayerScreen::logAudioTrack() const {
+  if (!_demux || _audioTrack >= _demux->track_count) return;
+  const MP4D_track_t &track = _demux->track[_audioTrack];
+  Serial.print(F("Video audio track: index="));
+  Serial.print(_audioTrack);
+  Serial.print(F(" entry="));
+  Serial.print(sampleEntryLabel(track.sample_entry));
+  Serial.print(F(" object=0x"));
+  Serial.print(track.object_type_indication, HEX);
+  Serial.print(F(" config="));
+  Serial.print(track.dsi_bytes);
+  Serial.print(F("B channels="));
+  Serial.print(_audioChannels);
+  Serial.print(F(" rate="));
+  Serial.print(_audioSampleRate ? _audioSampleRate : track.SampleDescription.audio.samplerate_hz);
+  Serial.print(F("Hz samples="));
+  Serial.print(_audioSamples);
+  Serial.print(F(" timescale="));
+  Serial.print(_audioTimeScale);
+  Serial.print(F(" result="));
+  Serial.println(_audioDiagnostic);
+  if (track.dsi && track.dsi_bytes) {
+    Serial.print(F("Video audio config:"));
+    unsigned bytes = track.dsi_bytes > 16 ? 16 : track.dsi_bytes;
+    for (unsigned index = 0; index < bytes; index++) {
+      Serial.print(' ');
+      if (track.dsi[index] < 16) Serial.print('0');
+      Serial.print(track.dsi[index], HEX);
+    }
+    if (bytes < track.dsi_bytes) Serial.print(F(" ..."));
+    Serial.println();
+  }
 }
 
 String VideoPlayerScreen::cachePathForSource() const {
@@ -353,7 +441,21 @@ bool VideoPlayerScreen::beginBuild() {
   }
   _pendingFrame = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
   if (!_pendingFrame) return fail(F("Video needs too much memory"));
-  if (!_h264.begin(_sourceWidth, _sourceHeight)) return fail(_h264.lastError());
+  if (_videoCodec == VideoCodec::H264) {
+    if (!_h264.begin(_sourceWidth, _sourceHeight)) return fail(_h264.lastError());
+  } else {
+    if (!_demux || _videoTrack >= _demux->track_count) return fail(F("Video track unavailable"));
+    const MP4D_track_t &track = _demux->track[_videoTrack];
+    VideoLegacy::Codec codec = _videoCodec == VideoCodec::H263 ? VideoLegacy::Codec::H263
+                                                                 : VideoLegacy::Codec::Mpeg4Part2;
+    // The MPEG-4 Part 2 decoder requires the esds configuration record. H.263
+    // samples carry their picture headers directly; d263 is descriptive only.
+    const uint8_t *configuration = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi : nullptr;
+    uint32_t configurationBytes = configuration ? track.dsi_bytes : 0;
+    if (!_legacy.begin(codec, _sourceWidth, _sourceHeight, configuration, configurationBytes)) {
+      return fail(_legacy.lastError());
+    }
+  }
   _state = State::Building;
   _videoSample = _buildFrames = _buildLastTimestamp = _buildLastDelay = 0;
   _presentationIndex = 0;
@@ -550,16 +652,21 @@ bool VideoPlayerScreen::buildStep() {
   if (_videoSample >= _videoSamples) {
     if (!_buildFlushed) {
       _buildFlushed = true;
-      if (!_h264.flush(decodedFrame, this)) return false;
+      if (_videoCodec == VideoCodec::H264 ? !_h264.flush(decodedFrame, this)
+                                          : !_legacy.flush(decodedFrame, this)) return false;
     }
-    if (_presentationIndex != _presentationCount) return fail(F("H.264 output is incomplete"));
+    if (_presentationIndex != _presentationCount) return fail(F("Video output is incomplete"));
     return finishBuild();
   }
   uint32_t bytes, timestamp, duration;
   if (!readSample(_videoTrack, _videoSample, bytes, timestamp, duration)) return false;
-  uint32_t annexBytes = 0;
-  if (!buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes) ||
-      !_h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this)) return false;
+  if (_videoCodec == VideoCodec::H264) {
+    uint32_t annexBytes = 0;
+    if (!buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes) ||
+        !_h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this)) return false;
+  } else if (!_legacy.decode(_sampleBuffer, bytes, _videoSample, decodedFrame, this)) {
+    return false;
+  }
   _videoSample++;
   if (_videoSamples) {
     _lastDrawMs = millis();
@@ -577,6 +684,7 @@ bool VideoPlayerScreen::finishBuild() {
   if (SD.exists(_cachePath.c_str())) SD.remove(_cachePath.c_str());
   if (!SD.rename(_cacheTempPath.c_str(), _cachePath.c_str())) return false;
   _h264.end();
+  _legacy.end();
   if (_source) _source.close();
   releaseDemux();
   _cacheRead = SD.open(_cachePath.c_str(), FILE_READ);
@@ -911,7 +1019,8 @@ void VideoPlayerScreen::drawStatus() {
   if (_state == State::Building) text = "Caching video " + String(_videoSample) + "/" + String(_videoSamples);
   else if (_audioStatus.length()) text = _audioStatus;
   else text = _fileName;
-  tft.drawString(text, _display.width() / 2, UiKit::AppBarHeight + 14, 2);
+  tft.drawString(UiKit::ellipsize(tft, text, _display.width() - 96, 2),
+                 _display.width() / 2, UiKit::AppBarHeight + 14, 2);
   tft.setTextDatum(TL_DATUM);
 }
 

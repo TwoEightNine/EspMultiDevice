@@ -7,6 +7,7 @@
 #include "SdCardController.h"
 #include "SpeakerController.h"
 #include "VideoH264.h"
+#include "VideoLegacy.h"
 
 struct MP4D_demux_tag;
 typedef struct MP4D_demux_tag MP4D_demux_t;
@@ -29,6 +30,7 @@ public:
 private:
   enum class State : uint8_t { Ready, Building, Playing, Paused, Finished, Error };
   enum class AudioCodec : uint8_t { None, Aac, Mp3, Unsupported };
+  enum class VideoCodec : uint8_t { None, H264, H263, Mpeg4Part2 };
 
   static const uint16_t MaxVideoWidth = 320;
   static const uint16_t MaxVideoHeight = 240;
@@ -43,14 +45,17 @@ private:
   fs::File _cacheRead;
   MP4D_demux_t *_demux;
   VideoH264 _h264;
+  VideoLegacy _legacy;
   String _path;
   String _fileName;
   String _cachePath;
   String _cacheTempPath;
   String _error;
   String _audioStatus;
+  String _audioDiagnostic;
   State _state;
   AudioCodec _audioCodec;
+  VideoCodec _videoCodec;
   bool _sdMounted;
   bool _lastTouchDown;
   uint32_t _sourceSize;
@@ -132,6 +137,7 @@ private:
   bool writeFrameRgb444(const uint16_t *pixels, uint32_t delayMs);
   bool readCacheHeader(uint32_t &frames, uint32_t &duration);
   bool parseAacConfig();
+  void logAudioTrack() const;
   uint32_t timestampMs(uint32_t timestamp, uint32_t timeScale) const;
   uint32_t presentationTimestampMs(int64_t timestamp, uint32_t timeScale) const;
   uint32_t playbackElapsedMs(uint32_t nowMs) const;
