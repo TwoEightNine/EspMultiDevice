@@ -36,7 +36,8 @@ inline void writeLe32(uint8_t *bytes, uint32_t value) {
   bytes[3] = (uint8_t)(value >> 24);
 }
 
-inline bool writeHeader(fs::File &file, uint32_t sourceSize, uint32_t sourceWriteTime,
+template <typename FileType>
+inline bool writeHeader(FileType &file, uint32_t sourceSize, uint32_t sourceWriteTime,
                         uint32_t sourceWidth, uint32_t sourceHeight, uint32_t frameCount,
                         int32_t loopCount, uint16_t drawWidth, uint16_t drawHeight) {
   uint8_t header[HeaderBytes] = {};

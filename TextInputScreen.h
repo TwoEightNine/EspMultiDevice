@@ -54,6 +54,7 @@ private:
   String _text;
   String _title;
   bool _maskText;
+  bool _pinInput;
   uint32_t _cursor;
   bool _shift;
   bool _capsLock;

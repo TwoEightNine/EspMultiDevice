@@ -77,11 +77,14 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
                                      DisplayController &display,
                                      SdCardController &sdCard,
                                      SpeakerController &speaker,
-                                     AudioSettings &audioSettings)
+                                     AudioSettings &audioSettings,
+                                     SecretStorage &secretStorage)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _speaker(speaker),
     _audioSettings(audioSettings),
+    _secretStorage(secretStorage),
+    _secretAccess(false),
     _state(State::Ready),
     _format(SourceFormat::None),
     _sdMounted(false),
@@ -114,6 +117,7 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
   reset();
   _lastTouchDown = false;
   _volumePickerVisible = false;
+  _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _path = data.kind == ScreenDataKind::AudioPath ? data.text : "";
   _fileName = displayName(_path);
   _sdMounted = _sdCard.isMounted();
@@ -226,7 +230,7 @@ bool AudioPlayerScreen::loadSource(const String &path) {
   _framePosition = 0;
   _finishAtMs = 0;
   _format = formatForPath(path);
-  _file = SD.open(path.c_str(), FILE_READ);
+  _file = _secretStorage.open(path, FILE_READ, _secretAccess);
   if (!_file) return fail(F("Unable to open audio file"));
   _sourceFileSize = (uint32_t)_file.size();
   _sourceWriteTime = (uint32_t)_file.getLastWrite();
@@ -385,9 +389,9 @@ String AudioPlayerScreen::mp3CachePath() const {
 
 bool AudioPlayerScreen::loadMp3Cache() {
   String path = mp3CachePath();
-  if (!SD.exists(path)) return false;
+  if (!_secretStorage.exists(path)) return false;
 
-  fs::File cache = SD.open(path.c_str(), FILE_READ);
+  StorageFile cache = _secretStorage.open(path, FILE_READ, _secretAccess);
   uint8_t header[Mp3CacheHeaderBytes];
   bool readOk = cache && cache.size() == Mp3CacheHeaderBytes &&
     cache.read(header, sizeof(header)) == sizeof(header);
@@ -437,15 +441,15 @@ void AudioPlayerScreen::writeMp3Cache() {
   String path = mp3CachePath();
   int slash = path.lastIndexOf('/');
   String directory = slash <= 0 ? F("/") : path.substring(0, slash);
-  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+  if (!_secretStorage.mkdir(directory)) {
     Serial.print(F("MP3 cache directory failed: "));
     Serial.println(directory);
     return;
   }
 
   String tempPath = path + F(".tmp");
-  SD.remove(tempPath);
-  fs::File cache = SD.open(tempPath.c_str(), FILE_WRITE);
+  _secretStorage.remove(tempPath);
+  StorageFile cache = _secretStorage.open(tempPath, FILE_WRITE, _secretAccess);
   uint8_t header[Mp3CacheHeaderBytes] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = 'P'; header[3] = 'A';
   header[4] = 1;
@@ -459,8 +463,9 @@ void AudioPlayerScreen::writeMp3Cache() {
   writeLe16(header + 32, _channels);
   bool written = cache && cache.write(header, sizeof(header)) == sizeof(header);
   if (cache) cache.close();
-  if (!written || (SD.exists(path) && !SD.remove(path)) || !SD.rename(tempPath, path)) {
-    SD.remove(tempPath);
+  if (!written || (_secretStorage.exists(path) && !_secretStorage.remove(path)) ||
+      !_secretStorage.rename(tempPath, path)) {
+    _secretStorage.remove(tempPath);
     Serial.print(F("MP3 cache write failed: "));
     Serial.println(path);
     return;

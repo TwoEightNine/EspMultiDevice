@@ -27,6 +27,9 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _wifiConnected(false),
     _batteryPercent(BatteryStubPercent),
     _lastTouchDown(false),
+    _filesPressPending(false),
+    _filesHoldTriggered(false),
+    _filesPressedMs(0),
     _lastClockCheckMs(0xffffffffUL),
     _lastClockText("") {
   _apps[0] = { "Files", AppAction::Files, TFT_BLUE, nullptr, 0, 0, 0, 0 };
@@ -40,6 +43,8 @@ void HomeScreen::onEnter() {
   _wifiConnected = _wifi.isConnected();
   _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
+  _filesPressPending = false;
+  _filesHoldTriggered = false;
   draw();
   // Retain the existing storage diagnostic, but keep it out of the home UI.
   runSdSelfTest();
@@ -48,6 +53,8 @@ void HomeScreen::onEnter() {
 void HomeScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) {
     _lastTouchDown = false;
+    if (_filesPressPending && !_filesHoldTriggered) _navigator.push(ScreenId::Files);
+    _filesPressPending = false;
     return;
   }
 
@@ -64,7 +71,9 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
     }
 
     if (app.action == AppAction::Files) {
-      _navigator.push(ScreenId::Files);
+      _filesPressPending = true;
+      _filesHoldTriggered = false;
+      _filesPressedMs = millis();
     } else if (app.action == AppAction::Recorder) {
       _navigator.push(ScreenId::VoiceRecorder);
     } else if (app.action == AppAction::Settings) {
@@ -76,7 +85,24 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
   }
 }
 
+void HomeScreen::onResult(const ScreenResult &result) {
+  if (result.kind != ScreenResultKind::Text || result.text.length() != 4) return;
+  for (uint8_t i = 0; i < 4; i++) if (result.text[i] < '0' || result.text[i] > '9') return;
+  const uint16_t pin = (uint16_t)result.text.toInt();
+  _navigator.push(ScreenId::Files, ScreenData::secretFiles(pin));
+}
+
 void HomeScreen::tick(uint32_t nowMs) {
+  const TouchPoint heldPoint = _touch.point();
+  const AppTile &files = _apps[0];
+  const bool holdingFiles = heldPoint.touched && heldPoint.x >= files.x && heldPoint.x < files.x + files.w &&
+                            heldPoint.y >= files.y && heldPoint.y < files.y + files.h;
+  if (_filesPressPending && !_filesHoldTriggered && holdingFiles && nowMs - _filesPressedMs >= 1000) {
+    _filesHoldTriggered = true;
+    _filesPressPending = false;
+    _navigator.push(ScreenId::TextInput, ScreenData::pinInput("Secret PIN"));
+    return;
+  }
   if (_lastClockCheckMs == 0xffffffffUL || nowMs - _lastClockCheckMs >= 1000UL) {
     drawClock(false);
     _lastClockCheckMs = nowMs;

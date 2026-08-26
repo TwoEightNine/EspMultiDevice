@@ -6,6 +6,7 @@
 #include "Screen.h"
 #include "SdCardController.h"
 #include "SpeakerController.h"
+#include "SecretStorage.h"
 #include "VideoH264.h"
 #include "VideoLegacy.h"
 
@@ -19,7 +20,7 @@ struct VideoPresentationPoint {
 class VideoPlayerScreen : public Screen {
 public:
   VideoPlayerScreen(Navigator &navigator, TouchController &touch, DisplayController &display,
-                    SdCardController &sdCard, SpeakerController &speaker);
+                    SdCardController &sdCard, SpeakerController &speaker, SecretStorage &secretStorage);
   ~VideoPlayerScreen() override;
 
   void onEnter(const ScreenData &data) override;
@@ -40,9 +41,11 @@ private:
 
   SdCardController &_sdCard;
   SpeakerController &_speaker;
-  fs::File _source;
-  fs::File _cache;
-  fs::File _cacheRead;
+  SecretStorage &_secretStorage;
+  StorageFile _source;
+  StorageFile _cache;
+  StorageFile _cacheRead;
+  bool _secretAccess;
   MP4D_demux_t *_demux;
   VideoH264 _h264;
   VideoLegacy _legacy;

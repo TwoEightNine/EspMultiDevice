@@ -16,6 +16,7 @@
 #include "SdCardController.h"
 #include "SettingsScreen.h"
 #include "SpeakerController.h"
+#include "SecretStorage.h"
 #include "SpiBusLock.h"
 #include "TimeController.h"
 #include "TouchController.h"
@@ -61,6 +62,7 @@ SdCardController *sdCard = nullptr;
 TouchController *touch = nullptr;
 MicController *mic = nullptr;
 SpeakerController *speaker = nullptr;
+SecretStorage *secretStorage = nullptr;
 AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
@@ -211,6 +213,8 @@ void setup() {
   speaker->beginControl();
   Serial.println(F("MAX98357A speaker muted; I2S configured on playback."));
 
+  secretStorage = new SecretStorage();
+
   audioSettings = new AudioSettings(*speaker);
   audioSettings->begin();
   Serial.print(F("Audio volume: "));
@@ -228,13 +232,13 @@ void setup() {
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
-  filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard);
+  filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
-  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard);
-  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings);
-  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker);
+  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
+  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage);
+  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
@@ -293,6 +297,7 @@ void loop() {
   // use the SD controller (for example Settings or the browser) is active.
   if (sdCard) {
     sdCard->update();
+    if (!sdCard->isMounted() && secretStorage) secretStorage->lock();
   }
 
   if (wifiController) {

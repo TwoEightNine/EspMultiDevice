@@ -30,7 +30,7 @@ const uint32_t AacSampleRates[] = {
 };
 
 int readMp4(int64_t offset, void *buffer, size_t bytes, void *token) {
-  fs::File *file = static_cast<fs::File *>(token);
+  StorageFile *file = static_cast<StorageFile *>(token);
   if (!file || offset < 0 || offset > 0xffffffffLL || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return 1;
   bool ok = file->seek((uint32_t)offset) && file->read((uint8_t *)buffer, bytes) == bytes;
   SpiBusLock::unlock();
@@ -83,8 +83,9 @@ int comparePresentationPoints(const void *left, const void *right) {
 
 VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touch,
                                      DisplayController &display, SdCardController &sdCard,
-                                     SpeakerController &speaker)
-  : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _demux(nullptr),
+                                     SpeakerController &speaker, SecretStorage &secretStorage)
+  : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
+    _secretAccess(false), _demux(nullptr),
     _state(State::Ready), _audioCodec(AudioCodec::None), _videoCodec(VideoCodec::None), _sdMounted(false),
     _lastTouchDown(false), _sourceSize(0), _sourceWriteTime(0), _sourceWidth(0),
     _sourceHeight(0), _drawWidth(0), _drawHeight(0), _drawLeft(0), _drawTop(0),
@@ -108,6 +109,7 @@ VideoPlayerScreen::~VideoPlayerScreen() {
 void VideoPlayerScreen::onEnter(const ScreenData &data) {
   reset();
   _lastTouchDown = false;
+  _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _sdMounted = _sdCard.isMounted();
   if (data.kind != ScreenDataKind::VideoPath || data.text.length() == 0) {
     fail(F("No video selected"));
@@ -176,7 +178,7 @@ void VideoPlayerScreen::reset() {
   if (_cache) _cache.close();
   if (_cacheRead) _cacheRead.close();
   if (_state == State::Building && _cacheTempPath.length() && SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    SD.remove(_cacheTempPath.c_str());
+    _secretStorage.remove(_cacheTempPath);
     SpiBusLock::unlock();
   }
   if (_sampleBuffer) free(_sampleBuffer);
@@ -222,7 +224,7 @@ void VideoPlayerScreen::releaseAudioDecoder() {
 }
 
 bool VideoPlayerScreen::openSource() {
-  _source = SD.open(_path.c_str(), FILE_READ);
+  _source = _secretStorage.open(_path, FILE_READ, _secretAccess);
   if (!_source) return fail(F("Unable to open video"));
   _sourceSize = (uint32_t)_source.size();
   _sourceWriteTime = (uint32_t)_source.getLastWrite();
@@ -414,8 +416,8 @@ bool VideoPlayerScreen::readCacheHeader(uint32_t &frames, uint32_t &duration) {
 }
 
 bool VideoPlayerScreen::loadCache() {
-  if (!psramFound() || !SD.exists(_cachePath.c_str())) return false;
-  _cacheRead = SD.open(_cachePath.c_str(), FILE_READ);
+  if (!psramFound() || !_secretStorage.exists(_cachePath)) return false;
+  _cacheRead = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   uint32_t frames = 0, duration = 0;
   if (!_cacheRead || !readCacheHeader(frames, duration)) {
     if (_cacheRead) _cacheRead.close();
@@ -437,15 +439,15 @@ bool VideoPlayerScreen::beginBuild() {
   if (!preparePresentationTimeline()) return fail(F("Cannot build video timeline"));
   int slash = _cachePath.lastIndexOf('/');
   String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!SD.exists(directory.c_str()) && !SD.mkdir(directory.c_str())) return fail(F("Cannot create video cache"));
-  if (SD.exists(_cacheTempPath.c_str()) && !SD.remove(_cacheTempPath.c_str())) {
+  if (!_secretStorage.mkdir(directory)) return fail(F("Cannot create video cache"));
+  if (_secretStorage.exists(_cacheTempPath) && !_secretStorage.remove(_cacheTempPath)) {
     return fail(F("Cannot replace incomplete cache"));
   }
-  _cache = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  _cache = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
   if (!_cache || !AnimationCache::writeHeader(_cache, _sourceSize, _sourceWriteTime, _sourceWidth,
                                                _sourceHeight, 0, -1, _drawWidth, _drawHeight)) {
     if (_cache) _cache.close();
-    SD.remove(_cacheTempPath.c_str());
+    _secretStorage.remove(_cacheTempPath);
     return fail(F("Cannot start video cache"));
   }
   _pendingFrame = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
@@ -690,13 +692,13 @@ bool VideoPlayerScreen::finishBuild() {
       !AnimationCache::writeHeader(_cache, _sourceSize, _sourceWriteTime, _sourceWidth, _sourceHeight,
                                    _buildFrames, -1, _drawWidth, _drawHeight)) return false;
   _cache.close();
-  if (SD.exists(_cachePath.c_str())) SD.remove(_cachePath.c_str());
-  if (!SD.rename(_cacheTempPath.c_str(), _cachePath.c_str())) return false;
+  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
+  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) return false;
   _h264.end();
   _legacy.end();
   if (_source) _source.close();
   releaseDemux();
-  _cacheRead = SD.open(_cachePath.c_str(), FILE_READ);
+  _cacheRead = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   uint32_t frames = 0, duration = 0;
   if (!_cacheRead || !readCacheHeader(frames, duration)) return false;
   _playFrameBuffer = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
@@ -969,7 +971,7 @@ uint32_t VideoPlayerScreen::playbackElapsedMs(uint32_t nowMs) const {
 bool VideoPlayerScreen::fail(const String &message) {
   stopSpeaker();
   if (_cache) _cache.close();
-  if (_cacheTempPath.length() && SD.exists(_cacheTempPath.c_str())) SD.remove(_cacheTempPath.c_str());
+  if (_cacheTempPath.length() && _secretStorage.exists(_cacheTempPath)) _secretStorage.remove(_cacheTempPath);
   _error = message;
   _state = State::Error;
   return false;

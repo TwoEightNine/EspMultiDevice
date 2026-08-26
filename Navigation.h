@@ -9,22 +9,37 @@ enum class ScreenDataKind : uint8_t {
   ImagePath,
   AudioPath,
   VideoPath,
-  TextInput
+  TextInput,
+  SecretFiles
 };
+
+enum class FileAccessMode : uint8_t { Normal, Secret };
+enum class TextInputMode : uint8_t { Text, Pin4 };
 
 struct ScreenData {
   ScreenDataKind kind;
   String text;
   String initialText;
   bool maskInput;
+  FileAccessMode fileAccess;
+  uint16_t pin;
+  TextInputMode inputMode;
 
-  ScreenData() : kind(ScreenDataKind::None), text(), initialText(), maskInput(false) {
+  ScreenData() : kind(ScreenDataKind::None), text(), initialText(), maskInput(false),
+                 fileAccess(FileAccessMode::Normal), pin(0), inputMode(TextInputMode::Text) {
   }
 
   static ScreenData imagePath(const String &path) {
     ScreenData data;
     data.kind = ScreenDataKind::ImagePath;
     data.text = path;
+    return data;
+  }
+
+  static ScreenData secretImagePath(const String &path, uint16_t pin) {
+    ScreenData data = imagePath(path);
+    data.fileAccess = FileAccessMode::Secret;
+    data.pin = pin;
     return data;
   }
 
@@ -35,10 +50,24 @@ struct ScreenData {
     return data;
   }
 
+  static ScreenData secretAudioPath(const String &path, uint16_t pin) {
+    ScreenData data = audioPath(path);
+    data.fileAccess = FileAccessMode::Secret;
+    data.pin = pin;
+    return data;
+  }
+
   static ScreenData videoPath(const String &path) {
     ScreenData data;
     data.kind = ScreenDataKind::VideoPath;
     data.text = path;
+    return data;
+  }
+
+  static ScreenData secretVideoPath(const String &path, uint16_t pin) {
+    ScreenData data = videoPath(path);
+    data.fileAccess = FileAccessMode::Secret;
+    data.pin = pin;
     return data;
   }
 
@@ -48,6 +77,20 @@ struct ScreenData {
     data.text = title;
     data.initialText = initialValue;
     data.maskInput = mask;
+    return data;
+  }
+
+  static ScreenData pinInput(const String &title) {
+    ScreenData data = textInput(title, true);
+    data.inputMode = TextInputMode::Pin4;
+    return data;
+  }
+
+  static ScreenData secretFiles(uint16_t pin) {
+    ScreenData data;
+    data.kind = ScreenDataKind::SecretFiles;
+    data.fileAccess = FileAccessMode::Secret;
+    data.pin = pin;
     return data;
   }
 };

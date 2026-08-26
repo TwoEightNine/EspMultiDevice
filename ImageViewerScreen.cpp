@@ -31,9 +31,12 @@ ImageViewerScreen *ImageViewerScreen::_decoderOwner = nullptr;
 ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
                                      TouchController &touch,
                                      DisplayController &display,
-                                     SdCardController &sdCard)
+                                     SdCardController &sdCard,
+                                     SecretStorage &secretStorage)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
+    _secretStorage(secretStorage),
+    _secretAccess(false),
     _webpSource(nullptr),
     _webpSourceSize(0),
     _webpRgba(nullptr),
@@ -137,6 +140,7 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
 void ImageViewerScreen::onEnter(const ScreenData &data) {
   reset();
   _lastTouchDown = false;
+  _secretAccess = data.fileAccess == FileAccessMode::Secret;
   if (data.kind != ScreenDataKind::ImagePath || data.text.length() == 0) {
     _error = F("No image selected");
     drawError();
@@ -148,7 +152,7 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     drawError();
     return;
   }
-  _file = SD.open(_path.c_str(), FILE_READ);
+  _file = _secretStorage.open(_path, FILE_READ, _secretAccess);
   if (!_file) {
     _error = F("Unable to open source image");
     drawError();
@@ -198,7 +202,7 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     if (!started) {
       if (_error.length() == 0) _error = F("Could not cache animation");
       if (_cacheFile) _cacheFile.close();
-      if (_cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
+      if (_cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
       releaseGifDecoder();
       releaseWebpDecoder();
       releaseGifBuffers();
@@ -248,7 +252,7 @@ void ImageViewerScreen::tick(uint32_t nowMs) {
       _gifState = GifState::None;
       if (_error.length() == 0) _error = F("Could not cache animation");
       if (_cacheFile) _cacheFile.close();
-      if (_cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
+      if (_cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
       releaseGifDecoder();
       releaseWebpDecoder();
       releaseGifBuffers();
@@ -309,7 +313,7 @@ void ImageViewerScreen::reset() {
   if (_decoderFile) _decoderFile.close();
   if (_cacheFile) _cacheFile.close();
   if (_gifCacheReadFile) _gifCacheReadFile.close();
-  if ((_cacheWriting || removeGifTemp) && _cacheTempPath.length() > 0) SD.remove(_cacheTempPath);
+  if ((_cacheWriting || removeGifTemp) && _cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
   _cacheWriting = false;
   releaseGifBuffers();
   releaseBuffers();
@@ -639,7 +643,7 @@ bool ImageViewerScreen::readRasterHeader() {
   if (sourceFormat == FileFormats::Format::Jpeg) {
     _format = ImageFormat::Jpeg;
     _decoderOwner = this;
-    int jpegResult = _file.seek(0) ? _jpeg.open(_file, jpegDraw) : 0;
+    int jpegResult = _file.seek(0) ? _jpeg.open(_path.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDraw) : 0;
     if (jpegResult != 1) {
       _error = String(F("JPEG header error ")) + _jpeg.getLastError();
       return false;
@@ -702,7 +706,7 @@ String ImageViewerScreen::animationCachePathForSource() const {
   return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".emga");
 }
 
-bool ImageViewerScreen::readCacheHeader(fs::File &file) const {
+bool ImageViewerScreen::readCacheHeader(StorageFile &file) const {
   if (!file || file.size() != CacheHeaderSize + CachePixelBytes) return false;
   uint8_t header[CacheHeaderSize];
   if (file.read(header, sizeof(header)) != sizeof(header)) return false;
@@ -722,8 +726,8 @@ bool ImageViewerScreen::loadCache() {
   if (_format == ImageFormat::Gif ||
       (_format == ImageFormat::Webp && _webpAnimated)) return false;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
-  if (!SD.exists(_cachePath)) return false;
-  fs::File cache = SD.open(_cachePath.c_str(), FILE_READ);
+  if (!_secretStorage.exists(_cachePath)) return false;
+  StorageFile cache = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   if (!cache || !readCacheHeader(cache)) {
     if (cache) cache.close();
     return false;
@@ -765,7 +769,7 @@ bool ImageViewerScreen::loadCache() {
   return true;
 }
 
-bool ImageViewerScreen::writeAnimationCacheHeader(fs::File &file,
+bool ImageViewerScreen::writeAnimationCacheHeader(StorageFile &file,
                                                    uint32_t frameCount,
                                                    int32_t loopCount) const {
   return AnimationCache::writeHeader(file, _sourceFileSize, _sourceWriteTime,
@@ -773,7 +777,7 @@ bool ImageViewerScreen::writeAnimationCacheHeader(fs::File &file,
                                      loopCount, _drawWidth, _drawHeight);
 }
 
-bool ImageViewerScreen::readAnimationCacheHeader(fs::File &file,
+bool ImageViewerScreen::readAnimationCacheHeader(StorageFile &file,
                                                   uint32_t &frameCount,
                                                   int32_t &loopCount,
                                                   uint32_t &sourceWidth,
@@ -804,8 +808,8 @@ bool ImageViewerScreen::readAnimationCacheHeader(fs::File &file,
 }
 
 bool ImageViewerScreen::loadAnimationCache() {
-  if (!psramFound() || !SD.exists(_cachePath)) return false;
-  fs::File cache = SD.open(_cachePath.c_str(), FILE_READ);
+  if (!psramFound() || !_secretStorage.exists(_cachePath)) return false;
+  StorageFile cache = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   if (!cache) return false;
   uint32_t frameCount = 0, sourceWidth = 0, sourceHeight = 0;
   uint16_t drawWidth = 0, drawHeight = 0;
@@ -846,16 +850,16 @@ bool ImageViewerScreen::startGifBuild() {
   }
   int slash = _cachePath.lastIndexOf('/');
   String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+  if (!_secretStorage.mkdir(directory)) {
     _error = F("Cannot create GIF cache directory");
     return false;
   }
-  SD.remove(_cacheTempPath);
-  _cacheFile = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  _secretStorage.remove(_cacheTempPath);
+  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
   if (!_cacheFile || !writeAnimationCacheHeader(_cacheFile, 0, _gif.getLoopCount())) {
     _error = F("Cannot start GIF cache");
     if (_cacheFile) _cacheFile.close();
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     return false;
   }
   _gifLoopCount = _gif.getLoopCount();
@@ -949,15 +953,15 @@ bool ImageViewerScreen::finishGifBuild() {
     return false;
   }
   _cacheFile.close();
-  if (SD.exists(_cachePath)) SD.remove(_cachePath);
-  if (!SD.rename(_cacheTempPath, _cachePath)) {
+  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
+  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) {
     _error = F("GIF cache commit failed");
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     return false;
   }
   releaseGifDecoder();
   releaseBuffers();
-  _gifCacheReadFile = SD.open(_cachePath.c_str(), FILE_READ);
+  _gifCacheReadFile = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   if (!_gifCacheReadFile) {
     _error = F("GIF cache reopen failed");
     return false;
@@ -1190,7 +1194,7 @@ bool ImageViewerScreen::allGifPreloadSlotsReady() const {
   return true;
 }
 
-bool ImageViewerScreen::loadGifFrameOnWorker(fs::File &cache,
+bool ImageViewerScreen::loadGifFrameOnWorker(StorageFile &cache,
                                               uint8_t *chunk,
                                               const GifLoadRequest &request,
                                               GifLoadResult &result) {
@@ -1262,10 +1266,10 @@ void ImageViewerScreen::gifLoaderTask(void *context) {
   ImageViewerScreen *viewer = static_cast<ImageViewerScreen *>(context);
   uint8_t *chunk = (uint8_t *)heap_caps_malloc(CacheChunkBytes,
                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  fs::File cache;
+  StorageFile cache;
   bool opened = chunk != nullptr && SpiBusLock::lock(pdMS_TO_TICKS(100));
   if (opened) {
-    cache = SD.open(viewer->_cachePath.c_str(), FILE_READ);
+    cache = viewer->_secretStorage.open(viewer->_cachePath, FILE_READ, viewer->_secretAccess);
     SpiBusLock::unlock();
     opened = (bool)cache;
   }
@@ -1898,16 +1902,16 @@ bool ImageViewerScreen::startWebpBuild() {
   }
   int slash = _cachePath.lastIndexOf('/');
   String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+  if (!_secretStorage.mkdir(directory)) {
     _error = F("Cannot create WebP cache directory");
     return false;
   }
-  SD.remove(_cacheTempPath);
-  _cacheFile = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  _secretStorage.remove(_cacheTempPath);
+  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
   if (!_cacheFile || !writeAnimationCacheHeader(_cacheFile, 0, _gifLoopCount)) {
     _error = F("Cannot start WebP cache");
     if (_cacheFile) _cacheFile.close();
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     return false;
   }
   _gifBuildFrame = 0;
@@ -1999,15 +2003,15 @@ bool ImageViewerScreen::finishWebpBuild() {
     return false;
   }
   _cacheFile.close();
-  if (SD.exists(_cachePath)) SD.remove(_cachePath);
-  if (!SD.rename(_cacheTempPath, _cachePath)) {
+  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
+  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) {
     _error = F("WebP cache commit failed");
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     return false;
   }
   releaseWebpDecoder();
   releaseBuffers();
-  _gifCacheReadFile = SD.open(_cachePath.c_str(), FILE_READ);
+  _gifCacheReadFile = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
   if (!_gifCacheReadFile || !startGifPlayback()) {
     _error = F("WebP cache reopen failed");
     if (_gifCacheReadFile) _gifCacheReadFile.close();
@@ -2035,7 +2039,7 @@ void ImageViewerScreen::releaseWebpDecoder() {
   memset(&_webpAnimInfo, 0, sizeof(_webpAnimInfo));
 }
 
-bool ImageViewerScreen::writeCacheHeader(fs::File &file) const {
+bool ImageViewerScreen::writeCacheHeader(StorageFile &file) const {
   uint8_t header[CacheHeaderSize] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = '1'; header[3] = '6';
   header[4] = 1; // cache format version
@@ -2061,18 +2065,18 @@ void ImageViewerScreen::startCacheWrite() {
   String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
   Serial.print(F("Image cache: preparing "));
   Serial.println(_cachePath);
-  if (!SD.exists(directory) && !SD.mkdir(directory)) {
+  if (!_secretStorage.mkdir(directory)) {
     Serial.print(F("Image cache: cannot create "));
     Serial.println(directory);
     return;
   }
-  SD.remove(_cacheTempPath);
-  _cacheFile = SD.open(_cacheTempPath.c_str(), FILE_WRITE);
+  _secretStorage.remove(_cacheTempPath);
+  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
   if (!_cacheFile || !writeCacheHeader(_cacheFile)) {
     Serial.print(F("Image cache: cannot start "));
     Serial.println(_cacheTempPath);
     if (_cacheFile) _cacheFile.close();
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     return;
   }
   _cacheOffset = 0;
@@ -2120,11 +2124,11 @@ void ImageViewerScreen::finishCacheWrite(bool success) {
   if (_cacheFile) _cacheFile.close();
   bool committed = false;
   if (success) {
-    bool removedOld = !_cachePath.length() || !SD.exists(_cachePath) || SD.remove(_cachePath);
-    committed = removedOld && SD.rename(_cacheTempPath, _cachePath);
+    bool removedOld = !_cachePath.length() || !_secretStorage.exists(_cachePath) || _secretStorage.remove(_cachePath);
+    committed = removedOld && _secretStorage.rename(_cacheTempPath, _cachePath);
   }
   if (!committed) {
-    SD.remove(_cacheTempPath);
+    _secretStorage.remove(_cacheTempPath);
     if (success) {
       Serial.print(F("Image cache: commit failed "));
       Serial.println(_cachePath);
@@ -2264,27 +2268,38 @@ void ImageViewerScreen::storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uin
 
 void *ImageViewerScreen::pngOpen(const char *name, int32_t *size) {
   if (!_decoderOwner) return nullptr;
-  _decoderOwner->_decoderFile = SD.open(name, FILE_READ);
+  _decoderOwner->_decoderFile = _decoderOwner->_secretStorage.open(name, FILE_READ, _decoderOwner->_secretAccess);
   if (!_decoderOwner->_decoderFile) return nullptr;
   *size = (int32_t)_decoderOwner->_decoderFile.size();
   return &_decoderOwner->_decoderFile;
 }
 
 void ImageViewerScreen::pngClose(void *handle) {
-  File *file = static_cast<File *>(handle);
+  StorageFile *file = static_cast<StorageFile *>(handle);
   if (file) file->close();
 }
 
 int32_t ImageViewerScreen::pngRead(PNGFILE *file, uint8_t *buffer, int32_t length) {
   if (!file || !file->fHandle) return 0;
-  File *source = static_cast<File *>(file->fHandle);
+  StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   return source->read(buffer, length);
 }
 
 int32_t ImageViewerScreen::pngSeek(PNGFILE *file, int32_t position) {
   if (!file || !file->fHandle || position < 0) return 0;
-  File *source = static_cast<File *>(file->fHandle);
+  StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   return source->seek(position) ? position : 0;
+}
+
+void *ImageViewerScreen::jpegOpen(const char *name, int32_t *size) { return pngOpen(name, size); }
+void ImageViewerScreen::jpegClose(void *handle) { pngClose(handle); }
+int32_t ImageViewerScreen::jpegRead(JPEGFILE *file, uint8_t *buffer, int32_t length) {
+  if (!file || !file->fHandle || length <= 0) return 0;
+  return static_cast<StorageFile *>(file->fHandle)->read(buffer, length);
+}
+int32_t ImageViewerScreen::jpegSeek(JPEGFILE *file, int32_t position) {
+  if (!file || !file->fHandle || position < 0) return 0;
+  return static_cast<StorageFile *>(file->fHandle)->seek(position) ? position : 0;
 }
 
 int ImageViewerScreen::pngDraw(PNGDRAW *draw) {
@@ -2313,20 +2328,20 @@ int ImageViewerScreen::jpegDraw(JPEGDRAW *draw) {
 
 void *ImageViewerScreen::gifOpen(const char *name, int32_t *size) {
   if (!_decoderOwner) return nullptr;
-  _decoderOwner->_decoderFile = SD.open(name, FILE_READ);
+  _decoderOwner->_decoderFile = _decoderOwner->_secretStorage.open(name, FILE_READ, _decoderOwner->_secretAccess);
   if (!_decoderOwner->_decoderFile) return nullptr;
   *size = (int32_t)_decoderOwner->_decoderFile.size();
   return &_decoderOwner->_decoderFile;
 }
 
 void ImageViewerScreen::gifClose(void *handle) {
-  File *file = static_cast<File *>(handle);
+  StorageFile *file = static_cast<StorageFile *>(handle);
   if (file) file->close();
 }
 
 int32_t ImageViewerScreen::gifRead(GIFFILE *file, uint8_t *buffer, int32_t length) {
   if (!file || !file->fHandle || length <= 0) return 0;
-  File *source = static_cast<File *>(file->fHandle);
+  StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   int32_t amount = length;
   int32_t remaining = file->iSize - file->iPos;
   if (amount > remaining) amount = remaining;
@@ -2338,7 +2353,7 @@ int32_t ImageViewerScreen::gifRead(GIFFILE *file, uint8_t *buffer, int32_t lengt
 
 int32_t ImageViewerScreen::gifSeek(GIFFILE *file, int32_t position) {
   if (!file || !file->fHandle || position < 0) return 0;
-  File *source = static_cast<File *>(file->fHandle);
+  StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   if (!source->seek(position)) return 0;
   file->iPos = position;
   return position;

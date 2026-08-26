@@ -8,6 +8,7 @@
 #include "Screen.h"
 #include "AudioSettings.h"
 #include "SdCardController.h"
+#include "SecretStorage.h"
 #include "SpeakerController.h"
 
 class AudioPlayerScreen : public Screen {
@@ -17,7 +18,8 @@ public:
                     DisplayController &display,
                     SdCardController &sdCard,
                     SpeakerController &speaker,
-                    AudioSettings &audioSettings);
+                    AudioSettings &audioSettings,
+                    SecretStorage &secretStorage);
 
   void onEnter(const ScreenData &data) override;
   void onExit() override;
@@ -48,7 +50,9 @@ private:
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
-  fs::File _file;
+  SecretStorage &_secretStorage;
+  StorageFile _file;
+  bool _secretAccess;
   String _path;
   String _fileName;
   String _error;

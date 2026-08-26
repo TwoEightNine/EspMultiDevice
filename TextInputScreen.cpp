@@ -21,6 +21,9 @@ const int16_t GridColumns = 10;
 const int16_t KeyboardRowCount = 5;
 // Adjust this value to change the height of every keyboard row.
 const int16_t KeyboardRowHeight = 48;
+const int16_t PinKeyboardPercent = 70;
+const int16_t PinKeyGap = 4;
+const int16_t PinInputHeight = 30;
 const uint16_t ShiftHoldMs = 500;
 
 const char *normalRows[] = {
@@ -45,6 +48,7 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
     _text(),
     _title("Text input"),
     _maskText(false),
+    _pinInput(false),
     _cursor(0),
     _shift(false),
     _capsLock(false),
@@ -68,6 +72,7 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
 void TextInputScreen::onEnter() {
   _title = "Text input";
   _maskText = false;
+  _pinInput = false;
   _text = "";
   _cursor = 0;
   _shift = false;
@@ -88,6 +93,8 @@ void TextInputScreen::onEnter(const ScreenData &data) {
   _title = data.kind == ScreenDataKind::TextInput && data.text.length() > 0
              ? data.text : "Text input";
   _maskText = data.kind == ScreenDataKind::TextInput && data.maskInput;
+  _pinInput = data.kind == ScreenDataKind::TextInput && data.inputMode == TextInputMode::Pin4;
+  if (_pinInput) _title = "enter pin";
   _text = data.kind == ScreenDataKind::TextInput ? data.initialText : "";
   _cursor = _text.length();
   _shift = false;
@@ -126,7 +133,7 @@ void TextInputScreen::handleTouch(const TouchPoint &point) {
   }
 
   if (contains(_doneBounds, point.x, point.y)) {
-    _navigator.pop(ScreenResult::withText(_text));
+    if (!_pinInput || _text.length() == 4) _navigator.pop(ScreenResult::withText(_text));
     return;
   }
 
@@ -202,6 +209,38 @@ void TextInputScreen::layout() {
   const int16_t width = _display.width();
   const int16_t height = _display.height();
   const int16_t usableWidth = width - OuterPadding * 2;
+  if (_pinInput) {
+    const int16_t keyboardHeight = height * PinKeyboardPercent / 100;
+    const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
+    _inputBounds = {(int16_t)(width / 4),
+                    (int16_t)(UiKit::AppBarHeight + (keyboardTop - UiKit::AppBarHeight - PinInputHeight) / 2),
+                    (int16_t)(width / 2), PinInputHeight};
+    _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
+    _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
+    _keyCount = 0;
+    const int16_t columnWidth = (_keyboardBounds.w - PinKeyGap * 2) / 3;
+    const int16_t rowHeight = (_keyboardBounds.h - PinKeyGap * 3) / 4;
+    auto addPinKey = [&](const char *label, char value, KeyAction action, uint8_t row, uint8_t column) {
+      const int16_t x = _keyboardBounds.x + column * (columnWidth + PinKeyGap);
+      const int16_t y = _keyboardBounds.y + row * (rowHeight + PinKeyGap);
+      const int16_t w = column == 2 ? _keyboardBounds.x + _keyboardBounds.w - x : columnWidth;
+      addKey(label, value, action, x, y, w, rowHeight);
+    };
+    addPinKey("1", '1', KeyAction::Character, 0, 0);
+    addPinKey("2", '2', KeyAction::Character, 0, 1);
+    addPinKey("3", '3', KeyAction::Character, 0, 2);
+    addPinKey("4", '4', KeyAction::Character, 1, 0);
+    addPinKey("5", '5', KeyAction::Character, 1, 1);
+    addPinKey("6", '6', KeyAction::Character, 1, 2);
+    addPinKey("7", '7', KeyAction::Character, 2, 0);
+    addPinKey("8", '8', KeyAction::Character, 2, 1);
+    addPinKey("9", '9', KeyAction::Character, 2, 2);
+    addPinKey("", 0, KeyAction::Backspace, 3, 0);
+    addPinKey("0", '0', KeyAction::Character, 3, 1);
+    addPinKey("Done", 0, KeyAction::Done, 3, 2);
+    _doneBounds = _keys[_keyCount - 1].bounds;
+    return;
+  }
   const int16_t keyboardHeight = KeyboardRowCount * KeyboardRowHeight +
                                  KeyGap * (KeyboardRowCount - 1);
   const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
@@ -305,6 +344,22 @@ void TextInputScreen::drawInput() {
   tft.fillRect(_inputBounds.x + 1, _inputBounds.y + 1,
                _inputBounds.w - 2, _inputBounds.h - 2, TFT_BLACK);
 
+  if (_pinInput) {
+    const String value = displayText(_text);
+    const int16_t textWidthPixels = textWidth(value);
+    const int16_t centerX = _inputBounds.x + _inputBounds.w / 2;
+    const int16_t centerY = _inputBounds.y + _inputBounds.h / 2;
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(value, centerX, centerY, 2);
+    if (_cursorVisible) {
+      const int16_t caretX = centerX - textWidthPixels / 2 + textWidthPixels;
+      tft.drawFastVLine(caretX, centerY - LineHeight / 2 + 1, LineHeight - 3, CursorColor);
+    }
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+
   buildVisualLines();
   const uint16_t visible = visibleLineCount();
   const uint16_t caretLine = cursorLine();
@@ -349,6 +404,10 @@ void TextInputScreen::drawInput() {
 }
 
 void TextInputScreen::drawInputCaretLine() {
+  if (_pinInput) {
+    drawInput();
+    return;
+  }
   if (_lineCount == 0) {
     buildVisualLines();
   }
@@ -499,7 +558,7 @@ void TextInputScreen::handleKey(uint8_t index) {
       insertCharacter('\n');
       break;
     case KeyAction::Done:
-      _navigator.pop(ScreenResult::withText(_text));
+      if (!_pinInput || _text.length() == 4) _navigator.pop(ScreenResult::withText(_text));
       break;
   }
 
@@ -522,6 +581,7 @@ void TextInputScreen::finishShiftPress() {
 }
 
 void TextInputScreen::insertCharacter(char value) {
+  if (_pinInput && (value < '0' || value > '9' || _text.length() >= 4)) return;
   if ((_shift || _capsLock) && value >= 'a' && value <= 'z') {
     value = (char)(value - 'a' + 'A');
     if (!_capsLock) {

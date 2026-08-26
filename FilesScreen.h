@@ -5,6 +5,7 @@
 #include "FileFormats.h"
 #include "Screen.h"
 #include "SdCardController.h"
+#include "SecretStorage.h"
 #include "UiKit.h"
 
 class FileThumbnailWorker;
@@ -14,10 +15,12 @@ public:
   FilesScreen(Navigator &navigator,
               TouchController &touch,
               DisplayController &display,
-              SdCardController &sdCard);
+              SdCardController &sdCard,
+              SecretStorage &secretStorage);
   ~FilesScreen() override;
 
   void onEnter() override;
+  void onEnter(const ScreenData &data) override;
   void onExit() override;
   void onResume() override;
   void onResult(const ScreenResult &result) override;
@@ -46,6 +49,7 @@ private:
 
   struct Entry {
     String name;
+    String storageName;
     FileFormats::Format format;
     bool directory;
   };
@@ -80,7 +84,10 @@ private:
     DeleteHolding
   };
 
+  enum class MoveState : uint8_t { None, Copying, CleanupCaches, RemoveSource, Failed };
+
   SdCardController &_sdCard;
+  SecretStorage &_secretStorage;
   String _currentPath;
   String _pendingRenamePath;
   String _message;
@@ -89,6 +96,7 @@ private:
   bool _sdMounted;
   bool _lastTouchDown;
   bool _retainCacheWhileCovered;
+  bool _secretMode;
   DirectoryCache _cache[MaxCachedDirectories];
   Thumbnail _thumbnails[MaxCachedThumbnails];
   FileThumbnailWorker *_thumbnailWorker;
@@ -103,11 +111,20 @@ private:
   Rect _nextBounds;
   Rect _menuBounds;
   Rect _renameBounds;
+  Rect _moveBounds;
   Rect _deleteBounds;
   MenuState _menuState;
   uint16_t _menuEntryIndex;
   uint32_t _deleteStartedMs;
   uint32_t _lastDeleteDrawMs;
+  MoveState _moveState;
+  String _moveSourcePath;
+  String _moveTargetPath;
+  String _moveTempPath;
+  fs::File _moveSource;
+  StorageFile _moveTarget;
+  uint32_t _moveBytes;
+  uint8_t _moveBuffer[4096];
 
   void draw();
   void drawTopBar();
@@ -147,7 +164,7 @@ private:
   static void quickSort(Entry *entries, int32_t left, int32_t right);
   Entry *entryAt(uint16_t index);
   const Entry *entryAt(uint16_t index) const;
-  bool isHiddenEntry(const String &path) const;
+  bool isHiddenEntry(const String &path, const String &directory) const;
   void openDirectory(const String &path);
   void openParentDirectory();
   String parentPath() const;
@@ -162,6 +179,10 @@ private:
   void beginDeleteHold();
   void updateDeleteHold(uint32_t nowMs);
   void deleteSelectedFile();
+  void beginMoveToSecret();
+  void updateMoveToSecret();
+  void finishMoveToSecret(bool success, const String &message);
+  bool removePlaintextCaches(const String &sourcePath);
   void removeEntryFromListing(uint16_t index);
   void showMessage(const String &message, uint32_t durationMs = 1800);
   void handleSdCardEvent(SdCardEvent event);

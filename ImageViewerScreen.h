@@ -26,13 +26,15 @@ using File = fs::File;
 
 #include "Screen.h"
 #include "SdCardController.h"
+#include "SecretStorage.h"
 
 class ImageViewerScreen : public Screen {
 public:
   ImageViewerScreen(Navigator &navigator,
                     TouchController &touch,
                     DisplayController &display,
-                    SdCardController &sdCard);
+                    SdCardController &sdCard,
+                    SecretStorage &secretStorage);
 
   void onEnter(const ScreenData &data) override;
   void onExit() override;
@@ -93,10 +95,12 @@ private:
   };
 
   SdCardController &_sdCard;
-  fs::File _file;
-  fs::File _decoderFile;
-  fs::File _cacheFile;
-  fs::File _gifCacheReadFile;
+  SecretStorage &_secretStorage;
+  StorageFile _file;
+  StorageFile _decoderFile;
+  StorageFile _cacheFile;
+  StorageFile _gifCacheReadFile;
+  bool _secretAccess;
   uint8_t *_webpSource;
   uint32_t _webpSourceSize;
   uint8_t *_webpRgba;
@@ -222,7 +226,7 @@ private:
   String cachePathForSource() const;
   bool loadCache();
   bool loadAnimationCache();
-  bool readAnimationCacheHeader(fs::File &file, uint32_t &frameCount, int32_t &loopCount,
+  bool readAnimationCacheHeader(StorageFile &file, uint32_t &frameCount, int32_t &loopCount,
                                 uint32_t &sourceWidth, uint32_t &sourceHeight,
                                 uint16_t &drawWidth, uint16_t &drawHeight) const;
   bool startGifBuild();
@@ -240,7 +244,7 @@ private:
   bool enqueueGifLoad(uint32_t sequence);
   bool collectGifLoadResults();
   bool allGifPreloadSlotsReady() const;
-  bool loadGifFrameOnWorker(fs::File &cache, uint8_t *chunk,
+  bool loadGifFrameOnWorker(StorageFile &cache, uint8_t *chunk,
                             const GifLoadRequest &request, GifLoadResult &result);
   void copyGifCacheChunk(uint16_t *destination, uint32_t pixelOffset,
                          const uint8_t *chunk, uint16_t amount);
@@ -258,7 +262,7 @@ private:
   bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
                               uint16_t *destination, uint32_t &delay);
   bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);
-  bool writeAnimationCacheHeader(fs::File &file, uint32_t frameCount, int32_t loopCount) const;
+  bool writeAnimationCacheHeader(StorageFile &file, uint32_t frameCount, int32_t loopCount) const;
   String animationCachePathForSource() const;
   void releaseGifBuffers();
   void releaseGifDecoder();
@@ -277,8 +281,8 @@ private:
   void startCacheWrite();
   void writeCacheChunk();
   void finishCacheWrite(bool success);
-  bool writeCacheHeader(fs::File &file) const;
-  bool readCacheHeader(fs::File &file) const;
+  bool writeCacheHeader(StorageFile &file) const;
+  bool readCacheHeader(StorageFile &file) const;
   void writeLe16(uint8_t *buffer, uint16_t value) const;
   void writeLe32(uint8_t *buffer, uint32_t value) const;
   bool renderRows(uint8_t maxRows);
@@ -302,6 +306,10 @@ private:
   static int32_t pngRead(PNGFILE *file, uint8_t *buffer, int32_t length);
   static int32_t pngSeek(PNGFILE *file, int32_t position);
   static int pngDraw(PNGDRAW *draw);
+  static void *jpegOpen(const char *name, int32_t *size);
+  static void jpegClose(void *handle);
+  static int32_t jpegRead(JPEGFILE *file, uint8_t *buffer, int32_t length);
+  static int32_t jpegSeek(JPEGFILE *file, int32_t position);
   static int jpegDraw(JPEGDRAW *draw);
   static void *gifOpen(const char *name, int32_t *size);
   static void gifClose(void *handle);

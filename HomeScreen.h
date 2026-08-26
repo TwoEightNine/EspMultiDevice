@@ -17,6 +17,7 @@ public:
              TimeController &time);
 
   void onEnter() override;
+  void onResult(const ScreenResult &result) override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
 
@@ -55,6 +56,9 @@ private:
   bool _wifiConnected;
   uint8_t _batteryPercent;
   bool _lastTouchDown;
+  bool _filesPressPending;
+  bool _filesHoldTriggered;
+  uint32_t _filesPressedMs;
   uint32_t _lastClockCheckMs;
   String _lastClockText;
   AppTile _apps[AppCount];
