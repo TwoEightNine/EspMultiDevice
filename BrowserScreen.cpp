@@ -2616,13 +2616,24 @@ void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
     VisualRow &target = _rows[_rowCount - 1];
     int16_t available = maxWidth - target.contentWidth;
     int16_t wholeWidth = textWidth(remaining, style);
+    const VisualRun *mergedRun = target.runCount && !target.runs[target.runCount - 1].image &&
+                                 stylesEqual(target.runs[target.runCount - 1].style, style)
+      ? &target.runs[target.runCount - 1] : nullptr;
+    if (mergedRun) {
+      wholeWidth = textWidth(mergedRun->text + remaining, style) - mergedRun->width;
+    }
     if (wholeWidth <= available) {
       appendRun(remaining, style);
       _renderedCharacters += remaining.length();
       return;
     }
     String part;
-    while (part.length() < remaining.length() && textWidth(part + remaining[part.length()], style) <= available) {
+    while (part.length() < remaining.length()) {
+      String candidate = part + remaining[part.length()];
+      int16_t candidateWidth = mergedRun
+        ? textWidth(mergedRun->text + candidate, style) - mergedRun->width
+        : textWidth(candidate, style);
+      if (candidateWidth > available) break;
       part += remaining[part.length()];
     }
     if (part.length() == 0) {
@@ -2642,27 +2653,33 @@ void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
 void BrowserScreen::appendRun(const String &text, const TextStyle &style) {
   if (text.length() == 0 || _rowCount == 0) return;
   VisualRow &row = _rows[_rowCount - 1];
-  int16_t width = textWidth(text, style);
   if (row.runCount && !row.runs[row.runCount - 1].image &&
       stylesEqual(row.runs[row.runCount - 1].style, style)) {
     VisualRun &run = row.runs[row.runCount - 1];
+    const int16_t previousWidth = run.width;
     run.text += text;
-    run.width += width;
+    // Free-font textWidth() uses the glyph's visible bounds for the final
+    // character, while text within a drawString() advances by xAdvance.
+    // Summing separate fragments therefore underestimates a merged run and
+    // makes the next differently styled run paint over its end.
+    run.width = textWidth(run.text, style);
+    row.contentWidth += run.width - previousWidth;
   } else if (row.runCount < MaxRunsPerRow) {
-  VisualRun &run = row.runs[row.runCount++];
-  run.image = false;
-  run.text = text;
-  run.style = style;
-  run.imageIndex = -1;
+    const int16_t width = textWidth(text, style);
+    VisualRun &run = row.runs[row.runCount++];
+    run.image = false;
+    run.text = text;
+    run.style = style;
+    run.imageIndex = -1;
     run.x = row.contentWidth;
     run.width = width;
+    row.contentWidth += width;
   } else {
     row.contentWidth = _display.width();
     beginTextRow();
     appendRun(text, style);
     return;
   }
-  row.contentWidth += width;
 }
 
 void BrowserScreen::beginTextRow() {
