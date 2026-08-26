@@ -15,9 +15,10 @@ enum class ScreenDataKind : uint8_t {
 struct ScreenData {
   ScreenDataKind kind;
   String text;
+  String initialText;
   bool maskInput;
 
-  ScreenData() : kind(ScreenDataKind::None), text(), maskInput(false) {
+  ScreenData() : kind(ScreenDataKind::None), text(), initialText(), maskInput(false) {
   }
 
   static ScreenData imagePath(const String &path) {
@@ -41,10 +42,11 @@ struct ScreenData {
     return data;
   }
 
-  static ScreenData textInput(const String &title, bool mask) {
+  static ScreenData textInput(const String &title, bool mask, const String &initialValue = String()) {
     ScreenData data;
     data.kind = ScreenDataKind::TextInput;
     data.text = title;
+    data.initialText = initialValue;
     data.maskInput = mask;
     return data;
   }

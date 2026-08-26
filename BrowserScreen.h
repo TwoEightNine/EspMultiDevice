@@ -43,7 +43,9 @@ private:
   static const uint8_t MaxPages = 32;
   // A thumbnail is kept only while there is enough memory for it. The row
   // limit still bounds metadata and placeholders for pathological pages.
-  static const uint16_t MaxEmbeddedImages = MaxRows;
+  // Retain enough previews for a long article without allowing image-heavy
+  // pages to consume the internal heap needed by HTTPS.
+  static const uint16_t MaxEmbeddedImages = 24;
   static const uint8_t ImageJobQueueLength = 4;
   static const uint16_t ImageUrlMaxLength = 384;
   // Keep enough of large legacy pages to reach their body while retaining a
@@ -52,6 +54,11 @@ private:
   static const uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t ConnectTimeoutMs = 10000;
+  static const uint8_t TlsRetryHandshakeTimeoutSeconds = 15;
+  // A stale background image request must never keep a foreground navigation
+  // stuck behind the shared HTTP client.  This is deliberately much shorter
+  // than the connection timeout: callers can cancel or retry immediately.
+  static const uint32_t NetworkLockTimeoutMs = 2000;
   static const uint8_t MaxRedirects = 5;
 
   struct Rect {
@@ -313,6 +320,7 @@ private:
 
   void renderDocument(const String &html);
   void renderPlainText(const String &text, const String &title);
+  void clearRenderedDocumentStorage();
   void resetRenderedRows();
   void appendText(const String &text);
   void appendBreak();

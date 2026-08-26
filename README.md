@@ -32,6 +32,12 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 
 ## Files
 
+Files keeps a bounded in-memory LRU of the directories visited during one Files-screen visit. A folder is enumerated and sorted once (directories first, then case-insensitive natural A–Z); returning to a cached folder does not re-read its entries. The cache survives opening a player or the rename keyboard and is discarded when Files is closed or the SD card changes.
+
+The Files pager is fixed at the bottom of the display with Previous, Page, and Next controls. Regular files have a right-side three-dot menu: Rename opens the keyboard with the complete filename pre-filled, while Delete requires holding its menu action for one second. Folders intentionally have no file-action menu.
+
+Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding runs on the other core and takes the shared SD/touch SPI lock only for individual reads, so list drawing and touch handling remain responsive. Previews are retained in memory for the Files visit and in a validated `.cache/*.eth1` sidecar across visits; the source size and timestamp must match before a sidecar is used. Invalid, unsupported decoder variants, oversized WebP sources, and memory-constrained images retain the normal file icon.
+
 - `esp_media.ino`: application entry point.
 - `Screen.h`: base class for application screens.
 - `Navigator.h`: screen ID and navigation stack interface.
@@ -330,7 +336,21 @@ static const int SPEAKER_ENABLE_PIN = 2;
 
 ## 5V Power Notes
 
-Use one solid external regulated `5V` supply for the TFT backlight/module power and the MAX98357A `VIN`, sized for the display backlight plus speaker peaks. Connect the external supply `GND` to ESP32-S3 `GND` so the GPIO signals have a common reference.
+The system has three loads with very different current profiles: ESP32-S3/Wi-Fi bursts, a continuously lit TFT backlight, and the MAX98357A's audio peaks. A supply's advertised `2 A` value does not establish that it can keep its voltage above the ESP32 board regulator's input requirement through those peaks. USB leads, breadboards, Dupont wires, battery-protection boards, boost converters, and the ESP32 board's `VIN` path each add resistance, so the voltage at the ESP32 can be much lower than the voltage measured at the supply.
+
+Use one regulated power rail with at least `5 V / 3 A` peak capability at the device, not one rail daisy-chained through an ESP32 pin. Make a star connection at the regulator output: separate positive and ground pairs go to the ESP32 board, TFT/SD module, and MAX98357A. Use short, thick wires for the amplifier and display; do not route their return current through a breadboard or through the ESP32 `GND` pin/wires.
+
+Put the following capacitors physically close to the loads, observing polarity:
+
+- `470–1000 uF`, low-ESR, rated at least 6.3 V, plus `100 nF` ceramic across MAX98357A `VIN` and `GND`.
+- `220–470 uF`, low-ESR, rated at least 6.3 V, plus `100 nF` ceramic across the TFT module supply and `GND`.
+- `100–220 uF`, rated at least 6.3 V, plus `100 nF` ceramic across the ESP32 board's 5 V input and a nearby `GND` pin.
+
+The capacitors suppress short transients; they cannot compensate for an undersized converter, a weak battery, or thin/long wiring.
+
+For a one-cell Li-ion battery, a TP4056 is only a charger/protection board—it does **not** produce 5 V and it has no load-sharing power path. Use a protected cell (or separate protection/BMS), a charger with power-path/load-sharing, and a synchronous 5 V boost converter rated for at least `3 A` output peak. Its battery-side peak current will exceed `4.5 A` at 5 V / 3 A output once conversion losses and a low cell voltage are included, so a 14500 cell, small power-bank module, or ordinary breadboard wiring is usually unsuitable. A 2S battery with the appropriate BMS/charger followed by a 5 V buck converter is often the more robust architecture.
+
+Feed the ESP32 board only through the input its exact board schematic documents for a regulated 5 V supply (`5V`/`VBUS`/`VIN` varies by board). Feed the TFT/SD module and MAX98357A from their documented supplies; many SD/touch boards are 3.3 V logic devices even when their `VCC` pin accepts 5 V. All grounds must meet at the common star point.
 
 Do not connect an external `5V` supply to the ESP32-S3 board's `VIN` while USB is connected unless your exact board documents that simultaneous `VIN` and USB power is supported. Many boards have power-path protection, but many small ESP32-S3 boards do not. The safer default is:
 
@@ -338,6 +358,21 @@ Do not connect an external `5V` supply to the ESP32-S3 board's `VIN` while USB i
 - External `5V` powers the TFT and MAX98357A.
 - All grounds are common.
 - The external `5V` positive line does not feed back into USB `5V` or board `VIN`.
+
+The two-USB arrangement may appear stable because one port is feeding the ESP32 while the other feeds the peripherals, but it must not be used as the final design unless the board schematic proves the two 5 V paths are isolated. It can back-power a USB port or make current sharing unpredictable.
+
+### Power fault test
+
+The sketch prints `Reset cause:` near the start of every serial boot. Capture the complete boot message at 115200 baud. `brownout reset (supply voltage sag)` confirms the diagnosis; a watchdog or panic message instead points to firmware and should be investigated separately.
+
+Test using the intended single supply and repeat each stage long enough to reproduce the intermittent failure:
+
+1. ESP32 alone, then ESP32 plus the display, then add the SD card.
+2. Turn Wi-Fi on and run repeated scans; this creates high ESP32 transmit/receive bursts.
+3. Play a bass-heavy or continuous tone at volume 3, 5, then 10. If only this stage resets, the amplifier rail/wiring is the immediate problem.
+4. Measure the 5 V rail at the ESP32 input and at the MAX98357A `VIN`/`GND` pins while the failing workload runs. A scope is best; a multimeter's MIN/MAX mode is still useful. Measure ground-to-ground voltage drop too.
+
+For a quick isolation test, unplug only the MAX98357A `VIN` (leave its logic wires disconnected or its `SD`/`EN` low) and repeat. If the resets stop, do not solve it in firmware: upgrade the power rail, wiring, and local bulk capacitance before reconnecting the amplifier.
 
 ## Pin Allocation
 

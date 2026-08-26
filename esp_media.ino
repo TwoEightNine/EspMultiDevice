@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_system.h>
 
 #include "DisplayController.h"
 #include "AudioSettings.h"
@@ -81,6 +82,35 @@ BrowserScreen *browserScreen = nullptr;
 
 void updateTouch();
 
+namespace {
+
+const __FlashStringHelper *resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return F("power-on reset");
+    case ESP_RST_EXT: return F("external reset pin");
+    case ESP_RST_SW: return F("software reset");
+    case ESP_RST_PANIC: return F("exception/panic reset");
+    case ESP_RST_INT_WDT: return F("interrupt watchdog reset");
+    case ESP_RST_TASK_WDT: return F("task watchdog reset");
+    case ESP_RST_WDT: return F("other watchdog reset");
+    case ESP_RST_DEEPSLEEP: return F("deep-sleep wake");
+    case ESP_RST_BROWNOUT: return F("brownout reset (supply voltage sag)");
+    case ESP_RST_SDIO: return F("SDIO reset");
+    default: return F("unknown reset");
+  }
+}
+
+void logResetReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  Serial.print(F("Reset cause: "));
+  Serial.print(resetReasonName(reason));
+  Serial.print(F(" ("));
+  Serial.print(static_cast<int>(reason));
+  Serial.println(F(")"));
+}
+
+} // namespace
+
 void updateTouch() {
   // TouchController::update() also reports coordinate changes while a finger
   // remains on the panel.  Deliver only state edges to screens so a screen
@@ -111,6 +141,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
 
   Serial.println(F("ESP Media starting..."));
+  logResetReason();
   Serial.print(F("CPU MHz: "));
   Serial.println(getCpuFrequencyMhz());
   Serial.print(F("Flash bytes: "));

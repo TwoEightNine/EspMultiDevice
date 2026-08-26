@@ -88,8 +88,8 @@ void TextInputScreen::onEnter(const ScreenData &data) {
   _title = data.kind == ScreenDataKind::TextInput && data.text.length() > 0
              ? data.text : "Text input";
   _maskText = data.kind == ScreenDataKind::TextInput && data.maskInput;
-  _text = "";
-  _cursor = 0;
+  _text = data.kind == ScreenDataKind::TextInput ? data.initialText : "";
+  _cursor = _text.length();
   _shift = false;
   _capsLock = false;
   _symbols = false;

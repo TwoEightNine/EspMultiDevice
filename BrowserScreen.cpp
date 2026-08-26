@@ -4,6 +4,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <ctype.h>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -56,6 +57,11 @@ String trimCopy(const String &value) {
   String result = value;
   result.trim();
   return result;
+}
+
+String clientState(WiFiClient &client) {
+  return String(F("connected=")) + (client.connected() ? F("yes") : F("no")) +
+         F(", available=") + String(client.available());
 }
 
 bool startsWithIgnoreCase(const String &value, const char *prefix) {
@@ -150,6 +156,10 @@ uint64_t parseHttpDate(const String &source) {
 // allocating a full-size source canvas.
 class ThumbnailDecoder {
 public:
+  ~ThumbnailDecoder() {
+    discard();
+  }
+
   bool decode(const String &path, FileFormats::Format format, uint16_t *&pixels,
               uint8_t &width, uint8_t &height, uint16_t backgroundColor) {
     pixels = nullptr;
@@ -373,7 +383,8 @@ private:
 
   static int pngDraw(PNGDRAW *draw) {
     if (!_owner || !draw) return 0;
-    uint16_t *line = static_cast<uint16_t *>(malloc((size_t)draw->iWidth * sizeof(uint16_t)));
+    const size_t lineBytes = (size_t)draw->iWidth * sizeof(uint16_t);
+    uint16_t *line = static_cast<uint16_t *>(psramFound() ? ps_malloc(lineBytes) : malloc(lineBytes));
     if (!line) return 0;
     const uint16_t background = _owner->_backgroundColor;
     const uint32_t backgroundRgb = ((uint32_t)(background >> 8 & 0xf8)) |
@@ -419,9 +430,15 @@ ThumbnailDecoder *ThumbnailDecoder::_owner = nullptr;
 
 class HttpLock {
 public:
-  explicit HttpLock(SemaphoreHandle_t lock) : _lock(lock), _locked(lock && xSemaphoreTake(lock, portMAX_DELAY) == pdTRUE) {}
+  explicit HttpLock(SemaphoreHandle_t lock, TickType_t timeout = portMAX_DELAY)
+    : _lock(lock), _locked(lock && xSemaphoreTake(lock, timeout) == pdTRUE) {}
   ~HttpLock() { if (_locked) xSemaphoreGive(_lock); }
   bool locked() const { return _locked; }
+  bool acquire(TickType_t timeout) {
+    if (_locked) return true;
+    _locked = _lock && xSemaphoreTake(_lock, timeout) == pdTRUE;
+    return _locked;
+  }
 private:
   SemaphoreHandle_t _lock;
   bool _locked;
@@ -952,7 +969,19 @@ bool BrowserScreen::pollLoadingCancel() {
   // The foreground HTTP request runs in the Arduino task, so it needs to
   // poll touch itself. Image work is already on the second core and is
   // cancelled by releaseEmbeddedImages() through its generation check.
-  if (_activeImageGeneration) return _activeImageGeneration != _imageGeneration;
+  // Do not infer the caller from _activeImageGeneration: a newly opened link
+  // can start while a cancelled image worker is still unwinding. In that
+  // case the foreground request must inspect touch state, not inherit the
+  // worker's stale generation as a cancellation.
+  const bool calledByImageWorker = _imageWorker && xTaskGetCurrentTaskHandle() == _imageWorker;
+  if (calledByImageWorker) {
+    const bool cancelled = _activeImageGeneration != _imageGeneration;
+    if (cancelled) {
+      browserLog(String(F("image worker cancelled: activeGeneration=")) + String(_activeImageGeneration) +
+                 F(", currentGeneration=") + String(_imageGeneration));
+    }
+    return cancelled;
+  }
   if (!_foregroundLoading) return _loadCancelled;
   _touch.update();
   TouchPoint point = _touch.point();
@@ -962,7 +991,10 @@ bool BrowserScreen::pollLoadingCancel() {
   }
   if (!_loadCancelTouchDown) {
     _loadCancelTouchDown = true;
-    if (contains(_backBounds, point.x, point.y)) cancelLoading();
+    if (contains(_backBounds, point.x, point.y)) {
+      browserLog(String(F("foreground cancellation requested: x=")) + String(point.x) + F(", y=") + String(point.y));
+      cancelLoading();
+    }
   }
   return _loadCancelled;
 }
@@ -1373,6 +1405,13 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   // client. A task already in a network read is allowed to finish safely;
   // its result is discarded.
   releaseEmbeddedImages();
+  // The visual rows, links, and CSS rules contain Strings from the previous
+  // document. Clearing their allocations before a new TLS handshake avoids
+  // carrying an entire old page in scarce internal RAM while mbedTLS creates
+  // its bignum working buffers.
+  clearRenderedDocumentStorage();
+  browserLog(String(F("previous document released: freeHeap=")) + String(ESP.getFreeHeap()) +
+             F(", largestHeapBlock=") + String(ESP.getMaxAllocHeap()));
 
   _currentUrl = url;
   _showStart = false;
@@ -1394,7 +1433,10 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
 
   String downloadedPath;
   if (!cacheHit && !fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
-    browserLog(String(F("navigation failed: ")) + (_loadCancelled ? String(F("cancelled")) : error));
+    browserLog(String(F("navigation failed: url=")) + url + F(", phase=") + _loadingPhase +
+               F(", error=") + error + F(", userCancelled=") +
+               (_loadCancelled ? F("yes") : F("no")) + F(", activeImageGeneration=") +
+               String(_activeImageGeneration) + F(", currentImageGeneration=") + String(_imageGeneration));
     finishLoading();
     _message = _loadCancelled ? "Loading cancelled" : error;
     draw();
@@ -1529,7 +1571,52 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
                           String &contentType, String &downloadedPath, String &error,
                           uint32_t downloadLimit) {
   setLoadingPhase(F("Waiting for network access"));
-  HttpLock lock(_httpMutex);
+  const bool calledByImageWorker = _imageWorker && xTaskGetCurrentTaskHandle() == _imageWorker;
+  const uint32_t waitStartedMs = millis();
+  // releaseEmbeddedImages() invalidates a worker job immediately, but a
+  // decoder already running on the other core still owns its temporary heap
+  // until it returns. TLS needs several internal-RAM allocations during its
+  // handshake, so do not overlap it with that cleanup work.
+  if (!calledByImageWorker) {
+    setLoadingPhase(F("Waiting for image cleanup"));
+    while (_activeImageGeneration) {
+      if (pollLoadingCancel()) {
+        error = "Loading cancelled";
+        browserLog(String(F("image cleanup wait cancelled: waitedMs=")) + String(millis() - waitStartedMs));
+        return false;
+      }
+      if (millis() - waitStartedMs >= NetworkLockTimeoutMs) {
+        browserLog(String(F("image cleanup wait timed out: waitedMs=")) + String(millis() - waitStartedMs) +
+                   F(", activeImageGeneration=") + String(_activeImageGeneration));
+        error = "Browser is busy; try again";
+        return false;
+      }
+      delay(1);
+      yield();
+    }
+  }
+  // Inline images are fetched on the second core but share the two WiFiClient
+  // instances with foreground navigation.  Do not block the Arduino/UI task
+  // indefinitely if a remote image server has stalled.  Poll in short slices
+  // so the footer cancel button remains functional while it waits.
+  HttpLock lock(_httpMutex, 0);
+  while (!lock.acquire(pdMS_TO_TICKS(50))) {
+    if (pollLoadingCancel()) {
+      error = "Loading cancelled";
+      browserLog(String(F("network access wait cancelled: waitedMs=")) +
+                 String(millis() - waitStartedMs));
+      return false;
+    }
+    if (millis() - waitStartedMs >= NetworkLockTimeoutMs) {
+      browserLog(String(F("network access wait timed out: waitedMs=")) +
+                 String(millis() - waitStartedMs) + F(", activeImageGeneration=") +
+                 String(_activeImageGeneration) + F(", currentImageGeneration=") + String(_imageGeneration));
+      error = "Browser is busy; try again";
+      return false;
+    }
+    delay(1);
+    yield();
+  }
   if (!lock.locked()) {
     browserLog(F("HTTP lock unavailable"));
     error = "Browser is busy";
@@ -1551,10 +1638,17 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
                F(": ") + next);
     HttpResponse response{};
     WiFiClient *client = nullptr;
-    if (!requestOne(url, response, client, error)) return false;
+    if (!requestOne(url, response, client, error)) {
+      browserLog(String(F("HTTP request failed: url=")) + next + F(", phase=") + _loadingPhase +
+                 F(", error=") + error + F(", userCancelled=") +
+                 (_loadCancelled ? F("yes") : F("no")));
+      return false;
+    }
     if (response.statusCode >= 300 && response.statusCode <= 399) {
       client->stop();
       if (response.location.length() == 0) {
+        browserLog(String(F("redirect rejected: url=")) + next + F(", status=") + String(response.statusCode) +
+                   F(", reason=no Location header"));
         error = "Redirect has no destination";
         return false;
       }
@@ -1564,13 +1658,13 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
     }
     if (response.statusCode == 401) {
       client->stop();
-      browserLog(F("server requires unsupported Basic authentication"));
+      browserLog(String(F("server requires unsupported Basic authentication: url=")) + next);
       error = "Basic authentication is unsupported";
       return false;
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       client->stop();
-      browserLog(String(F("HTTP request rejected with status ")) + String(response.statusCode));
+      browserLog(String(F("HTTP request rejected: url=")) + next + F(", status=") + String(response.statusCode));
       error = "HTTP error " + String(response.statusCode);
       return false;
     }
@@ -1584,7 +1678,7 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
                (downloadable ? F(", media download") : F(", page response")));
     bool readOk = false;
     if (downloadable && response.compressed) {
-      browserLog(F("compressed media download rejected"));
+      browserLog(String(F("compressed media download rejected: url=")) + next + F(", encoding is not identity"));
       error = "Compressed file response unsupported";
     } else if (downloadable) {
       readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
@@ -1592,16 +1686,19 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
     } else {
       readOk = readBody(*client, response.chunked, response.contentLength, body, error);
     }
-    client->stop();
     if (!readOk) {
-      browserLog(String(F("response transfer failed: ")) + error);
+      browserLog(String(F("response transfer failed: url=")) + next + F(", phase=") + _loadingPhase +
+                 F(", error=") + error + F(", retainedBytes=") + String(body.length()) + F(", ") +
+                 clientState(*client));
+      client->stop();
       return false;
     }
+    client->stop();
     finalUrl = next;
     browserLog(String(F("HTTP transfer complete: ")) + finalUrl);
     return true;
   }
-  browserLog(F("redirect limit reached"));
+  browserLog(String(F("redirect limit reached: initialUrl=")) + initialUrl + F(", limit=") + String(MaxRedirects));
   error = "Too many redirects";
   return false;
 }
@@ -1610,6 +1707,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
                                String &error) {
   if (pollLoadingCancel()) {
     error = "Loading cancelled";
+    browserLog(String(F("request cancelled before connect: url=")) + url.scheme + F("://") + url.host + url.path);
     return false;
   }
   _plainClient.stop();
@@ -1617,12 +1715,66 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   client = &_plainClient;
   if (url.scheme == "https") {
     _secureClient.setInsecure();
+    _secureClient.setHandshakeTimeout(ConnectTimeoutMs / 1000);
     client = &_secureClient;
   }
   setLoadingPhase(String(F("Connecting to ")) + url.host);
   browserLog(String(F("connecting: ")) + url.scheme + F("://") + url.host + F(":") + String(url.port));
-  if (!client->connect(url.host.c_str(), url.port)) {
-    browserLog(F("connection failed"));
+  IPAddress resolvedAddress;
+  // The ESP32 Arduino core exposes hostByName without a caller-supplied
+  // timeout, so keep this diagnostic compatible with both older and newer
+  // core releases.
+  const int dnsResult = WiFi.hostByName(url.host.c_str(), resolvedAddress);
+  if (dnsResult != 1) {
+    browserLog(String(F("DNS lookup failed: host=")) + url.host + F(", result=") + String(dnsResult) +
+               F(", wifiStatus=") + String((int)WiFi.status()) + F(", rssi=") + String(WiFi.RSSI()));
+    error = "DNS lookup failed";
+    return false;
+  }
+  browserLog(String(F("DNS resolved: host=")) + url.host + F(", address=") + resolvedAddress.toString());
+  browserLog(String(F("TLS memory before connect: freeHeap=")) + String(ESP.getFreeHeap()) +
+             F(", largestHeapBlock=") + String(ESP.getMaxAllocHeap()) + F(", freePsram=") +
+             String(ESP.getFreePsram()) + F(", largestPsramBlock=") + String(ESP.getMaxAllocPsram()));
+  // connect() can include DNS lookup and the TLS handshake.  Supplying the
+  // same deadline used by response reads prevents a black-hole host from
+  // making the browser appear frozen before its cancel polling can begin.
+  const uint32_t initialConnectStartedMs = millis();
+  bool connected = client->connect(url.host.c_str(), url.port, (int32_t)ConnectTimeoutMs);
+  const uint32_t initialConnectElapsedMs = millis() - initialConnectStartedMs;
+  String rawTcpState = "not-tested";
+  uint32_t retryConnectElapsedMs = 0;
+  if (!connected && url.scheme == "https") {
+    // A generic -1 from NetworkClientSecure can be either a socket failure
+    // or a handshake timeout. Test TCP once first; retry TLS only when the
+    // server is demonstrably reachable, avoiding a second long wait for an
+    // unreachable address.
+    _plainClient.stop();
+    rawTcpState = _plainClient.connect(resolvedAddress, url.port, 1000) ? "connected" : "failed";
+    _plainClient.stop();
+    if (rawTcpState == "connected") {
+      _secureClient.stop();
+      _secureClient.setHandshakeTimeout(TlsRetryHandshakeTimeoutSeconds);
+      browserLog(String(F("HTTPS retrying resolved address: host=")) + url.host + F(", address=") +
+                 resolvedAddress.toString() + F(", handshakeTimeoutSeconds=") +
+                 String(TlsRetryHandshakeTimeoutSeconds));
+      const uint32_t retryConnectStartedMs = millis();
+      connected = _secureClient.connect(resolvedAddress, url.port, url.host.c_str(), nullptr, nullptr, nullptr);
+      retryConnectElapsedMs = millis() - retryConnectStartedMs;
+      if (connected) browserLog(String(F("HTTPS retry via resolved address succeeded: elapsedMs=")) +
+                                String(retryConnectElapsedMs));
+    }
+  }
+  if (!connected) {
+    char tlsErrorText[96] = {};
+    const int tlsError = url.scheme == "https"
+      ? _secureClient.lastError(tlsErrorText, sizeof(tlsErrorText)) : 0;
+    browserLog(String(F("connection failed: host=")) + url.host + F(", port=") + String(url.port) +
+               F(", initialConnectMs=") + String(initialConnectElapsedMs) + F(", timeoutMs=") +
+               String(ConnectTimeoutMs) + F(", wifiStatus=") +
+               String((int)WiFi.status()) + F(", rssi=") + String(WiFi.RSSI()) + F(", tlsError=") +
+               String(tlsError) + F(", tlsDetail=") + tlsErrorText + F(", retryConnectMs=") +
+               String(retryConnectElapsedMs) + F(", rawTcp=") +
+               rawTcpState + F(", ") + clientState(*client));
     error = _loadCancelled ? "Loading cancelled" : "Connection failed";
     return false;
   }
@@ -1630,6 +1782,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   if (pollLoadingCancel()) {
     client->stop();
     error = "Loading cancelled";
+    browserLog(String(F("request cancelled after connect: host=")) + url.host + F(", ") + clientState(*client));
     return false;
   }
   String hostHeader = url.host;
@@ -1641,8 +1794,10 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   String cookies = cookieHeaderFor(url);
   if (cookies.length()) request += "Cookie: " + cookies + "\r\n";
   request += "\r\n";
-  if (client->print(request) != request.length()) {
-    browserLog(F("request write failed"));
+  const size_t requestBytes = client->print(request);
+  if (requestBytes != request.length()) {
+    browserLog(String(F("request write failed: host=")) + url.host + F(", sent=") + String(requestBytes) +
+               F(", expected=") + String(request.length()) + F(", ") + clientState(*client));
     client->stop();
     error = "Request failed";
     return false;
@@ -1651,7 +1806,8 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   String line;
   setLoadingPhase(F("Waiting for response"));
   if (!readLine(*client, line, ConnectTimeoutMs) || !startsWithIgnoreCase(line, "HTTP/")) {
-    browserLog(F("invalid or timed out HTTP status line"));
+    browserLog(String(F("invalid or timed out HTTP status line: host=")) + url.host + F(", bytes=") +
+               String(line.length()) + F(", timeoutMs=") + String(ConnectTimeoutMs) + F(", ") + clientState(*client));
     client->stop();
     error = "Invalid HTTP response";
     return false;
@@ -1659,6 +1815,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   int firstSpace = line.indexOf(' ');
   response.statusCode = firstSpace >= 0 ? line.substring(firstSpace + 1).toInt() : 0;
   if (response.statusCode == 0) {
+    browserLog(String(F("invalid HTTP status: host=")) + url.host + F(", line=") + line);
     client->stop();
     client = nullptr;
     error = "Invalid HTTP status";
@@ -1673,7 +1830,8 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   response.location = "";
   for (uint8_t count = 0; count < 48; count++) {
     if (!readLine(*client, line, ConnectTimeoutMs)) {
-      browserLog(F("response headers timed out"));
+      browserLog(String(F("response headers timed out: host=")) + url.host + F(", headerCount=") +
+                 String(count) + F(", timeoutMs=") + String(ConnectTimeoutMs) + F(", ") + clientState(*client));
       client->stop();
       error = "Response headers timed out";
       return false;
@@ -1742,7 +1900,13 @@ bool BrowserScreen::readBody(WiFiClient &client, bool chunked, int32_t contentLe
   uint32_t reserveBytes = contentLength > 0
     ? (contentLength < (int32_t)MaxBodyBytes ? (uint32_t)contentLength : MaxBodyBytes)
     : 4096;
-  body.reserve(reserveBytes);
+  if (!body.reserve(reserveBytes)) {
+    browserLog(String(F("page body allocation failed: requestedBytes=")) + String(reserveBytes) +
+               F(", freeHeap=") + String(ESP.getFreeHeap()) + F(", largestBlock=") +
+               String(ESP.getMaxAllocHeap()));
+    error = "Not enough memory for page";
+    return false;
+  }
   uint32_t total = 0;
   uint32_t reported = 0;
   auto reportProgress = [&]() {
@@ -2306,6 +2470,7 @@ void BrowserScreen::renderPlainText(const String &text, const String &title) {
 
 void BrowserScreen::resetRenderedRows() {
   releaseEmbeddedImages();
+  clearRenderedDocumentStorage();
   _rowCount = 0;
   _pageCount = 0;
   _documentBackgroundColor = TFT_WHITE;
@@ -2316,6 +2481,14 @@ void BrowserScreen::resetRenderedRows() {
   _linkCount = 0;
   _pendingSpace = false;
   _renderedCharacters = 0;
+}
+
+void BrowserScreen::clearRenderedDocumentStorage() {
+  for (uint16_t i = 0; i < MaxRows; i++) _rows[i] = {};
+  for (uint8_t i = 0; i < MaxLinks; i++) _linkUrls[i] = "";
+  for (uint8_t i = 0; i < MaxStyleDepth; i++) _styleStack[i] = {};
+  for (uint8_t i = 0; i < MaxCssRules; i++) _cssRules[i] = {};
+  _titleBuffer = "";
 }
 
 void BrowserScreen::appendText(const String &text) {
@@ -2601,12 +2774,23 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
     return false;
   }
 
-  // Both decoders contain sizeable line buffers, so keep this out of the
-  // main Arduino task stack. Browsing loads images serially.
-  static ThumbnailDecoder decoder;
+  // PNGdec contains a 32 KiB row buffer in this build and JPEGDEC has another
+  // sizeable source buffer. Keeping a static decoder placed both in internal
+  // RAM for the whole browser lifetime, starving mbedTLS after image activity.
+  // Construct it in PSRAM for this single worker job and release it before the
+  // next HTTPS request. Do not place it on the task stack.
+  void *decoderStorage = psramFound() ? ps_malloc(sizeof(ThumbnailDecoder)) : malloc(sizeof(ThumbnailDecoder));
+  if (!decoderStorage) {
+    browserLog(String(F("image decoder allocation failed: bytes=")) + String(sizeof(ThumbnailDecoder)) +
+               F(", freeHeap=") + String(ESP.getFreeHeap()) + F(", freePsram=") + String(ESP.getFreePsram()));
+    return false;
+  }
+  ThumbnailDecoder *decoder = new (decoderStorage) ThumbnailDecoder();
   SpiBusLock::lock();
-  const bool decoded = decoder.decode(sourcePath, sourceFormat, pixels, width, height, backgroundColor);
+  const bool decoded = decoder->decode(sourcePath, sourceFormat, pixels, width, height, backgroundColor);
   SpiBusLock::unlock();
+  decoder->~ThumbnailDecoder();
+  free(decoderStorage);
   if (!cachedSource && SpiBusLock::lock(pdMS_TO_TICKS(100))) {
     SD.remove(sourcePath.c_str());
     SpiBusLock::unlock();
