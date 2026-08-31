@@ -84,7 +84,22 @@ private:
     DeleteHolding
   };
 
-  enum class MoveState : uint8_t { None, Copying, CleanupCaches, RemoveSource, Failed };
+  enum class OperationState : uint8_t {
+    None,
+    Deleting,
+    MovePreflight,
+    MoveCopying,
+    MoveCommit,
+    MoveRemoveSource,
+    MoveCleanupStage
+  };
+
+  struct PathTask {
+    String source;
+    String target;
+    bool directory;
+    bool expanded;
+  };
 
   SdCardController &_sdCard;
   SecretStorage &_secretStorage;
@@ -117,13 +132,23 @@ private:
   uint16_t _menuEntryIndex;
   uint32_t _deleteStartedMs;
   uint32_t _lastDeleteDrawMs;
-  MoveState _moveState;
+  OperationState _operationState;
+  PathTask *_tasks;
+  uint16_t _taskCount;
+  uint16_t _taskCapacity;
+  uint16_t _taskIndex;
   String _moveSourcePath;
   String _moveTargetPath;
-  String _moveTempPath;
+  String _moveStagePath;
+  String _moveStagedPath;
+  String _operationFailure;
   fs::File _moveSource;
   StorageFile _moveTarget;
   uint32_t _moveBytes;
+  bool _moveSourceDirectory;
+  bool _moveStageCreated;
+  bool _movePromoted;
+  bool _moveCachesCleaned;
   uint8_t _moveBuffer[4096];
 
   void draw();
@@ -170,6 +195,7 @@ private:
   String parentPath() const;
   String fullPathFor(const Entry &entry) const;
   String displayName(const String &path) const;
+  bool canActOnEntry(const Entry &entry) const;
   void openEntry(uint16_t index);
   void showMenu(uint16_t index);
   void closeMenu();
@@ -178,12 +204,22 @@ private:
   bool validFileName(const String &name) const;
   void beginDeleteHold();
   void updateDeleteHold(uint32_t nowMs);
-  void deleteSelectedFile();
+  void startDeleteSelected();
   void beginMoveToSecret();
-  void updateMoveToSecret();
-  void finishMoveToSecret(bool success, const String &message);
+  void updateOperation();
+  void updateRecursiveDelete();
+  void updateMovePreflight();
+  void updateMoveCopy();
+  void updateMoveCommit();
+  void finishOperation(bool success, const String &message);
+  void failMove(const String &message);
+  void refreshListing();
+  void clearTasks();
+  bool appendTask(const String &source, const String &target, bool directory, bool expanded = false);
+  bool expandDeleteDirectory(const PathTask &task);
+  bool removePath(const String &path, bool directory);
+  bool prepareMoveTarget(const Entry &entry);
   bool removePlaintextCaches(const String &sourcePath);
-  void removeEntryFromListing(uint16_t index);
   void showMessage(const String &message, uint32_t durationMs = 1800);
   void handleSdCardEvent(SdCardEvent event);
 };

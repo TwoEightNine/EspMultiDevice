@@ -631,13 +631,23 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _menuEntryIndex(InvalidEntryIndex),
     _deleteStartedMs(0),
     _lastDeleteDrawMs(0),
-    _moveState(MoveState::None),
+    _operationState(OperationState::None),
+    _tasks(nullptr),
+    _taskCount(0),
+    _taskCapacity(0),
+    _taskIndex(0),
     _moveSourcePath(),
     _moveTargetPath(),
-    _moveTempPath(),
+    _moveStagePath(),
+    _moveStagedPath(),
+    _operationFailure(),
     _moveSource(),
     _moveTarget(),
-    _moveBytes(0) {
+    _moveBytes(0),
+    _moveSourceDirectory(false),
+    _moveStageCreated(false),
+    _movePromoted(false),
+    _moveCachesCleaned(false) {
   for (uint8_t i = 0; i < MaxCachedDirectories; i++) {
     _cache[i] = {"", nullptr, 0, 0, false};
   }
@@ -647,6 +657,9 @@ FilesScreen::FilesScreen(Navigator &navigator,
 }
 
 FilesScreen::~FilesScreen() {
+  if (_moveSource) _moveSource.close();
+  if (_moveTarget) _moveTarget.close();
+  clearTasks();
   clearCache();
   clearThumbnails();
   delete[] _rows;
@@ -721,7 +734,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
   if (_lastTouchDown) return;
   _lastTouchDown = true;
 
-  if (_moveState != MoveState::None) return;
+  if (_operationState != OperationState::None) return;
   if (UiKit::navigationIconContains(point.x, point.y)) {
     _navigator.pop();
     return;
@@ -762,7 +775,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
       openParentDirectory();
     } else if (row.entryIndex != InvalidEntryIndex) {
       Entry *entry = entryAt(row.entryIndex);
-      if (entry && !entry->directory && point.x >= _display.width() - ActionWidth) showMenu(row.entryIndex);
+      if (entry && point.x >= _display.width() - ActionWidth && canActOnEntry(*entry)) showMenu(row.entryIndex);
       else openEntry(row.entryIndex);
     }
     return;
@@ -772,7 +785,7 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
 void FilesScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
   collectThumbnailResults();
-  if (_moveState != MoveState::None) updateMoveToSecret();
+  if (_operationState != OperationState::None) updateOperation();
   if (_menuState == MenuState::DeleteHolding) updateDeleteHold(nowMs);
   if (_message.length() && (int32_t)(nowMs - _messageUntilMs) >= 0) {
     _message = "";
@@ -902,12 +915,14 @@ void FilesScreen::drawRow(const Row &row) {
           : openable && FileFormats::isVideo(entry->format) ? VideoFileColor : FileColor;
   }
   UiKit::drawListCell(_display.tft(), _display.width(), row.bounds.y, entry->name, icon, color,
-                      entry->directory ? String() : String(F("            ")));
+                      canActOnEntry(*entry) ? String(F("            ")) : String());
   if (!entry->directory) {
     const String path = fullPathFor(*entry);
     Thumbnail *thumbnail = thumbnailFor(path);
     if (thumbnail && thumbnail->pixels) _display.tft().pushImage(8, row.bounds.y + 4, FileThumbnailWorker::Size,
                                                                   FileThumbnailWorker::Size, thumbnail->pixels);
+  }
+  if (canActOnEntry(*entry)) {
     drawVerticalEllipsis(_display.width() - ActionWidth / 2, row.bounds.y + UiKit::ListCellHeight / 2, TFT_LIGHTGREY);
   }
 }
@@ -943,7 +958,7 @@ void FilesScreen::drawContextMenu() {
   if (_menuEntryIndex == InvalidEntryIndex || !entryAt(_menuEntryIndex)) return;
   TFT_eSPI &tft = _display.tft();
   const int16_t menuWidth = 150;
-  const bool canMove = _secretMode && _currentPath != SecretStorage::Directory;
+  const bool canMove = _secretMode && !_secretStorage.isSecretPath(_currentPath);
   const int16_t menuHeight = canMove ? 114 : 76;
   const int16_t x = _display.width() - menuWidth - 8;
   const int16_t y = RowTop + 4;
@@ -959,7 +974,9 @@ void FilesScreen::drawContextMenu() {
   tft.drawFastHLine(x + 8, _deleteBounds.y, menuWidth - 16, TFT_DARKGREY);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, MenuColor);
-  tft.drawString(F("Rename"), x + 14, _renameBounds.y + _renameBounds.h / 2, 2);
+  const Entry *entry = entryAt(_menuEntryIndex);
+  tft.drawString(entry && entry->directory ? F("Rename folder") : F("Rename"),
+                 x + 14, _renameBounds.y + _renameBounds.h / 2, 2);
   if (canMove) {
     tft.setTextColor(TFT_WHITE, MenuColor);
     tft.drawString(F("Move to secret"), x + 14, _moveBounds.y + _moveBounds.h / 2, 2);
@@ -1058,7 +1075,7 @@ void FilesScreen::queueVisibleThumbnails() {
     Thumbnail *thumbnail = thumbnailFor(path);
     if (!thumbnail) thumbnail = reserveThumbnail(path);
     if (!thumbnail || thumbnail->pixels || thumbnail->pending || thumbnail->failed) continue;
-    const bool encrypted = _secretMode && _currentPath == SecretStorage::Directory;
+    const bool encrypted = _secretMode && _secretStorage.isSecretPath(_currentPath);
     if (_thumbnailWorker->enqueue(path, entry->format, _listingGeneration, encrypted)) {
       thumbnail->pending = true;
       thumbnailLog(String(F("queued ")) + path);
@@ -1213,10 +1230,10 @@ bool FilesScreen::loadDirectory(DirectoryCache &cache, const String &path) {
     if (!isHiddenEntry(name, path) && index < count) {
       const String stored = displayName(name);
       String decrypted = stored;
-      if (_secretMode && path == SecretStorage::Directory) {
+      if (_secretMode && _secretStorage.isSecretPath(path)) {
         if (!_secretStorage.decryptName(stored, decrypted)) decrypted = "?";
       }
-      entries[index].name = _secretMode && path == SecretStorage::Directory
+      entries[index].name = _secretMode && _secretStorage.isSecretPath(path)
         ? _secretStorage.displayName(decrypted) : decrypted;
       entries[index].storageName = stored;
       if (_secretMode && path == "/" && stored == String(SecretStorage::Directory).substring(1)) {
@@ -1361,6 +1378,12 @@ String FilesScreen::displayName(const String &path) const {
   return slash < 0 ? path : path.substring(slash + 1);
 }
 
+bool FilesScreen::canActOnEntry(const Entry &entry) const {
+  if (_secretMode && _secretStorage.isSecretPath(_currentPath)) return false;
+  return !(_currentPath == "/" && entry.directory &&
+           entry.storageName == String(SecretStorage::Directory).substring(1));
+}
+
 void FilesScreen::openEntry(uint16_t index) {
   Entry *entry = entryAt(index);
   if (!entry) return;
@@ -1371,7 +1394,7 @@ void FilesScreen::openEntry(uint16_t index) {
   const String path = fullPathFor(*entry);
   _retainCacheWhileCovered = true;
   bool opened = false;
-  const bool secret = _secretMode && _currentPath == SecretStorage::Directory;
+  const bool secret = _secretMode && _secretStorage.isSecretPath(_currentPath);
   if (FileFormats::isImage(entry->format) && FileFormats::isOpenable(entry->format)) {
     opened = _navigator.push(ScreenId::ImageViewer, secret ? ScreenData::secretImagePath(path, _secretStorage.pin()) : ScreenData::imagePath(path));
   } else if (FileFormats::isAudio(entry->format) && FileFormats::isOpenable(entry->format)) {
@@ -1386,7 +1409,7 @@ void FilesScreen::openEntry(uint16_t index) {
 
 void FilesScreen::showMenu(uint16_t index) {
   Entry *entry = entryAt(index);
-  if (!entry || entry->directory || (_secretMode && _currentPath == SecretStorage::Directory)) return;
+  if (!entry || !canActOnEntry(*entry)) return;
   _menuEntryIndex = index;
   _menuState = MenuState::Actions;
   drawContextMenu();
@@ -1406,7 +1429,8 @@ void FilesScreen::startRename() {
   _pendingRenamePath = fullPathFor(*entry);
   _retainCacheWhileCovered = true;
   closeMenu();
-  if (!_navigator.push(ScreenId::TextInput, ScreenData::textInput("Rename file", false, entry->name))) {
+  if (!_navigator.push(ScreenId::TextInput,
+                       ScreenData::textInput(entry->directory ? "Rename folder" : "Rename file", false, entry->name))) {
     _retainCacheWhileCovered = false;
     _pendingRenamePath = "";
     showMessage(F("Unable to open keyboard"));
@@ -1440,17 +1464,8 @@ void FilesScreen::applyRename(const String &newName) {
     draw();
     return;
   }
-  for (uint16_t i = 0; _listing && i < _listing->count; i++) {
-    if (fullPathFor(_listing->entries[i]) == _pendingRenamePath) {
-      _listing->entries[i].name = newName;
-      _listing->entries[i].format = FileFormats::fromPath(newName);
-      invalidateThumbnail(_pendingRenamePath);
-      sortListing();
-      break;
-    }
-  }
   showMessage(F("Renamed"));
-  draw();
+  refreshListing();
 }
 
 void FilesScreen::beginDeleteHold() {
@@ -1469,7 +1484,7 @@ void FilesScreen::updateDeleteHold(uint32_t nowMs) {
     return;
   }
   if (nowMs - _deleteStartedMs >= DeleteHoldMs) {
-    deleteSelectedFile();
+    startDeleteSelected();
     return;
   }
   if (nowMs - _lastDeleteDrawMs >= 80) {
@@ -1478,82 +1493,150 @@ void FilesScreen::updateDeleteHold(uint32_t nowMs) {
   }
 }
 
-void FilesScreen::deleteSelectedFile() {
+void FilesScreen::startDeleteSelected() {
   Entry *entry = entryAt(_menuEntryIndex);
-  if (!entry || entry->directory) {
+  if (!entry || !canActOnEntry(*entry)) {
     closeMenu();
     return;
   }
   const String path = fullPathFor(*entry);
-  bool removed = false;
-  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    removed = SD.remove(path.c_str());
-    SpiBusLock::unlock();
-  }
-  const uint16_t index = _menuEntryIndex;
   closeMenu();
-  if (!removed) {
-    showMessage(F("Delete failed"));
-  } else {
-    removeEntryFromListing(index);
-    showMessage(F("Deleted"));
+  clearTasks();
+  if (!appendTask(path, "", entry->directory)) {
+    showMessage(F("Not enough memory to delete"));
+    draw();
+    return;
   }
-  redrawListingArea();
+  _operationState = OperationState::Deleting;
+  showMessage(entry->directory ? F("Deleting folder...") : F("Deleting..."), 60000);
+  draw();
 }
 
 void FilesScreen::beginMoveToSecret() {
   Entry *entry = entryAt(_menuEntryIndex);
-  if (!entry || entry->directory || !_secretMode || _currentPath == SecretStorage::Directory ||
+  if (!entry || !canActOnEntry(*entry) || !_secretMode || _secretStorage.isSecretPath(_currentPath) ||
       !_secretStorage.unlocked()) return;
-  String encoded;
-  String error;
-  if (!_secretStorage.encryptName(entry->name, encoded, error)) {
-    showMessage(error);
-    closeMenu();
-    draw();
-    return;
-  }
-  _moveSourcePath = fullPathFor(*entry);
-  _moveTargetPath = String(SecretStorage::Directory) + "/" + encoded;
-  _moveTempPath = _moveTargetPath + F(".tmp");
-  if (_secretStorage.exists(_moveTargetPath)) {
-    showMessage(F("Secret file already exists"));
-    closeMenu();
-    draw();
-    return;
-  }
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    showMessage(F("Storage busy"));
-    return;
-  }
-  _secretStorage.remove(_moveTempPath);
-  _moveSource = SD.open(_moveSourcePath.c_str(), FILE_READ);
-  _moveTarget = _secretStorage.open(_moveTempPath, FILE_WRITE, true);
-  SpiBusLock::unlock();
-  if (!_moveSource || !_moveTarget) {
-    if (_moveSource) _moveSource.close();
-    if (_moveTarget) _moveTarget.close();
-    _secretStorage.remove(_moveTempPath);
-    showMessage(F("Cannot start secret move"));
-    closeMenu();
-    draw();
-    return;
-  }
-  _moveBytes = 0;
-  _moveState = MoveState::Copying;
   closeMenu();
-  showMessage(F("Moving to secret..."), 60000);
+  if (!prepareMoveTarget(*entry)) {
+    draw();
+    return;
+  }
+  _operationState = OperationState::MovePreflight;
+  showMessage(entry->directory ? F("Checking folder...") : F("Checking file..."), 60000);
   draw();
 }
 
-void FilesScreen::updateMoveToSecret() {
-  if (_moveState == MoveState::Copying) {
+bool FilesScreen::prepareMoveTarget(const Entry &entry) {
+  String encoded;
+  String error;
+  if (!_secretStorage.encryptName(entry.name, encoded, error)) {
+    showMessage(error);
+    return false;
+  }
+  _moveSourcePath = fullPathFor(entry);
+  _moveTargetPath = String(SecretStorage::Directory) + "/" + encoded;
+  const uint32_t started = millis();
+  uint8_t attempt = 0;
+  do {
+    _moveStagePath = String(SecretStorage::Directory) + F("/.move-") + String(started) + F("-") + String(attempt++) + F(".tmp");
+  } while (_secretStorage.exists(_moveStagePath) && attempt != 0);
+  if (_secretStorage.exists(_moveStagePath)) {
+    showMessage(F("Secret staging area is busy"));
+    return false;
+  }
+  _moveStagedPath = _moveStagePath + "/" + encoded;
+  _moveSourceDirectory = entry.directory;
+  _moveStageCreated = false;
+  _movePromoted = false;
+  _moveCachesCleaned = false;
+  _moveBytes = 0;
+  _operationFailure = "";
+  if (_secretStorage.exists(_moveTargetPath)) {
+    showMessage(entry.directory ? F("Secret folder already exists") : F("Secret file already exists"));
+    return false;
+  }
+  clearTasks();
+  _taskIndex = 0;
+  if (!appendTask(_moveSourcePath, _moveStagedPath, entry.directory)) {
+    showMessage(F("Not enough memory to move"));
+    return false;
+  }
+  return true;
+}
+
+void FilesScreen::updateOperation() {
+  if (_operationState == OperationState::Deleting ||
+      _operationState == OperationState::MoveRemoveSource ||
+      _operationState == OperationState::MoveCleanupStage) {
+    updateRecursiveDelete();
+  } else if (_operationState == OperationState::MovePreflight) {
+    updateMovePreflight();
+  } else if (_operationState == OperationState::MoveCopying) {
+    updateMoveCopy();
+  } else if (_operationState == OperationState::MoveCommit) {
+    updateMoveCommit();
+  }
+}
+
+void FilesScreen::updateMovePreflight() {
+  if (_taskIndex >= _taskCount) {
+    _taskIndex = 0;
+    _operationState = OperationState::MoveCopying;
+    showMessage(_moveSourceDirectory ? F("Moving folder to secret...") : F("Moving to secret..."), 60000);
+    return;
+  }
+  const PathTask task = _tasks[_taskIndex++];
+  if (!task.directory) return;
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  File directory = SD.open(task.source.c_str(), FILE_READ);
+  if (!directory || !directory.isDirectory()) {
+    if (directory) directory.close();
+    SpiBusLock::unlock();
+    failMove(F("Cannot read source folder"));
+    return;
+  }
+  bool valid = true;
+  String error;
+  File child = directory.openNextFile();
+  while (child && valid) {
+    const String name = displayName(child.name());
+    if (name != F(".cache")) {
+      String encoded;
+      if (!_secretStorage.encryptName(name, encoded, error)) {
+        valid = false;
+      } else {
+        String source = child.name();
+        if (!source.startsWith("/")) source = task.source + "/" + name;
+        valid = appendTask(source, task.target + "/" + encoded, child.isDirectory());
+        if (!valid) error = F("Not enough memory to move folder");
+      }
+    }
+    child.close();
+    if (valid) child = directory.openNextFile();
+  }
+  directory.close();
+  SpiBusLock::unlock();
+  if (!valid) failMove(error.length() ? error : String(F("Cannot inspect source folder")));
+}
+
+void FilesScreen::updateMoveCopy() {
+  if (!_moveStageCreated) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+    const bool ready = _secretStorage.mkdir(_moveStagePath);
+    SpiBusLock::unlock();
+    if (!ready) {
+      failMove(F("Cannot prepare secret storage"));
+      return;
+    }
+    _moveStageCreated = true;
+  }
+  if (_moveSource || _moveTarget) {
     if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return;
     const int count = _moveSource.read(_moveBuffer, sizeof(_moveBuffer));
     const bool written = count <= 0 || _moveTarget.write(_moveBuffer, (size_t)count) == (size_t)count;
     SpiBusLock::unlock();
     if (count < 0 || !written) {
-      finishMoveToSecret(false, F("Secret move write failed"));
+      failMove(F("Secret move write failed"));
       return;
     }
     _moveBytes += count > 0 ? (uint32_t)count : 0;
@@ -1561,32 +1644,189 @@ void FilesScreen::updateMoveToSecret() {
     _moveSource.close();
     _moveTarget.flush();
     _moveTarget.close();
-    if (!_secretStorage.rename(_moveTempPath, _moveTargetPath)) {
-      finishMoveToSecret(false, F("Secret move commit failed"));
+    _taskIndex++;
+    return;
+  }
+  if (_taskIndex >= _taskCount) {
+    _operationState = OperationState::MoveCommit;
+    return;
+  }
+  const PathTask &task = _tasks[_taskIndex];
+  if (task.directory) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+    const bool made = _secretStorage.mkdir(task.target);
+    SpiBusLock::unlock();
+    if (!made) {
+      failMove(F("Cannot create secret folder"));
       return;
     }
-    _moveState = MoveState::CleanupCaches;
+    _taskIndex++;
+    return;
   }
-  if (_moveState == MoveState::CleanupCaches) {
-    if (!removePlaintextCaches(_moveSourcePath)) {
-      _secretStorage.remove(_moveTargetPath);
-      finishMoveToSecret(false, F("Could not remove plaintext cache"));
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  _moveSource = SD.open(task.source.c_str(), FILE_READ);
+  _moveTarget = _secretStorage.open(task.target, FILE_WRITE, true);
+  SpiBusLock::unlock();
+  if (!_moveSource || !_moveTarget) {
+    failMove(F("Cannot copy source file"));
+  }
+}
+
+void FilesScreen::updateMoveCommit() {
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  const bool committed = _secretStorage.rename(_moveStagedPath, _moveTargetPath);
+  if (committed) SD.rmdir(_moveStagePath.c_str());
+  SpiBusLock::unlock();
+  if (!committed) {
+    failMove(F("Secret move commit failed"));
+    return;
+  }
+  _movePromoted = true;
+  _moveStageCreated = false;
+  _operationState = OperationState::MoveRemoveSource;
+  clearTasks();
+  _taskIndex = 0;
+  showMessage(F("Removing original..."), 60000);
+}
+
+void FilesScreen::updateRecursiveDelete() {
+  if (_operationState == OperationState::MoveRemoveSource && !_moveCachesCleaned) {
+    if (!_moveSourceDirectory && !removePlaintextCaches(_moveSourcePath)) {
+      finishOperation(false, F("Secret copy kept; cache cleanup failed"));
       return;
     }
-    _moveState = MoveState::RemoveSource;
-  }
-  if (_moveState == MoveState::RemoveSource) {
-    if (!SD.remove(_moveSourcePath.c_str())) {
-      _secretStorage.remove(_moveTargetPath);
-      finishMoveToSecret(false, F("Could not remove original file"));
+    _moveCachesCleaned = true;
+    if (!appendTask(_moveSourcePath, "", _moveSourceDirectory)) {
+      finishOperation(false, F("Secret copy kept; cleanup ran out of memory"));
       return;
     }
-    clearCache();
-    clearThumbnails();
-    _listingGeneration++;
-    ensureListing(_currentPath);
-    finishMoveToSecret(true, F("Moved to secret"));
   }
+  if (_taskCount == 0) {
+    if (_operationState == OperationState::Deleting) {
+      finishOperation(true, F("Deleted"));
+    } else if (_operationState == OperationState::MoveCleanupStage) {
+      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+    } else {
+      finishOperation(true, F("Moved to secret"));
+    }
+    return;
+  }
+  const PathTask task = _tasks[_taskCount - 1];
+  _taskCount--;
+  if (task.directory && !task.expanded) {
+    if (!appendTask(task.source, task.target, true, true) || !expandDeleteDirectory(task)) {
+      if (_operationState == OperationState::Deleting) {
+        finishOperation(false, F("Delete failed"));
+      } else if (_operationState == OperationState::MoveCleanupStage) {
+        finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+      } else {
+        finishOperation(false, F("Secret copy kept; source cleanup failed"));
+      }
+    }
+    return;
+  }
+  if (!removePath(task.source, task.directory)) {
+    if (_operationState == OperationState::Deleting) {
+      finishOperation(false, F("Delete failed"));
+    } else if (_operationState == OperationState::MoveCleanupStage) {
+      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+    } else {
+      finishOperation(false, F("Secret copy kept; source cleanup failed"));
+    }
+  }
+}
+
+bool FilesScreen::expandDeleteDirectory(const PathTask &task) {
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  File directory = SD.open(task.source.c_str(), FILE_READ);
+  if (!directory || !directory.isDirectory()) {
+    if (directory) directory.close();
+    SpiBusLock::unlock();
+    return false;
+  }
+  bool listed = true;
+  File child = directory.openNextFile();
+  while (child && listed) {
+    String path = child.name();
+    if (!path.startsWith("/")) path = task.source + "/" + displayName(path);
+    listed = appendTask(path, "", child.isDirectory());
+    child.close();
+    if (listed) child = directory.openNextFile();
+  }
+  directory.close();
+  SpiBusLock::unlock();
+  return listed;
+}
+
+bool FilesScreen::removePath(const String &path, bool directory) {
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  const bool removed = directory ? SD.rmdir(path.c_str()) : SD.remove(path.c_str());
+  SpiBusLock::unlock();
+  return removed;
+}
+
+void FilesScreen::clearTasks() {
+  delete[] _tasks;
+  _tasks = nullptr;
+  _taskCount = 0;
+  _taskCapacity = 0;
+  _taskIndex = 0;
+}
+
+bool FilesScreen::appendTask(const String &source, const String &target, bool directory, bool expanded) {
+  if (_taskCount == 0xffff) return false;
+  if (_taskCount == _taskCapacity) {
+    uint16_t capacity = _taskCapacity ? (uint16_t)(_taskCapacity * 2) : 16;
+    if (capacity <= _taskCapacity) capacity = 0xffff;
+    PathTask *tasks = new PathTask[capacity];
+    if (!tasks) return false;
+    for (uint16_t i = 0; i < _taskCount; i++) tasks[i] = _tasks[i];
+    delete[] _tasks;
+    _tasks = tasks;
+    _taskCapacity = capacity;
+  }
+  _tasks[_taskCount++] = {source, target, directory, expanded};
+  return true;
+}
+
+void FilesScreen::failMove(const String &message) {
+  if (_moveSource) _moveSource.close();
+  if (_moveTarget) _moveTarget.close();
+  _operationFailure = message;
+  clearTasks();
+  if (_moveStageCreated && !_movePromoted) {
+    _operationState = OperationState::MoveCleanupStage;
+    if (appendTask(_moveStagePath, "", true)) return;
+  }
+  finishOperation(false, message);
+}
+
+void FilesScreen::refreshListing() {
+  clearCache();
+  clearThumbnails();
+  _listingGeneration++;
+  if (_sdMounted && !ensureListing(_currentPath)) showMessage(F("Unable to list folder"));
+  draw();
+}
+
+void FilesScreen::finishOperation(bool success, const String &message) {
+  (void)success;
+  if (_moveSource) _moveSource.close();
+  if (_moveTarget) _moveTarget.close();
+  _operationState = OperationState::None;
+  clearTasks();
+  _moveSourcePath = "";
+  _moveTargetPath = "";
+  _moveStagePath = "";
+  _moveStagedPath = "";
+  _operationFailure = "";
+  _moveBytes = 0;
+  _moveSourceDirectory = false;
+  _moveStageCreated = false;
+  _movePromoted = false;
+  _moveCachesCleaned = false;
+  showMessage(message);
+  refreshListing();
 }
 
 bool FilesScreen::removePlaintextCaches(const String &sourcePath) {
@@ -1597,28 +1837,12 @@ bool FilesScreen::removePlaintextCaches(const String &sourcePath) {
   const char *suffixes[] = { ".eth1", ".em16", ".emga", ".empa", ".eth1.tmp", ".em16.tmp", ".emga.tmp", ".empa.tmp" };
   for (const char *suffix : suffixes) {
     const String path = base + suffix;
-    if (SD.exists(path.c_str()) && !SD.remove(path.c_str())) return false;
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+    const bool removed = !SD.exists(path.c_str()) || SD.remove(path.c_str());
+    SpiBusLock::unlock();
+    if (!removed) return false;
   }
   return true;
-}
-
-void FilesScreen::finishMoveToSecret(bool success, const String &message) {
-  if (_moveSource) _moveSource.close();
-  if (_moveTarget) _moveTarget.close();
-  if (!success && _moveTempPath.length()) _secretStorage.remove(_moveTempPath);
-  _moveState = MoveState::None;
-  _moveSourcePath = _moveTargetPath = _moveTempPath = "";
-  _moveBytes = 0;
-  showMessage(message);
-  redrawListingArea();
-}
-
-void FilesScreen::removeEntryFromListing(uint16_t index) {
-  if (!_listing || index >= _listing->count) return;
-  invalidateThumbnail(fullPathFor(_listing->entries[index]));
-  for (uint16_t i = index + 1; i < _listing->count; i++) _listing->entries[i - 1] = _listing->entries[i];
-  _listing->count--;
-  updatePageCount();
 }
 
 void FilesScreen::showMessage(const String &message, uint32_t durationMs) {
@@ -1628,11 +1852,22 @@ void FilesScreen::showMessage(const String &message, uint32_t durationMs) {
 
 void FilesScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::None) return;
-  if ((event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) && _moveState != MoveState::None) {
+  if ((event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) && _operationState != OperationState::None) {
     if (_moveSource) _moveSource.close();
     if (_moveTarget) _moveTarget.close();
-    _moveState = MoveState::None;
-    _moveSourcePath = _moveTargetPath = _moveTempPath = "";
+    _operationState = OperationState::None;
+    clearTasks();
+    _moveSourcePath = "";
+    _moveTargetPath = "";
+    _moveStagePath = "";
+    _moveStagedPath = "";
+    _operationFailure = "";
+    _moveBytes = 0;
+    _moveSourceDirectory = false;
+    _moveStageCreated = false;
+    _movePromoted = false;
+    _moveCachesCleaned = false;
+    showMessage(F("SD card removed; operation stopped"), 3000);
   }
   closeMenu();
   if (event == SdCardEvent::Mounted) {
