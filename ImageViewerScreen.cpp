@@ -147,6 +147,12 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     return;
   }
   _path = data.text;
+  // Put a real frame on the panel before touching SD or allocating decode
+  // buffers.  Animated formats continue their build incrementally in tick(),
+  // and this prevents a blank/previous Files screen during header/cache work.
+  draw();
+  drawLoading(0);
+  yield();
   if (!_sdCard.isMounted()) {
     _error = F("SD card unavailable");
     drawError();

@@ -460,6 +460,9 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _recentCount(0),
     _cookieCount(0),
     _loaded(false),
+    _lifecycleLoading(false),
+    _lifecycleDrawPending(false),
+    _lifecycleGeneration(0),
     _showStart(true),
     _lastTouchDown(false),
     _loadCancelled(false),
@@ -494,6 +497,8 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _imageJobs(xQueueCreate(ImageJobQueueLength, sizeof(ImageJob))),
     _imageResults(xQueueCreate(ImageJobQueueLength, sizeof(ImageResult))),
     _imageWorker(nullptr),
+    _lifecycleJobs(xQueueCreate(LifecycleJobQueueLength, sizeof(LifecycleJob))),
+    _lifecycleWorker(nullptr),
     _httpMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
     _currentStyle{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false},
@@ -527,17 +532,26 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
   } else {
     browserLog(F("image worker unavailable: queue allocation failed"));
   }
+  if (_lifecycleJobs) {
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+    const BaseType_t workerCore = 0;
+#else
+    const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
+#endif
+    xTaskCreatePinnedToCore(lifecycleWorkerTask, "browser-startup", 6144, this,
+                            tskIDLE_PRIORITY + 1, &_lifecycleWorker, workerCore);
+  } else {
+    browserLog(F("browser startup worker unavailable"));
+  }
 }
 
 void BrowserScreen::onEnter() {
   browserLog(F("entered"));
-  if (!_sessionCacheActive) beginSessionCache();
-  if (!_loaded) {
-    browserLog(F("loading saved state"));
-    loadState();
-    _loaded = true;
-  }
   _lastTouchDown = false;
+  // Draw the interactive shell before any SD work.  The lifecycle worker
+  // loads persistent state and clears the previous session cache on the
+  // other core; this avoids holding the Home screen during Browser entry.
+  if ((!_sessionCacheActive || !_loaded) && !_lifecycleLoading) startLifecycleLoad();
   draw();
 }
 
@@ -550,6 +564,10 @@ void BrowserScreen::onResult(const ScreenResult &result) {
 
 void BrowserScreen::tick(uint32_t nowMs) {
   (void)nowMs;
+  if (_lifecycleDrawPending) {
+    _lifecycleDrawPending = false;
+    draw();
+  }
   collectImageResults();
   pumpImageJobs();
   if (_deferCachedPageDraw && cachedPageImagesComplete()) {
@@ -559,6 +577,50 @@ void BrowserScreen::tick(uint32_t nowMs) {
     finishLoading();
     browserLog(F("cached page images ready; drawing page"));
     draw();
+  }
+}
+
+void BrowserScreen::startLifecycleLoad() {
+  _lifecycleGeneration++;
+  if (_lifecycleGeneration == 0) _lifecycleGeneration = 1;
+  _lifecycleLoading = true;
+  _lifecycleDrawPending = false;
+  // Do not touch the SD card here.  A failed queue allocation still leaves a
+  // useful Browser shell; state can be loaded on a later entry.
+  LifecycleJob job{_lifecycleGeneration};
+  if (!_lifecycleJobs || xQueueSend(_lifecycleJobs, &job, 0) != pdTRUE) {
+    _lifecycleLoading = false;
+    browserLog(F("browser startup job could not be queued"));
+  }
+}
+
+void BrowserScreen::lifecycleWorkerTask(void *context) {
+  BrowserScreen *screen = static_cast<BrowserScreen *>(context);
+  LifecycleJob job{};
+  while (true) {
+    if (xQueueReceive(screen->_lifecycleJobs, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (job.generation != screen->_lifecycleGeneration) continue;
+
+    // A browser session never needs its old temporary pages after it has
+    // been closed.  Performing this potentially long recursive SD cleanup
+    // here keeps both opening and closing Browser responsive.
+    screen->_sessionCacheActive = true;
+    screen->_sessionCacheInitialized = false;
+    {
+      HttpLock lock(screen->_httpMutex);
+      if (lock.locked() && job.generation == screen->_lifecycleGeneration) {
+        screen->_sessionCacheInitialized = screen->clearSessionCacheLocked();
+      }
+    }
+    if (job.generation == screen->_lifecycleGeneration) {
+      if (!screen->_loaded) {
+        screen->loadState();
+        screen->_loaded = true;
+      }
+      screen->_lifecycleLoading = false;
+      screen->_lifecycleDrawPending = true;
+      browserLog(F("browser startup work complete"));
+    }
   }
 }
 
@@ -573,6 +635,11 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   if (contains(_closeBounds, point.x, point.y)) {
     browserLog(F("close requested"));
     releaseEmbeddedImages();
+    // Never wait for an image decoder or delete a directory from the touch
+    // handler.  The next Browser entry clears the disposable session cache
+    // from its lifecycle worker.
+    _plainClient.stop();
+    _secureClient.stop();
     endSessionCache();
     _historyCount = 0;
     _currentUrl = "";
@@ -585,6 +652,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _navigator.pop();
     return;
   }
+  if (_lifecycleLoading) return;
   if (contains(_backBounds, point.x, point.y)) {
     if (isLoading()) {
       browserLog(F("cancel requested"));
@@ -660,7 +728,7 @@ void BrowserScreen::layout() {
   const int16_t footerTop = height - ControlsHeight;
   const uint8_t capacity = footerTop > RecentListTop
     ? (uint8_t)((footerTop - RecentListTop) / UiKit::ListCellHeight) : 0;
-  const uint8_t visible = _recentCount < capacity ? _recentCount : capacity;
+  const uint8_t visible = _lifecycleLoading ? 0 : (_recentCount < capacity ? _recentCount : capacity);
   for (uint8_t i = 0; i < visible; i++) {
     _recentBounds[i] = {0, (int16_t)(RecentListTop + i * UiKit::ListCellHeight),
                         width, UiKit::ListCellHeight};
@@ -694,6 +762,13 @@ void BrowserScreen::drawStartPage() {
 
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.drawString("Recent sites", 10, RecentListTop - 18, 2);
+  // Recent-site records are populated by the lifecycle worker.  Avoid
+  // reading their Strings until its hand-off frame in tick().
+  if (_lifecycleLoading) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("Loading saved browser data...", 10, RecentListTop + 10, 2);
+    return;
+  }
   if (_recentCount == 0) {
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
     tft.drawString("No recent sites yet", 10, RecentListTop + 10, 2);
@@ -1046,33 +1121,27 @@ void BrowserScreen::resetSessionCacheEntries() {
   }
 }
 
-void BrowserScreen::beginSessionCache() {
-  _sessionCacheActive = true;
-  HttpLock lock(_httpMutex);
-  if (!lock.locked()) return;
-  _sessionCacheInitialized = clearSessionCacheLocked();
-  if (_sessionCacheInitialized) browserLog(F("session cache ready"));
-}
-
 void BrowserScreen::endSessionCache() {
-  // The worker keeps this flag set through local decode as well as network
-  // transfer.  Do not remove an SD source while its decoder still owns it.
-  while (_activeImageGeneration) {
-    delay(1);
-    yield();
-  }
-  HttpLock lock(_httpMutex);
-  if (lock.locked()) clearSessionCacheLocked();
-  resetSessionCacheEntries();
+  // This is called from the close button.  Cache cleanup can include many
+  // FAT deletes, and an image worker can still own one of those files, so
+  // leave cleanup for startLifecycleLoad() instead of blocking the UI task.
+  _lifecycleGeneration++;
+  if (_lifecycleGeneration == 0) _lifecycleGeneration = 1;
+  _lifecycleLoading = false;
+  _lifecycleDrawPending = false;
   _sessionCacheInitialized = false;
   _sessionCacheActive = false;
   _usingSessionPage = false;
-  browserLog(F("session cache cleared"));
+  browserLog(F("session cache cleanup deferred"));
 }
 
 bool BrowserScreen::initializeSessionCacheLocked() {
   if (!_sessionCacheActive || !_sdCard.isMounted()) return false;
   if (_sessionCacheInitialized) return true;
+  // A navigation made during the first displayed Browser frame should still
+  // work, but it must not steal the cache's potentially long setup from the
+  // UI task.  It simply proceeds without a session-cache write this time.
+  if (_lifecycleLoading) return false;
   _sessionCacheInitialized = clearSessionCacheLocked();
   return _sessionCacheInitialized;
 }

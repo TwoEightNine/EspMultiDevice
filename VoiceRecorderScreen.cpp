@@ -56,6 +56,10 @@ VoiceRecorderScreen::VoiceRecorderScreen(Navigator &navigator,
 }
 
 void VoiceRecorderScreen::onEnter() {
+  // Paint the recorder controls before probing the card so navigation never
+  // waits on an SD response just to show this screen.
+  draw();
+  yield();
   refreshStorageState();
   draw();
 }

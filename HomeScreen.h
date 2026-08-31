@@ -77,6 +77,5 @@ private:
   void setSdState(bool mounted);
   void setWifiState(bool connected);
   void refreshSdState();
-  void runSdSelfTest();
   void handleSdCardEvent(SdCardEvent event);
 };

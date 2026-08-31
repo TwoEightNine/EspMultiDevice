@@ -55,7 +55,9 @@ public:
 #else
       const BaseType_t core = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
 #endif
-      xTaskCreatePinnedToCore(taskMain, "file-thumbs", 12288, this, tskIDLE_PRIORITY + 1, &_task, core);
+      // Thumbnails are strictly best-effort: they must yield to the Arduino
+      // task so a press on the close icon is never delayed by image decoding.
+      xTaskCreatePinnedToCore(taskMain, "file-thumbs", 12288, this, tskIDLE_PRIORITY, &_task, core);
     }
   }
 
@@ -200,12 +202,14 @@ private:
     if (!_file || !SpiBusLock::lock(pdMS_TO_TICKS(20))) return 0;
     int32_t got = _file.read(data, length);
     SpiBusLock::unlock();
+    vTaskDelay(1);
     return got;
   }
   bool seekFile(uint32_t offset) {
     if (!_file || !SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
     bool ok = _file.seek(offset);
     SpiBusLock::unlock();
+    vTaskDelay(1);
     return ok;
   }
 

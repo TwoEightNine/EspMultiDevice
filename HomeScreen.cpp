@@ -46,8 +46,9 @@ void HomeScreen::onEnter() {
   _filesPressPending = false;
   _filesHoldTriggered = false;
   draw();
-  // Retain the existing storage diagnostic, but keep it out of the home UI.
-  runSdSelfTest();
+  // Do not run a read/write probe on every return to Home.  Besides creating
+  // needless SD traffic, it used to run in the screen-enter call path and
+  // could make the outgoing screen appear frozen.
 }
 
 void HomeScreen::handleTouch(const TouchPoint &point) {
@@ -268,19 +269,9 @@ void HomeScreen::refreshSdState() {
   _sdMounted = _sdCard.isMounted();
 }
 
-void HomeScreen::runSdSelfTest() {
-  if (!_sdCard.isMounted()) {
-    return;
-  }
-
-  bool passed = _sdCard.runReadWriteTest();
-  setSdState(passed);
-}
-
 void HomeScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::Mounted) {
     setSdState(true);
-    runSdSelfTest();
   } else if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
     setSdState(false);
   }

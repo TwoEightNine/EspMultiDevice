@@ -111,13 +111,20 @@ void VideoPlayerScreen::onEnter(const ScreenData &data) {
   _lastTouchDown = false;
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _sdMounted = _sdCard.isMounted();
+  _path = data.kind == ScreenDataKind::VideoPath ? data.text : "";
+  _fileName = displayName(_path);
+
+  // The MP4 inspection/cache probe can touch a slow card.  Render a disabled
+  // player first so the transition never leaves the Files screen frozen.
+  _state = State::Building;
+  draw();
+  yield();
+  _state = State::Ready;
   if (data.kind != ScreenDataKind::VideoPath || data.text.length() == 0) {
     fail(F("No video selected"));
   } else if (!_sdMounted) {
     fail(F("SD card unavailable"));
   } else {
-    _path = data.text;
-    _fileName = displayName(_path);
     if (openSource() && inspectSource()) {
       _cachePath = cachePathForSource();
       _cacheTempPath = _cachePath + F(".tmp");

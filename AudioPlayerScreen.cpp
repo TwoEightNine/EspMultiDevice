@@ -122,6 +122,14 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
   _fileName = displayName(_path);
   _sdMounted = _sdCard.isMounted();
 
+  // Present the player (including its loading affordance) before opening and
+  // parsing the source file.  MP3 analysis itself remains incremental in
+  // tick(), but WAV/header work can still take a visible moment on slow SD.
+  _mp3Analyzing = true;
+  draw();
+  yield();
+  _mp3Analyzing = false;
+
   if (data.kind != ScreenDataKind::AudioPath || _path.length() == 0) {
     fail(F("No audio selected"));
   } else if (!_sdMounted) {

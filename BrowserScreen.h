@@ -47,6 +47,7 @@ private:
   // pages to consume the internal heap needed by HTTPS.
   static const uint16_t MaxEmbeddedImages = 24;
   static const uint8_t ImageJobQueueLength = 4;
+  static const uint8_t LifecycleJobQueueLength = 1;
   static const uint16_t ImageUrlMaxLength = 384;
   // Keep enough of large legacy pages to reach their body while retaining a
   // bounded allocation on the ESP32.
@@ -200,6 +201,14 @@ private:
     uint8_t height;
   };
 
+  // Startup work is deliberately kept separate from the display task.  A
+  // previous implementation emptied the browser cache and parsed saved state
+  // from onEnter(), which left the Home screen visible and unresponsive while
+  // opening Browser.
+  struct LifecycleJob {
+    uint32_t generation;
+  };
+
   struct StyleFrame {
     String tag;
     TextStyle style;
@@ -218,6 +227,9 @@ private:
   uint8_t _recentCount;
   uint8_t _cookieCount;
   bool _loaded;
+  volatile bool _lifecycleLoading;
+  volatile bool _lifecycleDrawPending;
+  uint32_t _lifecycleGeneration;
   bool _showStart;
   bool _lastTouchDown;
   bool _loadCancelled;
@@ -235,8 +247,8 @@ private:
   uint32_t _lastLoadingDrawBytes;
   uint8_t _lastLoadingPercent;
   bool _lastLoadingKnownSize;
-  bool _sessionCacheActive;
-  bool _sessionCacheInitialized;
+  volatile bool _sessionCacheActive;
+  volatile bool _sessionCacheInitialized;
   bool _usingSessionPage;
   bool _deferCachedPageDraw;
   uint32_t _sessionCacheBytes;
@@ -255,6 +267,8 @@ private:
   QueueHandle_t _imageJobs;
   QueueHandle_t _imageResults;
   TaskHandle_t _imageWorker;
+  QueueHandle_t _lifecycleJobs;
+  TaskHandle_t _lifecycleWorker;
   SemaphoreHandle_t _httpMutex;
   uint16_t _rowCount;
   uint16_t _pageStarts[MaxPages];
@@ -344,6 +358,8 @@ private:
                                   bool useSessionCache, uint16_t *&pixels,
                                   uint8_t &width, uint8_t &height);
   static void imageWorkerTask(void *context);
+  static void lifecycleWorkerTask(void *context);
+  void startLifecycleLoad();
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
   bool hasNextPage() const;
@@ -379,7 +395,6 @@ private:
   void addHistory(const String &url);
   void addRecent(const String &url, const String &title);
 
-  void beginSessionCache();
   void endSessionCache();
   bool initializeSessionCacheLocked();
   void resetSessionCacheEntries();
