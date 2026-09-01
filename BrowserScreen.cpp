@@ -1244,8 +1244,13 @@ void BrowserScreen::handleFormControl(uint8_t index) {
 void BrowserScreen::submitForm(uint8_t formIndex, int8_t submitControlIndex) {
   if (formIndex >= _formCount) return;
   const FormData &form = _forms[formIndex];
-  if (!form.getMethod) {
-    _message = "This form uses POST; only GET is supported";
+  if (form.method == FormMethod::Unsupported) {
+    _message = "This form method is unsupported";
+    draw();
+    return;
+  }
+  if (!form.urlEncoded) {
+    _message = "This form encoding is unsupported";
     draw();
     return;
   }
@@ -1256,21 +1261,22 @@ void BrowserScreen::submitForm(uint8_t formIndex, int8_t submitControlIndex) {
     return;
   }
   String target = resolveUrl(base, form.action);
-  String query;
-  for (uint8_t i = 0; i < _formControlCount; i++) {
-    const FormControl &control = _formControls[i];
-    if (control.formIndex != formIndex || control.disabled || !control.name.length()) continue;
-    if (control.kind == FormControlKind::Submit && i != submitControlIndex) continue;
-    if (control.kind == FormControlKind::Reset || control.kind == FormControlKind::Unsupported) continue;
-    if ((control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) && !control.checked) continue;
-    String value = formControlValue(control);
-    if (query.length()) query += '&';
-    query += formUrlEncode(control.name) + '=' + formUrlEncode(value);
+  String payload;
+  const uint16_t maxBytes = form.method == FormMethod::Post ? MaxFormPostBytes : 0;
+  if (!buildFormPayload(formIndex, submitControlIndex, payload, maxBytes)) {
+    _message = "Form data is too large";
+    draw();
+    return;
   }
-  if (query.length()) target += target.indexOf('?') >= 0 ? '&' : '?';
-  target += query;
-  browserLog(String(F("submitting GET form: ")) + target);
-  openUrl(target, true, false);
+  if (form.method == FormMethod::Get) {
+    if (payload.length()) target += target.indexOf('?') >= 0 ? '&' : '?';
+    target += payload;
+    browserLog(String(F("submitting GET form: ")) + target);
+    openUrl(target, true, false);
+    return;
+  }
+  browserLog(String(F("submitting POST form: target=")) + target + F(", bodyBytes=") + String(payload.length()));
+  openRequest({HttpMethod::Post, target, payload}, true, false, false);
 }
 
 void BrowserScreen::openUrlInput() {
@@ -1598,11 +1604,16 @@ String BrowserScreen::adoptSessionImage(const String &url, const String &downloa
 
 bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRecent,
                             bool useSessionCache) {
+  return openRequest({HttpMethod::Get, value, ""}, addToHistory, addToRecent, useSessionCache);
+}
+
+bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHistory,
+                                bool addToRecent, bool useSessionCache) {
   const bool hadDocument = !_showStart && _currentUrl.length() > 0;
   const String previousUrl = _currentUrl;
   String url;
   String error;
-  if (!normalizeUrl(value, url, error)) {
+  if (!normalizeUrl(initialRequest.url, url, error)) {
     browserLog(String(F("URL rejected: ")) + error);
     _showStart = false;
     _message = error;
@@ -1611,12 +1622,25 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
     draw();
     return false;
   }
-  browserLog(String(F("navigation requested: ")) + url);
+  if (initialRequest.method == HttpMethod::Post && initialRequest.body.length() > MaxFormPostBytes) {
+    _showStart = false;
+    _message = "Form data is too large";
+    _rowCount = 0;
+    _pageCount = 0;
+    draw();
+    return false;
+  }
+  HttpRequest request = initialRequest;
+  request.url = url;
+  browserLog(String(F("navigation requested: method=")) +
+             (request.method == HttpMethod::Post ? F("POST") : F("GET")) + F(", url=") + url +
+             (request.method == HttpMethod::Post ? String(F(", bodyBytes=")) + String(request.body.length()) : String()));
   if (!useSessionCache) _usingSessionPage = false;
   String finalUrl = url;
   String body;
   String contentType;
-  const bool cacheHit = useSessionCache && loadSessionPage(url, body, contentType);
+  const bool cacheHit = useSessionCache && request.method == HttpMethod::Get &&
+                        loadSessionPage(url, body, contentType);
   if (cacheHit) {
     browserLog(String(F("session cache hit: ")) + url);
   } else if (!_wifi.isConnected()) {
@@ -1669,7 +1693,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   yield();
 
   String downloadedPath;
-  if (!cacheHit && !fetch(url, finalUrl, body, contentType, downloadedPath, error)) {
+  if (!cacheHit && !fetch(request, finalUrl, body, contentType, downloadedPath, error)) {
     browserLog(String(F("navigation failed: url=")) + url + F(", phase=") + _loadingPhase +
                F(", error=") + error + F(", userCancelled=") +
                (_loadCancelled ? F("yes") : F("no")) + F(", activeImageGeneration=") +
@@ -1823,7 +1847,7 @@ bool BrowserScreen::parseUrl(const String &value, Url &url) const {
   return true;
 }
 
-bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &body,
+bool BrowserScreen::fetch(const HttpRequest &initialRequest, String &finalUrl, String &body,
                           String &contentType, String &downloadedPath, String &error,
                           uint32_t downloadLimit) {
   setLoadingPhase(F("Waiting for network access"));
@@ -1882,20 +1906,22 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
   body = "";
   contentType = "";
   downloadedPath = "";
-  String next = initialUrl;
+  HttpRequest request = initialRequest;
   for (uint8_t redirect = 0; redirect <= MaxRedirects; redirect++) {
     Url url;
-    if (!parseUrl(next, url)) {
+    if (!parseUrl(request.url, url)) {
       browserLog(F("invalid redirect target"));
       error = "Invalid redirect URL";
       return false;
     }
     browserLog(String(F("HTTP request ")) + String(redirect + 1) + F("/") + String(MaxRedirects + 1) +
-               F(": ") + next);
+               F(": method=") + (request.method == HttpMethod::Post ? F("POST") : F("GET")) +
+               F(", url=") + request.url +
+               (request.method == HttpMethod::Post ? String(F(", bodyBytes=")) + String(request.body.length()) : String()));
     HttpResponse response{};
     WiFiClient *client = nullptr;
-    if (!requestOne(url, response, client, error)) {
-      browserLog(String(F("HTTP request failed: url=")) + next + F(", phase=") + _loadingPhase +
+    if (!requestOne(url, request.method, request.body, response, client, error)) {
+      browserLog(String(F("HTTP request failed: url=")) + request.url + F(", phase=") + _loadingPhase +
                  F(", error=") + error + F(", userCancelled=") +
                  (_loadCancelled ? F("yes") : F("no")));
       return false;
@@ -1903,29 +1929,33 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
     if (response.statusCode >= 300 && response.statusCode <= 399) {
       client->stop();
       if (response.location.length() == 0) {
-        browserLog(String(F("redirect rejected: url=")) + next + F(", status=") + String(response.statusCode) +
+        browserLog(String(F("redirect rejected: url=")) + request.url + F(", status=") + String(response.statusCode) +
                    F(", reason=no Location header"));
         error = "Redirect has no destination";
         return false;
       }
       const String resolvedLocation = resolveUrl(url, response.location);
       browserLog(String(F("redirect received: status=")) + String(response.statusCode) +
-                 F(", request=") + next + F(", Location=") + response.location +
+                 F(", request=") + request.url + F(", Location=") + response.location +
                  F(", resolved=") + resolvedLocation +
                  F(", returnsToInitial=") +
-                 (resolvedLocation == initialUrl ? F("yes") : F("no")));
-      next = resolvedLocation;
+                 (resolvedLocation == initialRequest.url ? F("yes") : F("no")));
+      if (response.statusCode == 301 || response.statusCode == 302 || response.statusCode == 303) {
+        request.method = HttpMethod::Get;
+        request.body = "";
+      }
+      request.url = resolvedLocation;
       continue;
     }
     if (response.statusCode == 401) {
       client->stop();
-      browserLog(String(F("server requires unsupported Basic authentication: url=")) + next);
+      browserLog(String(F("server requires unsupported Basic authentication: url=")) + request.url);
       error = "Basic authentication is unsupported";
       return false;
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       client->stop();
-      browserLog(String(F("HTTP request rejected: url=")) + next + F(", status=") + String(response.statusCode));
+      browserLog(String(F("HTTP request rejected: url=")) + request.url + F(", status=") + String(response.statusCode));
       error = "HTTP error " + String(response.statusCode);
       return false;
     }
@@ -1941,7 +1971,7 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
                (downloadable ? F(", media download") : F(", page response")));
     bool readOk = false;
     if (downloadable && response.compressed) {
-      browserLog(String(F("compressed media download rejected: url=")) + next + F(", encoding is not identity"));
+      browserLog(String(F("compressed media download rejected: url=")) + request.url + F(", encoding is not identity"));
       error = "Compressed file response unsupported";
     } else if (downloadable) {
       readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
@@ -1950,24 +1980,24 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
       readOk = readBody(*client, response.chunked, response.contentLength, body, error);
     }
     if (!readOk) {
-      browserLog(String(F("response transfer failed: url=")) + next + F(", phase=") + _loadingPhase +
+      browserLog(String(F("response transfer failed: url=")) + request.url + F(", phase=") + _loadingPhase +
                  F(", error=") + error + F(", retainedBytes=") + String(body.length()) + F(", ") +
                  clientState(*client));
       client->stop();
       return false;
     }
     client->stop();
-    finalUrl = next;
+    finalUrl = request.url;
     browserLog(String(F("HTTP transfer complete: ")) + finalUrl);
     return true;
   }
-  browserLog(String(F("redirect limit reached: initialUrl=")) + initialUrl + F(", limit=") + String(MaxRedirects));
+  browserLog(String(F("redirect limit reached: initialUrl=")) + initialRequest.url + F(", limit=") + String(MaxRedirects));
   error = "Too many redirects";
   return false;
 }
 
-bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClient *&client,
-                               String &error) {
+bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &requestBody,
+                               HttpResponse &response, WiFiClient *&client, String &error) {
   if (pollLoadingCancel()) {
     error = "Loading cancelled";
     browserLog(String(F("request cancelled before connect: url=")) + url.scheme + F("://") + url.host + url.path);
@@ -2051,20 +2081,42 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   String hostHeader = url.host;
   bool defaultPort = (url.scheme == "http" && url.port == 80) || (url.scheme == "https" && url.port == 443);
   if (!defaultPort) hostHeader += ":" + String(url.port);
-  String request = "GET " + url.path + " HTTP/1.1\r\nHost: " + hostHeader +
+  const bool post = method == HttpMethod::Post;
+  String request = String(post ? "POST" : "GET") + " " + url.path + " HTTP/1.1\r\nHost: " + hostHeader +
                    "\r\nUser-Agent: " + MobileUserAgent + "\r\nAccept: text/html,*/*;q=0.1\r\n"
                    "Accept-Encoding: identity\r\nConnection: close\r\n";
+  if (post) {
+    request += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+               String(requestBody.length()) + "\r\n";
+  }
   String cookies = cookieHeaderFor(url);
   if (cookies.length()) request += "Cookie: " + cookies + "\r\n";
   request += "\r\n";
-  const size_t requestBytes = client->print(request);
-  if (requestBytes != request.length()) {
-    browserLog(String(F("request write failed: host=")) + url.host + F(", sent=") + String(requestBytes) +
+  const size_t headerBytes = client->print(request);
+  if (headerBytes != request.length()) {
+    browserLog(String(F("request header write failed: host=")) + url.host + F(", sent=") + String(headerBytes) +
                F(", expected=") + String(request.length()) + F(", ") + clientState(*client));
     client->stop();
     error = "Request failed";
     return false;
   }
+  if (post && requestBody.length()) {
+    if (pollLoadingCancel()) {
+      client->stop();
+      error = "Loading cancelled";
+      return false;
+    }
+    const size_t bodyBytes = client->write(reinterpret_cast<const uint8_t *>(requestBody.c_str()), requestBody.length());
+    if (bodyBytes != requestBody.length()) {
+      browserLog(String(F("request body write failed: host=")) + url.host + F(", sent=") + String(bodyBytes) +
+                 F(", expected=") + String(requestBody.length()) + F(", ") + clientState(*client));
+      client->stop();
+      error = "Request failed";
+      return false;
+    }
+  }
+  browserLog(String(F("request sent: method=")) + (post ? F("POST") : F("GET")) + F(", host=") + url.host +
+             F(", bodyBytes=") + String(post ? requestBody.length() : 0));
 
   String line;
   setLoadingPhase(F("Waiting for response"));
@@ -3023,7 +3075,13 @@ int8_t BrowserScreen::addForm(const String &attributes) {
   form = {};
   form.action = decodeEntities(attributeValue(attributes, "action"));
   String method = lower(trimCopy(attributeValue(attributes, "method")));
-  form.getMethod = method.length() == 0 || method == "get";
+  form.method = method.length() == 0 || method == "get" ? FormMethod::Get :
+                (method == "post" ? FormMethod::Post : FormMethod::Unsupported);
+  String enctype = lower(trimCopy(attributeValue(attributes, "enctype")));
+  const int semicolon = enctype.indexOf(';');
+  if (semicolon >= 0) enctype.remove(semicolon);
+  enctype.trim();
+  form.urlEncoded = enctype.length() == 0 || enctype == "application/x-www-form-urlencoded";
   return _formCount++;
 }
 
@@ -3094,6 +3152,24 @@ String BrowserScreen::formControlValue(const FormControl &control) const {
     if (optionIndex < _formOptionCount) return _formOptions[optionIndex].value;
   }
   return control.value;
+}
+
+bool BrowserScreen::buildFormPayload(uint8_t formIndex, int8_t submitControlIndex, String &payload,
+                                     uint16_t maxBytes) const {
+  payload = "";
+  for (uint8_t i = 0; i < _formControlCount; i++) {
+    const FormControl &control = _formControls[i];
+    if (control.formIndex != formIndex || control.disabled || !control.name.length()) continue;
+    if (control.kind == FormControlKind::Submit && i != submitControlIndex) continue;
+    if (control.kind == FormControlKind::Reset || control.kind == FormControlKind::Unsupported) continue;
+    if ((control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) && !control.checked) continue;
+    String pair = formUrlEncode(control.name) + '=' + formUrlEncode(formControlValue(control));
+    const uint32_t nextLength = payload.length() + (payload.length() ? 1 : 0) + pair.length();
+    if (maxBytes && nextLength > maxBytes) return false;
+    if (payload.length()) payload += '&';
+    payload += pair;
+  }
+  return true;
 }
 
 bool BrowserScreen::hasAttribute(const String &attributes, const char *name) const {
@@ -3386,7 +3462,8 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
     String contentType;
     String downloadedPath;
     String error;
-    if (!fetch(url, finalUrl, body, contentType, downloadedPath, error, MaxEmbeddedImageBytes) ||
+    if (!fetch({HttpMethod::Get, url, ""}, finalUrl, body, contentType, downloadedPath, error,
+               MaxEmbeddedImageBytes) ||
         downloadedPath.length() == 0) {
       browserLog(String(F("image fetch failed: ")) + error);
       return false;

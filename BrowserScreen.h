@@ -58,6 +58,7 @@ private:
   // Keep enough of large legacy pages to reach their body while retaining a
   // bounded allocation on the ESP32.
   static const uint32_t MaxBodyBytes = 512UL * 1024UL;
+  static const uint16_t MaxFormPostBytes = 8UL * 1024UL;
   static const uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t ConnectTimeoutMs = 10000;
@@ -90,6 +91,14 @@ private:
     bool chunked;
     bool compressed;
     int32_t contentLength;
+  };
+
+  enum class HttpMethod : uint8_t { Get, Post };
+
+  struct HttpRequest {
+    HttpMethod method;
+    String url;
+    String body;
   };
 
   struct RecentSite {
@@ -180,9 +189,12 @@ private:
     Unsupported
   };
 
+  enum class FormMethod : uint8_t { Get, Post, Unsupported };
+
   struct FormData {
     String action;
-    bool getMethod;
+    FormMethod method;
+    bool urlEncoded;
   };
 
   struct FormControl {
@@ -373,13 +385,16 @@ private:
   void openUrlInput();
   bool openUrl(const String &value, bool addToHistory = true, bool addToRecent = false,
                bool useSessionCache = false);
+  bool openRequest(const HttpRequest &request, bool addToHistory = true,
+                   bool addToRecent = false, bool useSessionCache = false);
   void goBack();
 
   bool normalizeUrl(const String &value, String &normalized, String &error) const;
   bool parseUrl(const String &value, Url &url) const;
-  bool fetch(const String &initialUrl, String &finalUrl, String &body, String &contentType,
+  bool fetch(const HttpRequest &initialRequest, String &finalUrl, String &body, String &contentType,
              String &downloadedPath, String &error, uint32_t downloadLimit = MaxDownloadBytes);
-  bool requestOne(const Url &url, HttpResponse &response, WiFiClient *&client, String &error);
+  bool requestOne(const Url &url, HttpMethod method, const String &requestBody,
+                  HttpResponse &response, WiFiClient *&client, String &error);
   bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs);
   int readByte(WiFiClient &client, uint32_t timeoutMs);
   bool readBody(WiFiClient &client, bool chunked, int32_t contentLength,
@@ -411,6 +426,8 @@ private:
   void addSelectOption(uint8_t controlIndex, const String &attributes, const String &text);
   String formControlLabel(const FormControl &control) const;
   String formControlValue(const FormControl &control) const;
+  bool buildFormPayload(uint8_t formIndex, int8_t submitControlIndex, String &payload,
+                        uint16_t maxBytes = 0) const;
   bool hasAttribute(const String &attributes, const char *name) const;
   String formUrlEncode(const String &value) const;
   void drawFormControl(const VisualRow &row, int16_t y);
