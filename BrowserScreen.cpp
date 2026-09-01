@@ -27,6 +27,8 @@ namespace {
 const int16_t HeaderHeight = UiKit::AppBarHeight;
 const int16_t ControlsHeight = 42;
 const int16_t TextRowHeight = 22;
+const int16_t FormControlHeight = 42;
+const int16_t FormTextareaHeight = 58;
 const int16_t DocumentPadding = 7;
 const int16_t DocumentSidePadding = 8;
 const uint8_t ThumbnailMaxWidth = 200;
@@ -455,6 +457,10 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _sdCard(sdCard),
     _plainClient(),
     _secureClient(),
+    _formCount(0),
+    _formControlCount(0),
+    _formOptionCount(0),
+    _editingFormControl(-1),
     _linkCount(0),
     _historyCount(0),
     _recentCount(0),
@@ -556,6 +562,14 @@ void BrowserScreen::onEnter() {
 }
 
 void BrowserScreen::onResult(const ScreenResult &result) {
+  if (_editingFormControl >= 0) {
+    if (result.kind == ScreenResultKind::Text && _editingFormControl < _formControlCount) {
+      _formControls[_editingFormControl].value = result.text;
+      draw();
+    }
+    _editingFormControl = -1;
+    return;
+  }
   if (result.kind == ScreenResultKind::Text && result.text.length() > 0) {
     browserLog(F("received URL from text input"));
     openUrl(result.text, true, true);
@@ -703,6 +717,11 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     }
   }
   if (!_showStart) {
+    int8_t formControl = documentFormControlAt(point.x, point.y);
+    if (formControl >= 0) {
+      handleFormControl((uint8_t)formControl);
+      return;
+    }
     String linkUrl = documentLinkAt(point.x, point.y);
     if (linkUrl.length()) {
       browserLog(F("opening document link"));
@@ -815,7 +834,9 @@ void BrowserScreen::drawDocument() {
   int16_t y = textTop;
   for (uint16_t index = start; index < end; index++) {
     const VisualRow &row = _rows[index];
-    if (row.image) {
+    if (row.formControlIndex >= 0) {
+      drawFormControl(row, y);
+    } else if (row.image) {
       uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
       const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : _documentBackgroundColor;
       const int16_t height = rowHeight(row);
@@ -1103,6 +1124,121 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
     rowY += height;
   }
   return "";
+}
+
+int8_t BrowserScreen::documentFormControlAt(int16_t x, int16_t y) const {
+  if (_message.length() || _page >= _pageCount) return -1;
+  const uint16_t start = _pageStarts[_page];
+  const uint16_t end = pageEndRow(_page);
+  int16_t rowY = HeaderHeight + DocumentPadding;
+  for (uint16_t index = start; index < end; index++) {
+    const VisualRow &row = _rows[index];
+    const int16_t height = rowHeight(row);
+    if (y >= rowY && y < rowY + height) {
+      return row.formControlIndex >= 0 && x >= DocumentSidePadding &&
+             x < _display.width() - DocumentSidePadding ? row.formControlIndex : -1;
+    }
+    rowY += height;
+  }
+  return -1;
+}
+
+void BrowserScreen::openFormTextInput(uint8_t index) {
+  if (index >= _formControlCount) return;
+  const FormControl &control = _formControls[index];
+  String title = "Edit " + formControlLabel(control);
+  if (_navigator.push(ScreenId::TextInput,
+                      ScreenData::textInput(shortText(title, 120), false, control.value))) {
+    _editingFormControl = index;
+  }
+}
+
+void BrowserScreen::resetForm(uint8_t formIndex) {
+  for (uint8_t i = 0; i < _formControlCount; i++) {
+    FormControl &control = _formControls[i];
+    if (control.formIndex != formIndex) continue;
+    control.value = control.defaultValue;
+    control.checked = control.defaultChecked;
+    control.selectedOption = control.defaultSelectedOption;
+  }
+  draw();
+}
+
+void BrowserScreen::handleFormControl(uint8_t index) {
+  if (index >= _formControlCount) return;
+  FormControl &control = _formControls[index];
+  if (control.disabled || control.kind == FormControlKind::Unsupported) return;
+  switch (control.kind) {
+    case FormControlKind::Text:
+    case FormControlKind::Textarea:
+      openFormTextInput(index);
+      return;
+    case FormControlKind::Checkbox:
+      control.checked = !control.checked;
+      draw();
+      return;
+    case FormControlKind::Radio:
+      if (!control.checked) {
+        for (uint8_t i = 0; i < _formControlCount; i++) {
+          FormControl &candidate = _formControls[i];
+          if (candidate.kind == FormControlKind::Radio && candidate.formIndex == control.formIndex &&
+              candidate.name == control.name) candidate.checked = false;
+        }
+        control.checked = true;
+        draw();
+      }
+      return;
+    case FormControlKind::Select:
+      if (control.optionCount) {
+        control.selectedOption = (control.selectedOption + 1) % control.optionCount;
+        draw();
+      }
+      return;
+    case FormControlKind::Reset:
+      if (control.formIndex >= 0) resetForm((uint8_t)control.formIndex);
+      return;
+    case FormControlKind::Submit:
+      if (control.formIndex >= 0) submitForm((uint8_t)control.formIndex, index);
+      else {
+        _message = "Submit control is outside a form";
+        draw();
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+void BrowserScreen::submitForm(uint8_t formIndex, int8_t submitControlIndex) {
+  if (formIndex >= _formCount) return;
+  const FormData &form = _forms[formIndex];
+  if (!form.getMethod) {
+    _message = "This form uses POST; only GET is supported";
+    draw();
+    return;
+  }
+  Url base;
+  if (!parseUrl(_currentUrl, base)) {
+    _message = "Form action could not be resolved";
+    draw();
+    return;
+  }
+  String target = resolveUrl(base, form.action);
+  String query;
+  for (uint8_t i = 0; i < _formControlCount; i++) {
+    const FormControl &control = _formControls[i];
+    if (control.formIndex != formIndex || control.disabled || !control.name.length()) continue;
+    if (control.kind == FormControlKind::Submit && i != submitControlIndex) continue;
+    if (control.kind == FormControlKind::Reset || control.kind == FormControlKind::Unsupported) continue;
+    if ((control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) && !control.checked) continue;
+    String value = formControlValue(control);
+    if (query.length()) query += '&';
+    query += formUrlEncode(control.name) + '=' + formUrlEncode(value);
+  }
+  if (query.length()) target += target.indexOf('?') >= 0 ? '&' : '?';
+  target += query;
+  browserLog(String(F("submitting GET form: ")) + target);
+  openUrl(target, true, false);
 }
 
 void BrowserScreen::openUrlInput() {
@@ -2430,11 +2566,31 @@ void BrowserScreen::renderDocument(const String &html) {
   bool inStyle = false;
   bool inTitle = false;
   bool sawScript = false;
+  int8_t currentForm = -1;
+  int8_t textareaControl = -1;
+  int8_t selectControl = -1;
+  int8_t buttonControl = -1;
+  String textareaText;
+  String optionAttributes;
+  String optionText;
+  String buttonText;
+  String labelIds[MaxFormControls];
+  String labelTexts[MaxFormControls];
+  bool inLabel = false;
+  String labelFor;
+  String labelText;
+  uint8_t labelCount = 0;
+  uint8_t labelStartControl = 0;
+  bool inOption = false;
   uint32_t position = 0;
   while (position < html.length()) {
     int nextTag = html.indexOf('<', position);
     String text = nextTag < 0 ? html.substring(position) : html.substring(position, nextTag);
+    if (inLabel) labelText += text;
     if (inTitle) _titleBuffer += text;
+    else if (textareaControl >= 0) textareaText += text;
+    else if (inOption) optionText += text;
+    else if (buttonControl >= 0) buttonText += text;
     else if (!inScript && !inStyle) appendText(text);
     if (nextTag < 0) break;
     int endTag = findTagEnd(html, nextTag + 1);
@@ -2459,7 +2615,116 @@ void BrowserScreen::renderDocument(const String &html) {
     else if (tag == "style") inStyle = !closing;
     else if (tag == "title") inTitle = !closing;
     else if (!inScript && !inStyle && !inTitle) {
-      if (closing) {
+      if (tag == "label") {
+        if (closing) {
+          const String resolvedLabel = decodeEntities(trimCopy(labelText));
+          if (resolvedLabel.length()) {
+            if (labelFor.length() && labelCount < MaxFormControls) {
+              labelIds[labelCount] = labelFor;
+              labelTexts[labelCount++] = resolvedLabel;
+            } else if (_formControlCount > labelStartControl) {
+              _formControls[_formControlCount - 1].label = resolvedLabel;
+            }
+          }
+          inLabel = false;
+          labelFor = "";
+          labelText = "";
+          popStyle(tag);
+        } else {
+          inLabel = true;
+          labelFor = decodeEntities(attributeValue(attributes, "for"));
+          labelText = "";
+          labelStartControl = _formControlCount;
+          if (!selfClosing) pushStyle(tag, styledForTag(tag, attributes));
+        }
+      } else if (tag == "form") {
+        if (closing) {
+          currentForm = -1;
+          appendBreak();
+        } else {
+          currentForm = addForm(attributes);
+          appendBreak();
+        }
+      } else if (tag == "textarea") {
+        if (closing) {
+          if (textareaControl >= 0 && textareaControl < _formControlCount) {
+            FormControl &control = _formControls[textareaControl];
+            control.value = decodeEntities(textareaText);
+            control.defaultValue = control.value;
+          }
+          textareaText = "";
+          textareaControl = -1;
+        } else {
+          textareaText = "";
+          textareaControl = addFormControl(FormControlKind::Textarea, currentForm, attributes,
+                                           styledForTag(tag, attributes));
+        }
+      } else if (tag == "select") {
+        if (closing) {
+          if (selectControl >= 0 && selectControl < _formControlCount) {
+            FormControl &control = _formControls[selectControl];
+            control.defaultSelectedOption = control.selectedOption;
+          }
+          selectControl = -1;
+        } else if (hasAttribute(attributes, "multiple")) {
+          appendStub(formStubLabel("select", attributes) + ": multiple select unsupported");
+        } else {
+          selectControl = addFormControl(FormControlKind::Select, currentForm, attributes,
+                                         styledForTag(tag, attributes));
+        }
+      } else if (tag == "option" && selectControl >= 0) {
+        if (closing || selfClosing) {
+          addSelectOption((uint8_t)selectControl, optionAttributes, optionText);
+          optionAttributes = "";
+          optionText = "";
+          inOption = false;
+        } else {
+          optionAttributes = attributes;
+          optionText = "";
+          inOption = true;
+        }
+      } else if (tag == "input" && !closing) {
+        String type = lower(trimCopy(attributeValue(attributes, "type")));
+        if (!type.length()) type = "text";
+        const TextStyle controlStyle = styledForTag(tag, attributes);
+        if (type == "text" || type == "search" || type == "email" || type == "url" || type == "number") {
+          addFormControl(FormControlKind::Text, currentForm, attributes, controlStyle);
+        } else if (type == "checkbox") {
+          addFormControl(FormControlKind::Checkbox, currentForm, attributes, controlStyle);
+        } else if (type == "radio") {
+          addFormControl(FormControlKind::Radio, currentForm, attributes, controlStyle);
+        } else if (type == "submit") {
+          String label = decodeEntities(attributeValue(attributes, "value"));
+          if (!label.length()) label = "Submit";
+          addFormControl(FormControlKind::Submit, currentForm, attributes, controlStyle, label);
+        } else if (type == "reset") {
+          String label = decodeEntities(attributeValue(attributes, "value"));
+          if (!label.length()) label = "Reset";
+          addFormControl(FormControlKind::Reset, currentForm, attributes, controlStyle, label);
+        } else if (type != "hidden") {
+          appendStub(formStubLabel("input", attributes) + ": unsupported");
+        }
+      } else if (tag == "button") {
+        if (closing) {
+          if (buttonControl >= 0 && buttonControl < _formControlCount) {
+            String label = decodeEntities(trimCopy(buttonText));
+            if (label.length()) _formControls[buttonControl].label = label;
+          }
+          buttonText = "";
+          buttonControl = -1;
+        } else {
+          String type = lower(trimCopy(attributeValue(attributes, "type")));
+          if (!type.length()) type = "submit";
+          FormControlKind kind = type == "submit" ? FormControlKind::Submit :
+                                 (type == "reset" ? FormControlKind::Reset : FormControlKind::Unsupported);
+          if (kind == FormControlKind::Unsupported) {
+            appendStub(formStubLabel("button", attributes) + ": unsupported");
+          } else {
+            buttonText = "";
+            buttonControl = addFormControl(kind, currentForm, attributes, styledForTag(tag, attributes));
+          }
+        }
+      } else if (closing) {
         if (isBlockTag(tag)) appendBreak();
         if (tag == "td" || tag == "th") _pendingSpace = true;
         popStyle(tag);
@@ -2501,8 +2766,6 @@ void BrowserScreen::renderDocument(const String &html) {
         appendBreak();
       } else if (tag == "iframe" || tag == "object" || tag == "embed" || tag == "canvas") {
         appendStub(tag);
-      } else if (tag == "form" || tag == "input" || tag == "button" || tag == "textarea" || tag == "select") {
-        appendStub(formStubLabel(tag, attributes));
       } else {
         if (isBlockTag(tag)) appendBreak();
         if ((tag == "td" || tag == "th") && _rowCount) _pendingSpace = true;
@@ -2516,6 +2779,14 @@ void BrowserScreen::renderDocument(const String &html) {
       }
     }
     position = endTag + 1;
+  }
+  for (uint8_t labelIndex = 0; labelIndex < labelCount; labelIndex++) {
+    for (uint8_t controlIndex = 0; controlIndex < _formControlCount; controlIndex++) {
+      if (_formControls[controlIndex].id == labelIds[labelIndex]) {
+        _formControls[controlIndex].label = labelTexts[labelIndex];
+        break;
+      }
+    }
   }
   _title = decodeEntities(trimCopy(_titleBuffer));
   if (_title.length() == 0) _title = "Web page";
@@ -2555,6 +2826,13 @@ void BrowserScreen::resetRenderedRows() {
 void BrowserScreen::clearRenderedDocumentStorage() {
   for (uint16_t i = 0; i < MaxRows; i++) _rows[i] = {};
   for (uint8_t i = 0; i < MaxLinks; i++) _linkUrls[i] = "";
+  for (uint8_t i = 0; i < MaxForms; i++) _forms[i] = {};
+  for (uint8_t i = 0; i < MaxFormControls; i++) _formControls[i] = {};
+  for (uint8_t i = 0; i < MaxFormOptions; i++) _formOptions[i] = {};
+  _formCount = 0;
+  _formControlCount = 0;
+  _formOptionCount = 0;
+  _editingFormControl = -1;
   for (uint8_t i = 0; i < MaxStyleDepth; i++) _styleStack[i] = {};
   for (uint8_t i = 0; i < MaxCssRules; i++) _cssRules[i] = {};
   _titleBuffer = "";
@@ -2598,6 +2876,7 @@ void BrowserScreen::appendImage(const String &label, const TextStyle &sourceStyl
   if (_rowCount >= MaxRows) return;
   VisualRow &row = _rows[_rowCount++];
   row.image = true;
+  row.formControlIndex = -1;
   row.imageLabel = label;
   row.imageLink = linked;
   row.imageLinkIndex = linkIndex;
@@ -2653,6 +2932,143 @@ void BrowserScreen::appendStub(const String &label) {
   appendBreak();
   appendText(String("(") + label + ")");
   appendBreak();
+}
+
+void BrowserScreen::appendFormControl(uint8_t index, const TextStyle &style) {
+  appendBreak();
+  if (index >= _formControlCount || _rowCount >= MaxRows) return;
+  VisualRow &row = _rows[_rowCount++];
+  row = {};
+  row.image = false;
+  row.formControlIndex = index;
+  row.imageIndex = -1;
+  row.style = style;
+  row.contentWidth = _display.width();
+  _pendingSpace = false;
+}
+
+int8_t BrowserScreen::addForm(const String &attributes) {
+  if (_formCount >= MaxForms) return -1;
+  FormData &form = _forms[_formCount];
+  form = {};
+  form.action = decodeEntities(attributeValue(attributes, "action"));
+  String method = lower(trimCopy(attributeValue(attributes, "method")));
+  form.getMethod = method.length() == 0 || method == "get";
+  return _formCount++;
+}
+
+int8_t BrowserScreen::addFormControl(FormControlKind kind, int8_t formIndex, const String &attributes,
+                                     const TextStyle &style, const String &fallbackLabel) {
+  if (_formControlCount >= MaxFormControls) {
+    appendStub("form control limit reached");
+    return -1;
+  }
+  FormControl &control = _formControls[_formControlCount];
+  control = {};
+  control.kind = kind;
+  control.formIndex = formIndex;
+  control.label = decodeEntities(fallbackLabel);
+  control.name = decodeEntities(attributeValue(attributes, "name"));
+  control.id = decodeEntities(attributeValue(attributes, "id"));
+  if (!control.label.length()) control.label = decodeEntities(attributeValue(attributes, "aria-label"));
+  if (!control.label.length()) control.label = decodeEntities(attributeValue(attributes, "placeholder"));
+  if (!control.label.length()) control.label = control.name.length() ? control.name : control.id;
+  control.value = decodeEntities(attributeValue(attributes, "value"));
+  if ((kind == FormControlKind::Checkbox || kind == FormControlKind::Radio) && !control.value.length()) control.value = "on";
+  control.defaultValue = control.value;
+  control.checked = hasAttribute(attributes, "checked");
+  control.defaultChecked = control.checked;
+  control.disabled = hasAttribute(attributes, "disabled");
+  control.firstOption = _formOptionCount;
+  control.optionCount = 0;
+  control.selectedOption = 0;
+  control.defaultSelectedOption = 0;
+  const uint8_t index = _formControlCount++;
+  appendFormControl(index, style);
+  return index;
+}
+
+void BrowserScreen::addSelectOption(uint8_t controlIndex, const String &attributes, const String &text) {
+  if (controlIndex >= _formControlCount || _formOptionCount >= MaxFormOptions) return;
+  FormControl &control = _formControls[controlIndex];
+  if (control.kind != FormControlKind::Select || control.optionCount >= 255) return;
+  FormOption &option = _formOptions[_formOptionCount++];
+  option = {};
+  option.controlIndex = controlIndex;
+  option.label = decodeEntities(trimCopy(text));
+  option.value = decodeEntities(attributeValue(attributes, "value"));
+  if (!option.value.length()) option.value = option.label;
+  const uint8_t optionIndex = control.optionCount++;
+  if (hasAttribute(attributes, "selected")) {
+    control.selectedOption = optionIndex;
+    control.defaultSelectedOption = optionIndex;
+  }
+}
+
+String BrowserScreen::formControlLabel(const FormControl &control) const {
+  String label = control.label;
+  if (!label.length()) {
+    switch (control.kind) {
+      case FormControlKind::Submit: label = "Submit"; break;
+      case FormControlKind::Reset: label = "Reset"; break;
+      case FormControlKind::Select: label = "Select"; break;
+      default: label = "Input"; break;
+    }
+  }
+  return label;
+}
+
+String BrowserScreen::formControlValue(const FormControl &control) const {
+  if (control.kind == FormControlKind::Select && control.optionCount) {
+    const uint16_t optionIndex = control.firstOption + control.selectedOption;
+    if (optionIndex < _formOptionCount) return _formOptions[optionIndex].value;
+  }
+  return control.value;
+}
+
+bool BrowserScreen::hasAttribute(const String &attributes, const char *name) const {
+  String wanted = lower(String(name));
+  uint16_t index = 0;
+  while (index < attributes.length()) {
+    while (index < attributes.length() && (isspace((unsigned char)attributes[index]) || attributes[index] == '/')) index++;
+    const uint16_t start = index;
+    while (index < attributes.length() && !isspace((unsigned char)attributes[index]) &&
+           attributes[index] != '=' && attributes[index] != '/') index++;
+    if (start == index) { index++; continue; }
+    const String attributeName = lower(attributes.substring(start, index));
+    while (index < attributes.length() && isspace((unsigned char)attributes[index])) index++;
+    if (attributeName == wanted) return true;
+    if (index < attributes.length() && attributes[index] == '=') {
+      index++;
+      while (index < attributes.length() && isspace((unsigned char)attributes[index])) index++;
+      if (index < attributes.length() && (attributes[index] == '\'' || attributes[index] == '\"')) {
+        const char quote = attributes[index++];
+        while (index < attributes.length() && attributes[index] != quote) index++;
+        if (index < attributes.length()) index++;
+      } else {
+        while (index < attributes.length() && !isspace((unsigned char)attributes[index])) index++;
+      }
+    }
+  }
+  return false;
+}
+
+String BrowserScreen::formUrlEncode(const String &value) const {
+  const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  encoded.reserve(value.length() * 3);
+  for (uint16_t i = 0; i < value.length(); i++) {
+    const uint8_t c = (uint8_t)value[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '*') encoded += (char)c;
+    else if (c == ' ') encoded += '+';
+    else {
+      encoded += '%';
+      encoded += hex[c >> 4];
+      encoded += hex[c & 15];
+    }
+  }
+  return encoded;
 }
 
 String BrowserScreen::formStubLabel(const String &tag, const String &attributes) const {
@@ -2757,6 +3173,7 @@ void BrowserScreen::beginTextRow() {
   if (_rowCount >= MaxRows) return;
   VisualRow &row = _rows[_rowCount++];
   row.image = false;
+  row.formControlIndex = -1;
   row.imageLabel = "";
   row.imageLink = false;
   row.imageLinkIndex = 0;
@@ -2767,6 +3184,10 @@ void BrowserScreen::beginTextRow() {
 }
 
 int16_t BrowserScreen::rowHeight(const VisualRow &row) const {
+  if (row.formControlIndex >= 0 && row.formControlIndex < _formControlCount) {
+    return _formControls[row.formControlIndex].kind == FormControlKind::Textarea
+      ? FormTextareaHeight : FormControlHeight;
+  }
   int16_t height = TextRowHeight;
   if (row.image) {
     if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
@@ -2791,6 +3212,64 @@ void BrowserScreen::drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) cons
   const EmbeddedImage &image = _embeddedImages[imageIndex];
   if (!image.pixels || !image.width || !image.height) return;
   _display.tft().pushImage(x, y, image.width, image.height, image.pixels);
+}
+
+void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
+  if (row.formControlIndex < 0 || row.formControlIndex >= _formControlCount) return;
+  TFT_eSPI &tft = _display.tft();
+  const FormControl &control = _formControls[row.formControlIndex];
+  const int16_t x = DocumentSidePadding;
+  const int16_t width = _display.width() - DocumentSidePadding * 2;
+  const int16_t height = rowHeight(row);
+  const uint16_t border = control.disabled ? TFT_DARKGREY : TFT_DARKCYAN;
+  const uint16_t fill = control.disabled ? TFT_LIGHTGREY : TFT_WHITE;
+  const uint16_t textColor = control.disabled ? TFT_DARKGREY : row.style.color;
+  const String label = shortText(formControlLabel(control), width - 14);
+
+  if (control.kind == FormControlKind::Submit || control.kind == FormControlKind::Reset) {
+    const uint16_t buttonColor = control.disabled ? TFT_DARKGREY :
+      (control.kind == FormControlKind::Submit ? TFT_BLUE : TFT_DARKCYAN);
+    tft.fillRoundRect(x, y + 4, width, height - 8, 5, buttonColor);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE, buttonColor);
+    tft.drawString(label, x + width / 2, y + height / 2, 2);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+  if (control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) {
+    const int16_t markerX = x + 7;
+    const int16_t markerY = y + (height - 18) / 2;
+    if (control.kind == FormControlKind::Checkbox) {
+      tft.drawRoundRect(markerX, markerY, 18, 18, 3, border);
+      if (control.checked) {
+        tft.fillRoundRect(markerX + 3, markerY + 3, 12, 12, 2, TFT_BLUE);
+        tft.drawLine(markerX + 5, markerY + 9, markerX + 8, markerY + 13, TFT_WHITE);
+        tft.drawLine(markerX + 8, markerY + 13, markerX + 14, markerY + 5, TFT_WHITE);
+      }
+    } else {
+      tft.drawCircle(markerX + 9, markerY + 9, 8, border);
+      if (control.checked) tft.fillCircle(markerX + 9, markerY + 9, 4, TFT_BLUE);
+    }
+    tft.setTextColor(textColor, _documentBackgroundColor);
+    tft.setTextDatum(ML_DATUM);
+    tft.drawString(shortText(label, width - 34), markerX + 25, y + height / 2, 2);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
+  tft.fillRoundRect(x, y + 2, width, height - 4, 4, fill);
+  tft.drawRoundRect(x, y + 2, width, height - 4, 4, border);
+  tft.setTextColor(textColor, fill);
+  tft.drawString(label, x + 7, y + 6, 2);
+  String value = formControlValue(control);
+  if (control.kind == FormControlKind::Unsupported) value = "Unsupported";
+  if (!value.length() && control.kind != FormControlKind::Select) value = "Tap to enter";
+  value = shortText(value, width - 30);
+  tft.setTextColor(control.disabled ? TFT_DARKGREY : TFT_BLACK, fill);
+  tft.drawString(value, x + 7, y + 23, 2);
+  if (control.kind == FormControlKind::Select) {
+    tft.fillTriangle(x + width - 18, y + height / 2 - 3, x + width - 8, y + height / 2 - 3,
+                     x + width - 13, y + height / 2 + 4, control.disabled ? TFT_DARKGREY : TFT_DARKCYAN);
+  }
 }
 
 int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgroundColor) {

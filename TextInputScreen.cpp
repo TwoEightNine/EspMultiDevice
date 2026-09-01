@@ -128,7 +128,9 @@ void TextInputScreen::handleTouch(const TouchPoint &point) {
   _lastTouchDown = true;
 
   if (contains(_closeBounds, point.x, point.y)) {
-    _navigator.pop();
+    // Deliver an explicit empty result so callers that keep pending input
+    // state can distinguish a cancelled editor from an unrelated resume.
+    _navigator.pop(ScreenResult());
     return;
   }
 
