@@ -9,6 +9,7 @@
 #include <freertos/task.h>
 
 #include "FileFormats.h"
+#include "BrowserText.h"
 #include "Screen.h"
 
 class SdCardController;
@@ -117,6 +118,7 @@ private:
     bool link;
     uint8_t linkIndex;
     bool fullWidthImage;
+    BrowserText::Size size = BrowserText::Size::Normal;
   };
 
   struct StyleOverride {
@@ -133,6 +135,8 @@ private:
     bool underline;
     bool hasFullWidthImage;
     bool fullWidthImage;
+    bool hasSize;
+    BrowserText::Size size;
   };
 
   struct CssRule {
@@ -455,7 +459,6 @@ private:
   void pushStyle(const String &tag, const TextStyle &style);
   void popStyle(const String &tag);
   String decodeEntities(const String &value) const;
-  String transliterateCyrillic(const String &value) const;
   String shortText(const String &value, int16_t maxWidth) const;
   String shortImageLabel(const String &value, int16_t maxWidth) const;
   String lower(const String &value) const;

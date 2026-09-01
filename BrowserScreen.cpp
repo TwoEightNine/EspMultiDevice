@@ -17,6 +17,7 @@ using File = fs::File;
 #include "third_party/AnimatedGIF/AnimatedGIF.h"
 
 #include "Navigator.h"
+#include "BrowserText.h"
 #include "SdCardController.h"
 #include "SpiBusLock.h"
 #include "UiKit.h"
@@ -59,6 +60,16 @@ String trimCopy(const String &value) {
   String result = value;
   result.trim();
   return result;
+}
+
+uint8_t utf8CharacterBytes(const String &value, uint16_t offset) {
+  if (offset >= value.length()) return 0;
+  const uint8_t first = (uint8_t)value[offset];
+  uint8_t length = first < 0x80 ? 1 : (first >= 0xc2 && first <= 0xdf ? 2 :
+                   (first >= 0xe0 && first <= 0xef ? 3 : (first >= 0xf0 && first <= 0xf4 ? 4 : 1)));
+  if (offset + length > value.length()) return 1;
+  for (uint8_t i = 1; i < length; ++i) if (((uint8_t)value[offset + i] & 0xc0) != 0x80) return 1;
+  return length;
 }
 
 String clientState(WiFiClient &client) {
@@ -757,17 +768,22 @@ void BrowserScreen::layout() {
 void BrowserScreen::draw() {
   if (!_display.isReady()) return;
   layout();
-  _display.tft().setFreeFont();
-  _display.tft().fillScreen(TFT_BLACK);
+  TFT_eSPI &tft = _display.tft();
+  BrowserText::begin(tft);
+  tft.fillScreen(TFT_BLACK);
   drawHeader();
   if (_showStart) drawStartPage();
   else drawDocument();
   drawControls();
+  BrowserText::end(tft);
 }
 
 void BrowserScreen::drawHeader() {
   String heading = _showStart ? "Browser" : (_title.length() ? _title : _currentUrl);
-  UiKit::drawTopAppBar(_display.tft(), _display.width(), heading);
+  TFT_eSPI &tft = _display.tft();
+  UiKit::drawTopAppBar(tft, _display.width(), "");
+  BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, _display.width() - 72),
+                    UiKit::NavigationIconSize + UiKit::ContentPadding, 16, TFT_WHITE, UiKit::AppBarColor);
 }
 
 void BrowserScreen::drawStartPage() {
@@ -798,7 +814,11 @@ void BrowserScreen::drawStartPage() {
     const RecentSite &site = _recentSites[i];
     const Rect &bounds = _recentBounds[i];
     String label = site.title.length() ? site.title : site.url;
-    UiKit::drawListCell(tft, bounds.w, bounds.y, label);
+    tft.fillRect(0, bounds.y, bounds.w, UiKit::ListCellHeight, TFT_BLACK);
+    BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding * 2),
+                      UiKit::ContentPadding, bounds.y + 12, TFT_WHITE, TFT_BLACK);
+    tft.drawFastHLine(UiKit::ContentPadding, bounds.y + UiKit::ListCellHeight - 1,
+                      bounds.w - UiKit::ContentPadding * 2, UiKit::DividerColor);
   }
 }
 
@@ -813,15 +833,12 @@ void BrowserScreen::drawDocument() {
   }
   if (_message.length() > 0) {
     const String hint = shortText(_message, _display.width() - 28);
-    const int16_t hintWidth = tft.textWidth(hint, 2) + 14;
+    const int16_t hintWidth = BrowserText::width(tft, hint) + 14;
     const int16_t hintX = (_display.width() - hintWidth) / 2;
     const uint16_t hintBackground = TFT_RED;
     const uint16_t hintForeground = TFT_WHITE;
     tft.fillRoundRect(hintX, textTop + 7, hintWidth, 26, 5, hintBackground);
-    tft.setTextColor(hintForeground, hintBackground);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString(hint, _display.width() / 2, textTop + 20, 2);
-    tft.setTextDatum(TL_DATUM);
+    BrowserText::draw(tft, hint, hintX + 7, textTop + 12, hintForeground, hintBackground);
     return;
   }
   if (_rowCount == 0) {
@@ -857,16 +874,14 @@ void BrowserScreen::drawDocument() {
         drawThumbnail(row.imageIndex, DocumentSidePadding, y);
       } else {
         tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
-        applyFont(row.style);
-        tft.setTextColor(color, row.style.hasBackground ? row.style.backgroundColor : rowBackground);
-        tft.setTextDatum(ML_DATUM);
-        tft.drawString(shortImageLabel(row.imageLabel, width - 26), DocumentSidePadding + 22, y + TextRowHeight / 2);
-        tft.setTextDatum(TL_DATUM);
+        BrowserText::draw(tft, shortImageLabel(row.imageLabel, width - 26),
+                          DocumentSidePadding + 22, y + 3, color, rowBackground);
       }
     } else {
       const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : _documentBackgroundColor;
+      const int16_t height = rowHeight(row);
       if (row.style.hasBlockBackground) {
-        tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, rowHeight(row),
+        tft.fillRect(DocumentSidePadding, y, _display.width() - DocumentSidePadding * 2, height,
                      row.style.blockBackgroundColor);
       }
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
@@ -874,39 +889,34 @@ void BrowserScreen::drawDocument() {
         const int16_t x = DocumentSidePadding + run.x;
         if (run.image) {
           uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
-          const int16_t height = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
+          const int16_t imageHeight = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
                                  _embeddedImages[run.imageIndex].pixels
             ? _embeddedImages[run.imageIndex].height : TextRowHeight;
-          if (run.style.hasBackground) tft.fillRect(x, y, run.width, height, run.style.backgroundColor);
+          if (run.style.hasBackground) tft.fillRect(x, y, run.width, imageHeight, run.style.backgroundColor);
           const bool hasThumbnail = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
                                     _embeddedImages[run.imageIndex].pixels;
           if (hasThumbnail) {
             drawThumbnail(run.imageIndex, x, y);
           } else {
             tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
-            applyFont(run.style);
-            tft.setTextColor(color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
-            tft.setTextDatum(ML_DATUM);
-            tft.drawString(run.text, x + 22, y + TextRowHeight / 2);
-            tft.setTextDatum(TL_DATUM);
+            BrowserText::draw(tft, run.text, x + 22, y + 3, color,
+                              run.style.hasBackground ? run.style.backgroundColor : rowBackground, run.style.size);
           }
           continue;
         }
-        applyFont(run.style);
         if (run.style.hasBackground && run.width > 0) {
-          tft.fillRect(x, y, run.width, TextRowHeight, run.style.backgroundColor);
+          tft.fillRect(x, y, run.width, height, run.style.backgroundColor);
         }
-        tft.setTextColor(run.style.color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
-        tft.setTextDatum(TL_DATUM);
-        tft.drawString(run.text, x, y);
+        const int16_t textY = y + (height - BrowserText::lineHeight(run.style.size)) / 2;
+        BrowserText::draw(tft, run.text, x, textY, run.style.color,
+                          run.style.hasBackground ? run.style.backgroundColor : rowBackground, run.style.size);
         if (run.style.underline && run.width > 0) {
-          tft.drawFastHLine(x, y + TextRowHeight - 2, run.width, run.style.color);
+          tft.drawFastHLine(x, y + height - 2, run.width, run.style.color);
         }
       }
     }
     y += rowHeight(row);
   }
-  tft.setFreeFont();
 }
 
 void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
@@ -955,7 +965,9 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
 
 void BrowserScreen::redrawDocument() {
   if (!_display.isReady()) return;
+  BrowserText::begin(_display.tft());
   drawDocument();
+  BrowserText::end(_display.tft());
 }
 
 void BrowserScreen::drawControls() {
@@ -1690,8 +1702,27 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
   const bool htmlPage = contentType.indexOf("text/html") >= 0 ||
                         contentType.indexOf("application/xhtml") >= 0 || contentType.length() == 0;
   const bool textPage = contentType.indexOf("text/plain") >= 0;
+  // Session pages are stored after normalization, so re-decoding a cached
+  // Windows-1251/KOI8 response would corrupt its UTF-8 body.
   if (!cacheHit && (htmlPage || textPage)) {
+    browserLog(F("normalizing text response"));
+    String encodingError;
+    String normalizedBody;
+    if (!BrowserText::normalizeToUtf8(body, contentType, normalizedBody, encodingError)) {
+      finishLoading();
+      renderPlainText("(" + encodingError + ")", "Unsupported text encoding");
+      _message = "";
+      browserLog(String(F("text decoding failed: ")) + encodingError);
+      draw();
+      return false;
+    }
+    body = normalizedBody;
+    browserLog(String(F("text normalized: bytes=")) + String(body.length()));
+  }
+  if (!cacheHit && (htmlPage || textPage)) {
+    browserLog(F("storing session page"));
     storeSessionPage(_currentUrl, contentType, body);
+    browserLog(F("session page stored"));
   }
   if (htmlPage) {
     renderDocument(body);
@@ -2585,7 +2616,9 @@ uint64_t BrowserScreen::nowEpoch() const {
 
 void BrowserScreen::renderDocument(const String &html) {
   resetRenderedRows();
+  browserLog(F("render: collecting CSS"));
   collectCssRules(html);
+  browserLog(F("render: parsing document"));
   _titleBuffer = "";
   _title = "";
   bool inScript = false;
@@ -2609,7 +2642,12 @@ void BrowserScreen::renderDocument(const String &html) {
   uint8_t labelStartControl = 0;
   bool inOption = false;
   uint32_t position = 0;
+  uint32_t nextYield = 1024;
   while (position < html.length()) {
+    if (position >= nextYield) {
+      yield();
+      nextYield = position + 1024;
+    }
     int nextTag = html.indexOf('<', position);
     String text = nextTag < 0 ? html.substring(position) : html.substring(position, nextTag);
     if (inLabel) labelText += text;
@@ -3110,6 +3148,12 @@ String BrowserScreen::formStubLabel(const String &tag, const String &attributes)
 void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
   if (_renderedCharacters >= 16384) return;
   String remaining = word;
+  const uint16_t renderBudget = 16384 - _renderedCharacters;
+  if (remaining.length() > renderBudget) {
+    uint16_t safeEnd = renderBudget;
+    while (safeEnd && ((uint8_t)remaining[safeEnd] & 0xc0) == 0x80) safeEnd--;
+    remaining.remove(safeEnd);
+  }
   const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
   while (remaining.length() && _rowCount < MaxRows) {
     beginTextRow();
@@ -3140,19 +3184,20 @@ void BrowserScreen::appendWord(const String &word, const TextStyle &style) {
     }
     String part;
     while (part.length() < remaining.length()) {
-      String candidate = part + remaining[part.length()];
+      const uint8_t characterBytes = utf8CharacterBytes(remaining, part.length());
+      String candidate = part + remaining.substring(part.length(), part.length() + characterBytes);
       int16_t candidateWidth = mergedRun
         ? textWidth(mergedRun->text + candidate, style) - mergedRun->width
         : textWidth(candidate, style);
       if (candidateWidth > available) break;
-      part += remaining[part.length()];
+      part += remaining.substring(part.length(), part.length() + characterBytes);
     }
     if (part.length() == 0) {
       if (target.contentWidth > 0) {
         target.contentWidth = _display.width();
         continue;
       }
-      part = remaining.substring(0, 1);
+      part = remaining.substring(0, utf8CharacterBytes(remaining, 0));
     }
     appendRun(part, style);
     _renderedCharacters += part.length();
@@ -3223,6 +3268,8 @@ int16_t BrowserScreen::rowHeight(const VisualRow &row) const {
   } else {
     for (uint8_t i = 0; i < row.runCount; i++) {
       const VisualRun &run = row.runs[i];
+      const int16_t textHeight = BrowserText::lineHeight(run.style.size) + 2;
+      if (textHeight > height) height = textHeight;
       if (!run.image || run.imageIndex < 0 || run.imageIndex >= _embeddedImageCount) continue;
       const EmbeddedImage &image = _embeddedImages[run.imageIndex];
       if (!image.pixels) continue;
@@ -3256,10 +3303,9 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
     const uint16_t buttonColor = control.disabled ? TFT_DARKGREY :
       (control.kind == FormControlKind::Submit ? TFT_BLUE : TFT_DARKCYAN);
     tft.fillRoundRect(x, y + 4, width, height - 8, 5, buttonColor);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_WHITE, buttonColor);
-    tft.drawString(label, x + width / 2, y + height / 2, 2);
-    tft.setTextDatum(TL_DATUM);
+    const String centered = BrowserText::ellipsize(tft, label, width - 14);
+    BrowserText::draw(tft, centered, x + (width - BrowserText::width(tft, centered)) / 2, y + 13,
+                      TFT_WHITE, buttonColor);
     return;
   }
   if (control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) {
@@ -3276,22 +3322,18 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
       tft.drawCircle(markerX + 9, markerY + 9, 8, border);
       if (control.checked) tft.fillCircle(markerX + 9, markerY + 9, 4, TFT_BLUE);
     }
-    tft.setTextColor(textColor, _documentBackgroundColor);
-    tft.setTextDatum(ML_DATUM);
-    tft.drawString(shortText(label, width - 34), markerX + 25, y + height / 2, 2);
-    tft.setTextDatum(TL_DATUM);
+    BrowserText::draw(tft, shortText(label, width - 34), markerX + 25, y + (height - 16) / 2,
+                      textColor, _documentBackgroundColor);
     return;
   }
   tft.fillRoundRect(x, y + 2, width, height - 4, 4, fill);
   tft.drawRoundRect(x, y + 2, width, height - 4, 4, border);
-  tft.setTextColor(textColor, fill);
-  tft.drawString(label, x + 7, y + 6, 2);
+  BrowserText::draw(tft, label, x + 7, y + 6, textColor, fill);
   String value = formControlValue(control);
   if (control.kind == FormControlKind::Unsupported) value = "Unsupported";
   if (!value.length() && control.kind != FormControlKind::Select) value = "Tap to enter";
   value = shortText(value, width - 30);
-  tft.setTextColor(control.disabled ? TFT_DARKGREY : TFT_BLACK, fill);
-  tft.drawString(value, x + 7, y + 23, 2);
+  BrowserText::draw(tft, value, x + 7, y + 23, control.disabled ? TFT_DARKGREY : TFT_BLACK, fill);
   if (control.kind == FormControlKind::Select) {
     tft.fillTriangle(x + width - 18, y + height / 2 - 3, x + width - 8, y + height / 2 - 3,
                      x + width - 13, y + height / 2 + 4, control.disabled ? TFT_DARKGREY : TFT_DARKCYAN);
@@ -3584,16 +3626,13 @@ bool BrowserScreen::hasNextPage() const {
 }
 
 int16_t BrowserScreen::textWidth(const String &text, const TextStyle &style) const {
-  applyFont(style);
-  return _display.tft().textWidth(text);
+  return BrowserText::measure(text, style.size);
 }
 
 void BrowserScreen::applyFont(const TextStyle &style) const {
-  TFT_eSPI &tft = _display.tft();
-  if (style.bold && style.italic) tft.setFreeFont(&FreeSansBoldOblique9pt7b);
-  else if (style.bold) tft.setFreeFont(&FreeSansBold9pt7b);
-  else if (style.italic) tft.setFreeFont(&FreeSansOblique9pt7b);
-  else tft.setFreeFont(&FreeSans9pt7b);
+  // BrowserText uses matching smooth FreeSans Latin/Cyrillic faces at three
+  // sizes. Keep the style state for CSS colors, backgrounds, links, and underlines.
+  (void)style;
 }
 
 bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) const {
@@ -3601,12 +3640,14 @@ bool BrowserScreen::stylesEqual(const TextStyle &left, const TextStyle &right) c
          left.hasBackground == right.hasBackground && left.blockBackgroundColor == right.blockBackgroundColor &&
          left.hasBlockBackground == right.hasBlockBackground && left.bold == right.bold && left.italic == right.italic &&
          left.underline == right.underline && left.link == right.link && left.linkIndex == right.linkIndex &&
-         left.fullWidthImage == right.fullWidthImage;
+         left.fullWidthImage == right.fullWidthImage && left.size == right.size;
 }
 
 BrowserScreen::TextStyle BrowserScreen::styledForTag(const String &tag, const String &attributes) {
   TextStyle style = _currentStyle;
   const bool isBlock = isBlockTag(tag);
+  if (tag == "small") style.size = BrowserText::Size::Small;
+  if (tag == "big" || tag == "h1" || tag == "h2") style.size = BrowserText::Size::Large;
   if (tag == "img") style.fullWidthImage = false;
   if (tag == "b" || tag == "strong") style.bold = true;
   if (tag == "i" || tag == "em") style.italic = true;
@@ -3658,7 +3699,12 @@ void BrowserScreen::collectCssRules(const String &html) {
   bool inScript = false;
   uint32_t styleStart = 0;
   uint32_t position = 0;
+  uint32_t nextYield = 1024;
   while (position < html.length() && _cssRuleCount < MaxCssRules) {
+    if (position >= nextYield) {
+      yield();
+      nextYield = position + 1024;
+    }
     int nextTag = html.indexOf('<', position);
     if (nextTag < 0) break;
     int endTag = findTagEnd(html, nextTag + 1);
@@ -3842,6 +3888,22 @@ bool BrowserScreen::parseCssDeclarations(const String &declarations, StyleOverri
           style.italic = value.indexOf("italic") >= 0 || value.indexOf("oblique") >= 0;
           found = true;
         }
+      } else if (property == "font-size") {
+        BrowserText::Size size = BrowserText::Size::Normal;
+        bool valid = value == "small" || value == "medium" || value == "normal" ||
+                     value == "large" || value == "x-large" || value.endsWith("px");
+        if (valid) {
+          if (value == "small") size = BrowserText::Size::Small;
+          else if (value == "large" || value == "x-large") size = BrowserText::Size::Large;
+          else if (value.endsWith("px")) {
+            const int pixels = value.substring(0, value.length() - 2).toInt();
+            size = pixels <= 15 ? BrowserText::Size::Small :
+                   (pixels >= 22 ? BrowserText::Size::Large : BrowserText::Size::Normal);
+          }
+          style.hasSize = true;
+          style.size = size;
+          found = true;
+        }
       } else if (property == "text-decoration") {
         if (value.length()) {
           style.hasUnderline = true;
@@ -3913,6 +3975,7 @@ void BrowserScreen::applyStyleOverride(TextStyle &style, const StyleOverride &ov
   }
   if (override.hasBold) style.bold = override.bold;
   if (override.hasItalic) style.italic = override.italic;
+  if (override.hasSize) style.size = override.size;
   if (override.hasUnderline) style.underline = override.underline;
   if (imageTag && override.hasFullWidthImage) style.fullWidthImage = override.fullWidthImage;
 }
@@ -3920,9 +3983,9 @@ void BrowserScreen::applyStyleOverride(TextStyle &style, const StyleOverride &ov
 void BrowserScreen::applyCssRules(TextStyle &style, const String &tag, const String &attributes) const {
   StyleOverride resolved = {};
   int16_t colorSpecificity = -1, backgroundSpecificity = -1, boldSpecificity = -1;
-  int16_t italicSpecificity = -1, underlineSpecificity = -1, imageSpecificity = -1;
+  int16_t italicSpecificity = -1, underlineSpecificity = -1, sizeSpecificity = -1, imageSpecificity = -1;
   uint16_t colorOrder = 0, backgroundOrder = 0, boldOrder = 0;
-  uint16_t italicOrder = 0, underlineOrder = 0, imageOrder = 0;
+  uint16_t italicOrder = 0, underlineOrder = 0, sizeOrder = 0, imageOrder = 0;
   for (uint8_t index = 0; index < _cssRuleCount; index++) {
     const CssRule &rule = _cssRules[index];
     if (!matchesCssRule(rule, tag, attributes)) continue;
@@ -3947,6 +4010,11 @@ void BrowserScreen::applyCssRules(TextStyle &style, const String &tag, const Str
         (rule.specificity == italicSpecificity && rule.sourceOrder >= italicOrder))) {
       resolved.hasItalic = true; resolved.italic = candidate.italic;
       italicSpecificity = rule.specificity; italicOrder = rule.sourceOrder;
+    }
+    if (candidate.hasSize && (rule.specificity > sizeSpecificity ||
+        (rule.specificity == sizeSpecificity && rule.sourceOrder >= sizeOrder))) {
+      resolved.hasSize = true; resolved.size = candidate.size;
+      sizeSpecificity = rule.specificity; sizeOrder = rule.sourceOrder;
     }
     if (candidate.hasUnderline && (rule.specificity > underlineSpecificity ||
         (rule.specificity == underlineSpecificity && rule.sourceOrder >= underlineOrder))) {
@@ -4136,12 +4204,18 @@ String BrowserScreen::decodeEntities(const String &value) const {
         char *numberEnd = nullptr;
         uint32_t codepoint = strtoul(number.c_str(), &numberEnd, hexadecimal ? 16 : 10);
         if (number.length() && numberEnd && *numberEnd == '\0' && codepoint <= 0x10ffffUL) {
+          if (codepoint >= 0xd800 && codepoint <= 0xdfff) codepoint = 0xfffd;
           if (codepoint < 0x80) decoded += (char)codepoint;
           else if (codepoint < 0x800) {
             decoded += (char)(0xc0 | (codepoint >> 6));
             decoded += (char)(0x80 | (codepoint & 0x3f));
           } else if (codepoint < 0x10000) {
             decoded += (char)(0xe0 | (codepoint >> 12));
+            decoded += (char)(0x80 | ((codepoint >> 6) & 0x3f));
+            decoded += (char)(0x80 | (codepoint & 0x3f));
+          } else {
+            decoded += (char)(0xf0 | (codepoint >> 18));
+            decoded += (char)(0x80 | ((codepoint >> 12) & 0x3f));
             decoded += (char)(0x80 | ((codepoint >> 6) & 0x3f));
             decoded += (char)(0x80 | (codepoint & 0x3f));
           }
@@ -4152,70 +4226,17 @@ String BrowserScreen::decodeEntities(const String &value) const {
     }
     decoded += result[i++];
   }
-  return transliterateCyrillic(decoded);
-}
-
-String BrowserScreen::transliterateCyrillic(const String &value) const {
-  // UTF-8 Cyrillic is split across several byte ranges. In particular,
-  // lowercase а-п are D0 B0..BF; omitting that range was the source of the
-  // question marks seen on Russian pages.
-  static const char *ExtendedUpper[] = {
-    "E", "Yo", "Dj", "Gj", "Ye", "Dz", "I", "Yi", "J", "Lj", "Nj", "C", "K", "I", "U", "Dzh"
-  };
-  static const char *Upper[] = {
-    "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",
-    "R", "S", "T", "U", "F", "Kh", "Ts", "Ch", "Sh", "Shch", "\"", "Y", "'", "E", "Yu", "Ya"
-  };
-  // а-п: U+0430..U+043F -> D0 B0..BF
-  static const char *RussianLowerAtoP[] = {
-    "a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p"
-  };
-  // р-я: U+0440..U+044F -> D1 80..8F
-  static const char *RussianLowerRtoYa[] = {
-    "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "\"", "y", "'", "e", "yu", "ya"
-  };
-  static const char *ExtendedLower[] = {
-    "e", "yo", "dj", "gj", "ye", "dz", "i", "yi", "j", "lj", "nj", "c", "k", "i", "u", "dzh"
-  };
-  String result;
-  for (uint16_t i = 0; i < value.length(); i++) {
-    uint8_t first = (uint8_t)value[i];
-    if (first < 0x80) {
-      result += (char)first;
-      continue;
-    }
-    if (i + 1 >= value.length()) {
-      result += '?';
-      break;
-    }
-    uint8_t second = (uint8_t)value[++i];
-    if (first == 0xd0 && second >= 0x80 && second <= 0x8f) result += ExtendedUpper[second - 0x80];
-    else if (first == 0xd0 && second >= 0x90 && second <= 0xaf) result += Upper[second - 0x90];
-    else if (first == 0xd0 && second >= 0xb0 && second <= 0xbf) result += RussianLowerAtoP[second - 0xb0];
-    else if (first == 0xd1 && second >= 0x80 && second <= 0x8f) result += RussianLowerRtoYa[second - 0x80];
-    else if (first == 0xd1 && second >= 0x90 && second <= 0x9f) result += ExtendedLower[second - 0x90];
-    else if (first == 0xd2 && second == 0x90) result += "G";
-    else if (first == 0xd2 && second == 0x91) result += "g";
-    else result += '?';
-  }
-  return result;
+  return decoded;
 }
 
 String BrowserScreen::shortText(const String &value, int16_t maxWidth) const {
-  if (_display.tft().textWidth(value, 2) <= maxWidth) return value;
-  String result = value;
-  while (result.length() > 3 && _display.tft().textWidth(result + "...", 2) > maxWidth) result.remove(result.length() - 1);
-  return result + "...";
+  return BrowserText::ellipsize(_display.tft(), value, maxWidth);
 }
 
 String BrowserScreen::shortImageLabel(const String &value, int16_t maxWidth) const {
   TextStyle style{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
-  if (textWidth(value, style) <= maxWidth) return value;
-  String result = value;
-  while (result.length() > 3 && textWidth(result + "...", style) > maxWidth) {
-    result.remove(result.length() - 1);
-  }
-  return result.length() == value.length() ? result : result + "...";
+  (void)style;
+  return BrowserText::ellipsize(_display.tft(), value, maxWidth);
 }
 
 String BrowserScreen::lower(const String &value) const {
