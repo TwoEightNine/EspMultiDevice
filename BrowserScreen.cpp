@@ -652,8 +652,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     // Never wait for an image decoder or delete a directory from the touch
     // handler.  The next Browser entry clears the disposable session cache
     // from its lifecycle worker.
-    _plainClient.stop();
-    _secureClient.stop();
+    stopNetworkClientsIfIdle();
     endSessionCache();
     _historyCount = 0;
     _currentUrl = "";
@@ -1053,12 +1052,26 @@ void BrowserScreen::cancelLoading() {
   browserLog(F("cancelling active transfer and image jobs"));
   releaseEmbeddedImages();
   _deferCachedPageDraw = false;
-  _plainClient.stop();
-  _secureClient.stop();
+  // The image worker performs HTTPS on the other core. Calling stop() while
+  // it is inside mbedTLS races its context teardown and corrupts the heap.
+  // Invalidating the generation makes the worker stop its own client at its
+  // next cancellation check; only stop here after exclusively acquiring the
+  // same lock used for every request.
+  stopNetworkClientsIfIdle();
   _loadCancelled = true;
   finishLoading();
   if (contentIsPending) _message = "Loading cancelled";
   draw();
+}
+
+void BrowserScreen::stopNetworkClientsIfIdle() {
+  HttpLock lock(_httpMutex, 0);
+  if (!lock.locked()) {
+    browserLog(F("network client stop deferred to active request"));
+    return;
+  }
+  _plainClient.stop();
+  _secureClient.stop();
 }
 
 bool BrowserScreen::pollLoadingCancel() {
@@ -3373,8 +3386,32 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
 
 void BrowserScreen::releaseEmbeddedImages() {
   if (_embeddedImageCount) browserLog(String(F("releasing image jobs and previews: count=")) + String(_embeddedImageCount));
+  // Invalidate the generation before touching the previews.  The worker owns
+  // a decoded buffer until it has handed it to _imageResults; accepting that
+  // buffer after the document has been discarded creates two independent
+  // cleanup paths for the same allocation (worker result cleanup and the
+  // next document's preview cleanup).
   _imageGeneration++;
   if (_imageGeneration == 0) _imageGeneration = 1;
+
+  // Jobs which have not started belong to the document being discarded and
+  // have no heap payload.  Removing them means a rapid Back/navigation
+  // sequence cannot make the worker start an already-invalid request.
+  if (_imageJobs) {
+    ImageJob job{};
+    while (xQueueReceive(_imageJobs, &job, 0) == pdTRUE) {}
+  }
+
+  // Results already waiting in the queue still own their pixel buffer.  Free
+  // them here while this generation is being retired instead of letting a
+  // later screen process stale ownership.
+  if (_imageResults) {
+    ImageResult result{};
+    while (xQueueReceive(_imageResults, &result, 0) == pdTRUE) {
+      if (result.pixels) free(result.pixels);
+    }
+  }
+
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
     if (_embeddedImages[i].pixels) free(_embeddedImages[i].pixels);
     _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
@@ -3470,18 +3507,38 @@ void BrowserScreen::imageWorkerTask(void *context) {
   ImageJob job{};
   while (true) {
     if (xQueueReceive(screen->_imageJobs, &job, portMAX_DELAY) != pdTRUE) continue;
+    // releaseEmbeddedImages() removes pending jobs, but the worker may have
+    // already dequeued one just as Back was pressed.  Do not give that old
+    // document a second route to a pixel-buffer free.
+    if (job.generation != screen->_imageGeneration) continue;
+
     ImageResult result{};
     result.imageIndex = job.imageIndex;
     result.generation = job.generation;
-    if (job.generation == screen->_imageGeneration) {
-      browserLog(String(F("image worker started #")) + String(job.imageIndex + 1));
-      screen->_activeImageGeneration = job.generation;
-      screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor, job.useSessionCache,
-                                         result.pixels, result.width, result.height);
-      screen->_activeImageGeneration = 0;
-      browserLog(String(F("image worker finished #")) + String(job.imageIndex + 1));
+    browserLog(String(F("image worker started #")) + String(job.imageIndex + 1));
+    screen->_activeImageGeneration = job.generation;
+    screen->fetchEmbeddedImageOnWorker(String(job.url), job.backgroundColor, job.useSessionCache,
+                                       result.pixels, result.width, result.height);
+    screen->_activeImageGeneration = 0;
+    browserLog(String(F("image worker finished #")) + String(job.imageIndex + 1));
+
+    // A cancellation can happen while a JPEG/PNG/GIF decoder is finishing.
+    // Keep the buffer on this worker in that case; the UI thread has already
+    // released the old document and must never receive it.
+    if (job.generation != screen->_imageGeneration) {
+      if (result.pixels) free(result.pixels);
+      continue;
     }
-    xQueueSend(screen->_imageResults, &result, portMAX_DELAY);
+
+    // Avoid parking an obsolete result (and its heap allocation) forever if
+    // the queue is full while the user navigates away.
+    while (xQueueSend(screen->_imageResults, &result, pdMS_TO_TICKS(50)) != pdTRUE) {
+      if (job.generation != screen->_imageGeneration) {
+        if (result.pixels) free(result.pixels);
+        result.pixels = nullptr;
+        break;
+      }
+    }
   }
 }
 

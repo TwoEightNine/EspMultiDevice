@@ -357,6 +357,7 @@ private:
   void finishLoading();
   void refreshLoadingDisplay(bool force = false);
   void cancelLoading();
+  void stopNetworkClientsIfIdle();
   bool pollLoadingCancel();
   String documentLinkAt(int16_t x, int16_t y) const;
   int8_t documentFormControlAt(int16_t x, int16_t y) const;
