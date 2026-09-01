@@ -20,24 +20,34 @@ struct ScreenData {
   ScreenDataKind kind;
   String text;
   String initialText;
+  String previousImagePath;
+  String nextImagePath;
   bool maskInput;
   FileAccessMode fileAccess;
   uint16_t pin;
   TextInputMode inputMode;
 
-  ScreenData() : kind(ScreenDataKind::None), text(), initialText(), maskInput(false),
+  ScreenData() : kind(ScreenDataKind::None), text(), initialText(), previousImagePath(), nextImagePath(),
+                 maskInput(false),
                  fileAccess(FileAccessMode::Normal), pin(0), inputMode(TextInputMode::Text) {
   }
 
-  static ScreenData imagePath(const String &path) {
+  static ScreenData imagePath(const String &path,
+                              const String &previousPath = String(),
+                              const String &nextPath = String()) {
     ScreenData data;
     data.kind = ScreenDataKind::ImagePath;
     data.text = path;
+    data.previousImagePath = previousPath;
+    data.nextImagePath = nextPath;
     return data;
   }
 
-  static ScreenData secretImagePath(const String &path, uint16_t pin) {
-    ScreenData data = imagePath(path);
+  static ScreenData secretImagePath(const String &path,
+                                    uint16_t pin,
+                                    const String &previousPath = String(),
+                                    const String &nextPath = String()) {
+    ScreenData data = imagePath(path, previousPath, nextPath);
     data.fileAccess = FileAccessMode::Secret;
     data.pin = pin;
     return data;

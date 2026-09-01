@@ -61,7 +61,10 @@ private:
   static const uint8_t GifInitialPreloadFrames = 3;
   static const uint32_t GifMinimumDelayMs = 100;
   static const bool EnableBackgroundGifLoader = true;
-  static const uint16_t GifTileSize = 16;
+  static const uint8_t GifPresentBandRows = 16;
+  static const uint16_t GifLoaderReadChunkBytes = 2048;
+  static const int16_t EdgeTapWidth = 48;
+  static const int16_t CloseTapSize = 64;
 
   enum class Compression : uint32_t {
     Rgb = 0,
@@ -109,6 +112,8 @@ private:
   bool _webpAnimated;
   uint32_t _webpPreviousTimestamp;
   String _path;
+  String _previousImagePath;
+  String _nextImagePath;
   String _error;
   String _cachePath;
   String _cacheTempPath;
@@ -196,7 +201,10 @@ private:
   bool _gifNextLoaded;
   uint32_t _gifNextFrameAt;
   uint32_t _gifCanvasPixels;
-  uint16_t _gifTileBuffer[GifTileSize * GifTileSize];
+  const uint16_t *_gifPresentFrame;
+  uint16_t _gifPresentY;
+  bool _gifPresentActive;
+  uint16_t _gifPresentBuffer[GifPhotoMaxWidth * GifPresentBandRows];
   bool _lastTouchDown;
   uint8_t _lastProgress;
 
@@ -259,6 +267,7 @@ private:
   void prepareGifDrawRect();
   void presentGifFullFrame(const uint16_t *frame);
   void presentGifFrame(const uint16_t *frame, const uint16_t *previous, bool forceFull);
+  bool tickGifPresentation();
   bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
                               uint16_t *destination, uint32_t &delay);
   bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);

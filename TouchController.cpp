@@ -196,7 +196,10 @@ bool TouchController::readPoint(TouchPoint &point, bool holdingTouch) {
 
   // The GIF loader may read SD data on the other core. Keep the shared SD /
   // touch SPI wires exclusive for this short touch transaction.
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(8))) return false;
+  // A GIF loader deliberately releases the bus between small reads. Wait
+  // through one of those reads so a normal tap is not discarded solely
+  // because touch polling landed inside an SD transaction.
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(25))) return false;
   SPI.beginTransaction(_spiSettings);
   digitalWrite(_csPin, LOW);
 

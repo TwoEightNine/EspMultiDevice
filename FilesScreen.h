@@ -27,6 +27,10 @@ public:
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
 
+  // Builds a viewer payload from the retained, naturally sorted directory
+  // listing. The viewer uses this again after an edge navigation replace.
+  bool imageViewerDataFor(const String &path, ScreenData &data) const;
+
 private:
   static const uint8_t MaxCachedDirectories = 8;
   static const uint8_t MaxCachedThumbnails = 12;

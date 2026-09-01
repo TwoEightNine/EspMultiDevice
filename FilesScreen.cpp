@@ -1396,7 +1396,11 @@ void FilesScreen::openEntry(uint16_t index) {
   bool opened = false;
   const bool secret = _secretMode && _secretStorage.isSecretPath(_currentPath);
   if (FileFormats::isImage(entry->format) && FileFormats::isOpenable(entry->format)) {
-    opened = _navigator.push(ScreenId::ImageViewer, secret ? ScreenData::secretImagePath(path, _secretStorage.pin()) : ScreenData::imagePath(path));
+    ScreenData imageData;
+    if (!imageViewerDataFor(path, imageData)) {
+      imageData = secret ? ScreenData::secretImagePath(path, _secretStorage.pin()) : ScreenData::imagePath(path);
+    }
+    opened = _navigator.push(ScreenId::ImageViewer, imageData);
   } else if (FileFormats::isAudio(entry->format) && FileFormats::isOpenable(entry->format)) {
     opened = _navigator.push(ScreenId::AudioPlayer, secret ? ScreenData::secretAudioPath(path, _secretStorage.pin()) : ScreenData::audioPath(path));
   } else if (FileFormats::isVideo(entry->format) && FileFormats::isOpenable(entry->format)) {
@@ -1405,6 +1409,43 @@ void FilesScreen::openEntry(uint16_t index) {
   if (!opened) {
     _retainCacheWhileCovered = false;
   }
+}
+
+bool FilesScreen::imageViewerDataFor(const String &path, ScreenData &data) const {
+  if (!_listing || _listing->count == 0) return false;
+
+  uint16_t current = InvalidEntryIndex;
+  for (uint16_t i = 0; i < _listing->count; i++) {
+    const Entry &entry = _listing->entries[i];
+    if (!entry.directory && FileFormats::isImage(entry.format) && FileFormats::isOpenable(entry.format) &&
+        fullPathFor(entry) == path) {
+      current = i;
+      break;
+    }
+  }
+  if (current == InvalidEntryIndex) return false;
+
+  String previous;
+  String next;
+  for (uint16_t step = 1; step < _listing->count && (previous.length() == 0 || next.length() == 0); step++) {
+    const uint16_t previousIndex = (uint16_t)((current + _listing->count - step) % _listing->count);
+    const uint16_t nextIndex = (uint16_t)((current + step) % _listing->count);
+    const Entry &previousEntry = _listing->entries[previousIndex];
+    const Entry &nextEntry = _listing->entries[nextIndex];
+    if (previous.length() == 0 && !previousEntry.directory && FileFormats::isImage(previousEntry.format) &&
+        FileFormats::isOpenable(previousEntry.format)) {
+      previous = fullPathFor(previousEntry);
+    }
+    if (next.length() == 0 && !nextEntry.directory && FileFormats::isImage(nextEntry.format) &&
+        FileFormats::isOpenable(nextEntry.format)) {
+      next = fullPathFor(nextEntry);
+    }
+  }
+
+  const bool secret = _secretMode && _secretStorage.isSecretPath(_currentPath);
+  data = secret ? ScreenData::secretImagePath(path, _secretStorage.pin(), previous, next)
+                : ScreenData::imagePath(path, previous, next);
+  return true;
 }
 
 void FilesScreen::showMenu(uint16_t index) {

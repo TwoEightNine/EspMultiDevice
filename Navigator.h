@@ -41,6 +41,7 @@ public:
   Screen *activeScreen();
   ScreenId activeScreenId() const;
   bool hasActiveScreen() const;
+  Screen *screenFor(ScreenId id) const;
 
 private:
   ScreenId _registeredIds[MaxScreens];
@@ -54,7 +55,6 @@ private:
   StackEntry _stack[MaxStackDepth];
   uint8_t _stackDepth;
 
-  Screen *screenFor(ScreenId id) const;
   bool isRegistered(ScreenId id) const;
   void enter(const StackEntry &entry);
   void exitActive();

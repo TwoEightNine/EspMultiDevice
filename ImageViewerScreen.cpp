@@ -2,6 +2,7 @@
 
 #include "AnimationCache.h"
 #include "FileFormats.h"
+#include "FilesScreen.h"
 
 // Arduino's sketch builder does not compile sources below the sketch root;
 // include the pinned, header-based decoder implementation exactly once.
@@ -44,6 +45,8 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _webpAnimInfo{},
     _webpAnimated(false),
     _webpPreviousTimestamp(0),
+    _previousImagePath(),
+    _nextImagePath(),
     _sourceFileSize(0),
     _sourceWriteTime(0),
     _cacheOffset(0),
@@ -125,6 +128,9 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _gifNextLoaded(false),
     _gifNextFrameAt(0),
     _gifCanvasPixels(0),
+    _gifPresentFrame(nullptr),
+    _gifPresentY(0),
+    _gifPresentActive(false),
     _lastTouchDown(false),
     _lastProgress(0),
     _rleFileRow(0),
@@ -147,6 +153,8 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     return;
   }
   _path = data.text;
+  _previousImagePath = data.previousImagePath;
+  _nextImagePath = data.nextImagePath;
   // Put a real frame on the panel before touching SD or allocating decode
   // buffers.  Animated formats continue their build incrementally in tick(),
   // and this prevents a blank/previous Files screen during header/cache work.
@@ -304,7 +312,26 @@ void ImageViewerScreen::handleTouch(const TouchPoint &point) {
   }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
-  if (UiKit::navigationIconContains(point.x, point.y)) _navigator.pop();
+  // The visible X is deliberately compact, but its touch target stays large
+  // enough to be reliable while a playing animation is sharing the SPI bus.
+  if (point.x < CloseTapSize && point.y < CloseTapSize) {
+    _navigator.pop();
+    return;
+  }
+
+  String target;
+  if (point.x < EdgeTapWidth) {
+    target = _previousImagePath;
+  } else if (point.x >= _display.width() - EdgeTapWidth) {
+    target = _nextImagePath;
+  }
+  if (target.length() == 0) return;
+
+  FilesScreen *files = static_cast<FilesScreen *>(_navigator.screenFor(ScreenId::Files));
+  ScreenData data;
+  if (files && files->imageViewerDataFor(target, data)) {
+    _navigator.replace(ScreenId::ImageViewer, data);
+  }
 }
 
 void ImageViewerScreen::reset() {
@@ -364,7 +391,12 @@ void ImageViewerScreen::reset() {
   _gifNextLoaded = false;
   _gifNextFrameAt = 0;
   _gifCanvasPixels = 0;
+  _gifPresentFrame = nullptr;
+  _gifPresentY = 0;
+  _gifPresentActive = false;
   _format = ImageFormat::Unknown;
+  _previousImagePath = "";
+  _nextImagePath = "";
   _pixelOffset = 0;
   _sourceWidth = 0;
   _sourceHeight = 0;
@@ -1226,7 +1258,9 @@ bool ImageViewerScreen::loadGifFrameOnWorker(StorageFile &cache,
   for (uint32_t offset = 0; offset < gifRgb444Bytes(); ) {
     if (_gifLoaderStop) return false;
     uint32_t remaining = gifRgb444Bytes() - offset;
-    uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
+    // Keep shared SPI ownership short enough for a press and its release to
+    // be sampled between loader reads. The expansion work happens unlocked.
+    uint16_t amount = remaining > GifLoaderReadChunkBytes ? GifLoaderReadChunkBytes : (uint16_t)remaining;
     // The cursor is positioned immediately after the delay header. Reading
     // sequentially avoids 75 FAT seeks per 480x320 frame.
     if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
@@ -1252,6 +1286,8 @@ bool ImageViewerScreen::loadGifFrameOnWorker(StorageFile &cache,
       packedCount = 0;
     }
     offset += amount;
+    // Give the waiting touch task a scheduling point before requesting the
+    // shared bus again on the other core.
     taskYIELD();
   }
   if (packedCount == 2 && pixel < (uint32_t)_drawWidth * _drawHeight) {
@@ -1327,74 +1363,55 @@ void ImageViewerScreen::prepareGifDrawRect() {
 }
 
 void ImageViewerScreen::presentGifFullFrame(const uint16_t *frame) {
-  if (!frame || !_display.isReady()) return;
-
-  // Keep each TFT transaction short. A complete 480x320 transfer can hold
-  // the CPU long enough to starve another time-sensitive peripheral (notably
-  // I2S playback). Row bands preserve the image while allowing the scheduler
-  // and interrupt handlers to run between transfers.
-  const uint16_t width = _display.width();
-  const uint16_t height = _display.height();
-  const uint16_t bandHeight = 16;
-  for (uint16_t y = 0; y < height; y += bandHeight) {
-    uint16_t rows = height - y;
-    if (rows > bandHeight) rows = bandHeight;
-    _display.tft().pushImage(0, y, width, rows,
-                              const_cast<uint16_t *>(frame + (size_t)y * width));
-    taskYIELD();
-  }
+  if (!frame || !_display.isReady() || _drawWidth == 0 || _drawHeight == 0) return;
+  // The display is cleared before playback begins. Frames only need to update
+  // the centered photo rectangle, which leaves the close control's black
+  // corner untouched even when the animation itself has a black background.
+  _gifPresentFrame = frame;
+  _gifPresentY = 0;
+  _gifPresentActive = true;
 }
 
 void ImageViewerScreen::presentGifFrame(const uint16_t *frame,
                                         const uint16_t *previous,
                                         bool forceFull) {
-  if (!frame || !_display.isReady()) return;
-  const uint16_t width = _display.width();
-  const uint16_t height = _display.height();
-  // A rotated cached canvas does not have contiguous display tiles. Use the
-  // proven full-frame path in that uncommon orientation.
-  if (forceFull || !previous || cacheNeedsRotation() ||
-      width != CacheWidth || height != CacheHeight) {
-    presentGifFullFrame(frame);
-    return;
+  (void)previous;
+  (void)forceFull;
+  presentGifFullFrame(frame);
+}
+
+bool ImageViewerScreen::tickGifPresentation() {
+  if (!_gifPresentActive) return true;
+  if (!_gifPresentFrame || !_display.isReady() || _gifPresentY >= _drawHeight) {
+    _gifPresentFrame = nullptr;
+    _gifPresentActive = false;
+    return false;
   }
 
-  const uint16_t columns = width / GifTileSize;
-  const uint16_t rows = height / GifTileSize;
-  uint16_t changed = 0;
-  for (uint16_t tileY = 0; tileY < rows; tileY++) {
-    for (uint16_t tileX = 0; tileX < columns; tileX++) {
-      bool different = false;
-      const uint16_t x = tileX * GifTileSize;
-      const uint16_t y = tileY * GifTileSize;
-      for (uint16_t row = 0; row < GifTileSize && !different; row++) {
-        const uint16_t *currentRow = frame + (size_t)(y + row) * width + x;
-        const uint16_t *previousRow = previous + (size_t)(y + row) * width + x;
-        if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
-      }
-      if (different && ++changed > (uint16_t)((columns * rows) / 2)) {
-        presentGifFullFrame(frame);
-        return;
-      }
-    }
+  // One small transfer per Arduino loop gives updateTouch() a chance to
+  // observe both press and release edges between animation bands.
+  const uint16_t bandHeight = GifPresentBandRows;
+  uint16_t rows = _drawHeight - _gifPresentY;
+  if (rows > bandHeight) rows = bandHeight;
+  const uint16_t width = _display.width();
+  // Frame buffers retain the full-screen stride even though only the photo
+  // rectangle changes. Stage the band as tightly packed rows before giving
+  // it to TFT_eSPI; passing the first row directly corrupts every following
+  // row when the photo is narrower than the display.
+  for (uint16_t row = 0; row < rows; row++) {
+    const uint16_t *source = _gifPresentFrame +
+      (size_t)(_top + _gifPresentY + row) * width + _left;
+    memcpy(_gifPresentBuffer + (size_t)row * _drawWidth, source,
+           (size_t)_drawWidth * sizeof(uint16_t));
   }
-  for (uint16_t tileY = 0; tileY < rows; tileY++) {
-    for (uint16_t tileX = 0; tileX < columns; tileX++) {
-      const uint16_t x = tileX * GifTileSize;
-      const uint16_t y = tileY * GifTileSize;
-      bool different = false;
-      for (uint16_t row = 0; row < GifTileSize; row++) {
-        const uint16_t *currentRow = frame + (size_t)(y + row) * width + x;
-        const uint16_t *previousRow = previous + (size_t)(y + row) * width + x;
-        memcpy(_gifTileBuffer + row * GifTileSize, currentRow, GifTileSize * sizeof(uint16_t));
-        if (memcmp(currentRow, previousRow, GifTileSize * sizeof(uint16_t)) != 0) different = true;
-      }
-      if (different) {
-        _display.tft().pushImage(x, y, GifTileSize, GifTileSize, _gifTileBuffer);
-        taskYIELD();
-      }
-    }
+  _display.tft().pushImage(_left, _top + _gifPresentY, _drawWidth, rows,
+                            _gifPresentBuffer);
+  _gifPresentY += rows;
+  if (_gifPresentY == _drawHeight) {
+    _gifPresentFrame = nullptr;
+    _gifPresentActive = false;
   }
+  return true;
 }
 
 uint32_t ImageViewerScreen::gifSourceFrameForSequence(uint32_t sequence) const {
@@ -1570,10 +1587,8 @@ bool ImageViewerScreen::beginGifResidentPlayback() {
   _gifPlaybackDelay = _gifResidentDelays[0];
   if (_gifResidentStates) _gifResidentStates[0] = (uint8_t)GifSlotState::Displaying;
   draw();
-  uint32_t presentStartedAt = millis();
-  presentGifFrame(gifResidentFrame(0), nullptr, true);
-  (void)presentStartedAt;
   drawCloseIcon();
+  presentGifFrame(gifResidentFrame(0), nullptr, true);
   _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs);
   _gifCyclesCompleted = 0;
   _gifState = GifState::Playing;
@@ -1629,6 +1644,7 @@ bool ImageViewerScreen::tickGifTwoFrameLoad() {
 }
 
 bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
+  if (_gifPresentActive) return tickGifPresentation();
   if (_gifResidentFrames) {
     if (_gifLoaderTask) {
       if (!collectGifLoadResults() || !startNextGifRingLoad()) return false;
@@ -1677,10 +1693,7 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
       _gifResidentStates[slot] = (uint8_t)GifSlotState::Displaying;
       if (!_gifFullResident) _gifResidentStates[previousSlot] = (uint8_t)GifSlotState::Free;
     }
-    uint32_t presentStartedAt = millis();
     presentGifFrame(next, gifResidentFrame(previousSlot), false);
-    (void)presentStartedAt;
-    drawCloseIcon();
     _gifNextFrameAt += _gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs;
     return startNextGifRingLoad();
   }
@@ -1709,7 +1722,6 @@ bool ImageViewerScreen::tickGifPlayback(uint32_t nowMs) {
   _gifPlaybackFrame = displayedFrame;
   _gifPlaybackDelay = _gifNextDelay;
   presentGifFullFrame(active);
-  drawCloseIcon();
 
   if (displayedFrame + 1 < _gifFrameCount) {
     beginGifTwoFrameLoad(displayedFrame + 1);
@@ -1742,6 +1754,9 @@ void ImageViewerScreen::releaseGifBuffers() {
   _gifBufferedFrame = 0;
   _gifBufferedOffset = 0;
   _gifBufferedLoading = false;
+  _gifPresentFrame = nullptr;
+  _gifPresentY = 0;
+  _gifPresentActive = false;
   _gifResidentFrames = nullptr;
   _gifResidentDelays = nullptr;
   _gifResidentSequences = nullptr;
