@@ -45,6 +45,12 @@ const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
 const char *DownloadDirectory = "/Downloads";
 const char *SessionCacheDirectory = "/.system/browser_session";
+// Some file hosts route unknown clients to an informational page instead of
+// returning the requested media. Present a conventional mobile browser
+// identity so servers can use their normal mobile response path.
+const char *MobileUserAgent =
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+  "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
 void browserLog(const __FlashStringHelper *message) {
   Serial.print(F("[Browser] "));
@@ -2046,7 +2052,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   bool defaultPort = (url.scheme == "http" && url.port == 80) || (url.scheme == "https" && url.port == 443);
   if (!defaultPort) hostHeader += ":" + String(url.port);
   String request = "GET " + url.path + " HTTP/1.1\r\nHost: " + hostHeader +
-                   "\r\nUser-Agent: ESP-Media-Browser/1.0\r\nAccept: text/html,*/*;q=0.1\r\n"
+                   "\r\nUser-Agent: " + MobileUserAgent + "\r\nAccept: text/html,*/*;q=0.1\r\n"
                    "Accept-Encoding: identity\r\nConnection: close\r\n";
   String cookies = cookieHeaderFor(url);
   if (cookies.length()) request += "Cookie: " + cookies + "\r\n";
