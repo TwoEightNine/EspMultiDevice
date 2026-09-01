@@ -43,10 +43,8 @@ void AudioSettingsScreen::draw() {
   TFT_eSPI &tft = _display.tft();
   tft.fillScreen(TFT_BLACK);
   UiKit::drawTopAppBar(tft, _display.width(), F("Audio"));
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Output volume"), _display.width() / 2, 82, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Output volume"), _display.width() / 2, 82, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Title, MC_DATUM);
   drawLevels();
 }
 
@@ -68,19 +66,16 @@ void AudioSettingsScreen::drawLevels() {
     uint16_t text = isSelected ? TFT_BLACK : TFT_WHITE;
     tft.fillRoundRect(x, y, cellWidth, GridHeight, 6, fill);
     tft.drawRoundRect(x, y, cellWidth, GridHeight, 6, TFT_WHITE);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(text, fill);
-    tft.drawNumber(level, x + cellWidth / 2, y + GridHeight / 2, 2);
+    UiText::draw(tft, String(level), x + cellWidth / 2, y + GridHeight / 2,
+                 text, fill, UiText::Size::Compact, MC_DATUM);
   }
 
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.fillRect(0, 252, _display.width(), 28, TFT_BLACK);
   String selectedText = F("Level ");
   selectedText += selected;
   selectedText += F(" of 10");
-  tft.drawString(selectedText, _display.width() / 2, 266, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, selectedText, _display.width() / 2, 266, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 int8_t AudioSettingsScreen::levelAt(int16_t x, int16_t y) const {

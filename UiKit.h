@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
+#include "UiText.h"
+
 namespace UiKit {
 
 constexpr int16_t AppBarHeight = 48;
@@ -12,8 +14,6 @@ constexpr int16_t ListCellHeight = 40;
 constexpr int16_t ListIconSize = 32;
 constexpr uint16_t AppBarColor = 0x1082;  // #111111 in RGB565.
 constexpr uint16_t DividerColor = TFT_DARKGREY;
-constexpr uint8_t TitleFont = 4;
-constexpr uint8_t ListFont = 2;
 
 enum class NavigationIcon : uint8_t {
   Back,
@@ -22,7 +22,9 @@ enum class NavigationIcon : uint8_t {
 
 bool navigationIconContains(int16_t x, int16_t y);
 
-String ellipsize(TFT_eSPI &tft, const String &text, int16_t maxWidth, uint8_t font);
+String ellipsize(const String &text,
+                 int16_t maxWidth,
+                 UiText::Size size = UiText::Size::Content);
 
 void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,

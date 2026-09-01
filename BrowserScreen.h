@@ -201,6 +201,7 @@ private:
     FormControlKind kind;
     int8_t formIndex;
     String label;
+    bool labelIsPlaceholder;
     String name;
     String id;
     String value;

@@ -433,22 +433,22 @@ void ImageViewerScreen::drawError() {
   draw();
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
-  tft.drawString(F("Image unavailable"), centerX, centerY - 40, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(_error, centerX, centerY - 12, 2);
+  UiText::draw(tft, F("Image unavailable"), centerX, centerY - 40, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Title, MC_DATUM);
+  UiText::draw(tft, _error, centerX, centerY - 12, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
   String details = String(F("Format: ")) + formatName() + F("  Size: ") +
                    String(_sourceWidth) + F("x") + String(_sourceHeight);
-  tft.drawString(details, centerX, centerY + 12, 2);
+  UiText::draw(tft, details, centerX, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
   String filename = _path;
   int slash = filename.lastIndexOf('/');
   if (slash >= 0) filename = filename.substring(slash + 1);
   if (filename.length() > 28) filename = String(F("...")) + filename.substring(filename.length() - 25);
-  tft.drawString(filename, centerX, centerY + 36, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, filename, centerX, centerY + 36, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
   Serial.print(F("Image viewer error: format="));
   Serial.print(formatName());
   Serial.print(F(" size="));
@@ -479,13 +479,11 @@ void ImageViewerScreen::drawLoading(uint8_t percent) {
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
   tft.fillRect(centerX - 100, centerY - 28, 200, 58, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Loading image"), centerX, centerY - 12, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   String progress = String(percent) + F("%");
-  tft.drawString(progress, centerX, centerY + 14, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Loading image"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
+  UiText::draw(tft, progress, centerX, centerY + 14, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
   drawCloseIcon();
 }
 
@@ -1019,12 +1017,10 @@ void ImageViewerScreen::drawGifLoading(uint8_t percent) {
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
   tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Converting animation"), centerX, centerY - 12, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(String(percent) + F("%"), centerX, centerY + 14, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Converting animation"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
+  UiText::draw(tft, String(percent) + F("%"), centerX, centerY + 14,
+               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
   drawCloseIcon();
 }
 
@@ -1034,12 +1030,10 @@ void ImageViewerScreen::drawGifPreloading(uint8_t percent) {
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
   tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Loading"), centerX, centerY - 12, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(String(percent) + F("%"), centerX, centerY + 14, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Loading"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
+  UiText::draw(tft, String(percent) + F("%"), centerX, centerY + 14,
+               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
   drawCloseIcon();
 }
 

@@ -833,10 +833,8 @@ void AudioPlayerScreen::draw(bool force) {
   _display.tft().fillScreen(TFT_BLACK);
   drawTopBar();
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(truncateLabel(_fileName, _display.width() - 32), _display.width() / 2, 65, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, truncateLabel(_fileName, _display.width() - 32), _display.width() / 2, 65,
+               TFT_WHITE, TFT_BLACK, UiText::Size::Title, TC_DATUM);
   drawPlayButton();
   drawVolumeButton();
   drawDynamic(true);
@@ -863,10 +861,8 @@ void AudioPlayerScreen::drawStatus() {
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(16, 238, _display.width() - 32, 28, TFT_BLACK);
   if (!_mp3Analyzing) return;
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(F("Loading MP3..."), _display.width() / 2, 250, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Loading MP3..."), _display.width() / 2, 250,
+               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
 }
 
 void AudioPlayerScreen::drawPlayButton() {
@@ -895,13 +891,11 @@ void AudioPlayerScreen::drawVolumeButton() {
   const int16_t height = 28;
   tft.fillRoundRect(x, y, width, height, 5, TFT_DARKGREY);
   tft.drawRoundRect(x, y, width, height, 5, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
   String label = F("Volume: ");
   label += _audioSettings.volume();
   label += F(" / 10");
-  tft.drawString(label, _display.width() / 2, y + height / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, label, _display.width() / 2, y + height / 2, TFT_WHITE, TFT_DARKGREY,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 void AudioPlayerScreen::drawVolumePicker() {
@@ -921,12 +915,11 @@ void AudioPlayerScreen::drawVolumePicker() {
 
   tft.fillRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_BLACK);
   tft.drawRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String title = F("Volume ");
   title += selected;
   title += F(" / 10");
-  tft.drawString(title, _display.width() / 2, panelY + 28, 2);
+  UiText::draw(tft, title, _display.width() / 2, panelY + 28, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Title, MC_DATUM);
 
   for (uint8_t level = AudioSettings::MinVolume; level <= AudioSettings::MaxVolume; level++) {
     uint8_t column = level % columns;
@@ -937,10 +930,9 @@ void AudioPlayerScreen::drawVolumePicker() {
     uint16_t fill = isSelected ? TFT_CYAN : TFT_DARKGREY;
     tft.fillRoundRect(x, y, cellWidth, cellHeight, 5, fill);
     tft.drawRoundRect(x, y, cellWidth, cellHeight, 5, TFT_WHITE);
-    tft.setTextColor(isSelected ? TFT_BLACK : TFT_WHITE, fill);
-    tft.drawNumber(level, x + cellWidth / 2, y + cellHeight / 2, 2);
+    UiText::draw(tft, String(level), x + cellWidth / 2, y + cellHeight / 2,
+                 isSelected ? TFT_BLACK : TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
   }
-  tft.setTextDatum(TL_DATUM);
 }
 
 void AudioPlayerScreen::drawProgress() {
@@ -956,21 +948,17 @@ void AudioPlayerScreen::drawProgress() {
   }
   tft.fillRect(x, y, width, height, TFT_DARKGREY);
   if (filled > 0) tft.fillRect(x, y, filled, height, TFT_CYAN);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(timeText(_framePosition), x, 202, 2);
-  tft.setTextDatum(TR_DATUM);
-  tft.drawString(timeText(_frameCount), x + width, 202, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, timeText(_framePosition), x, 202, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact);
+  UiText::draw(tft, timeText(_frameCount), x + width, 202, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, TR_DATUM);
 }
 
 void AudioPlayerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(16, 238, _display.width() - 32, 28, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString(_error, _display.width() / 2, 250, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, _error, _display.width() / 2, 250, TFT_RED, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 String AudioPlayerScreen::displayName(const String &path) const {
@@ -979,13 +967,7 @@ String AudioPlayerScreen::displayName(const String &path) const {
 }
 
 String AudioPlayerScreen::truncateLabel(const String &label, int16_t maxWidth) {
-  TFT_eSPI &tft = _display.tft();
-  if (tft.textWidth(label, 2) <= maxWidth) return label;
-  String result = label;
-  while (result.length() > 3 && tft.textWidth(result + F("..."), 2) > maxWidth) {
-    result.remove(result.length() - 1);
-  }
-  return result + F("...");
+  return UiText::ellipsize(label, maxWidth, UiText::Size::Title);
 }
 
 String AudioPlayerScreen::timeText(uint32_t frames) const {

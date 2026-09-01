@@ -1,6 +1,7 @@
 #include "HomeScreen.h"
 
 #include "Navigator.h"
+#include "UiText.h"
 #include "icons.h"
 
 #define COLOR_BATTERY_GREEN 0x2c89
@@ -162,10 +163,8 @@ void HomeScreen::drawClock(bool force) {
 
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(0, 0, 72, StatusBarHeight, TFT_BLACK);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(text, 8, StatusBarHeight / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, text, 8, StatusBarHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, ML_DATUM);
   _lastClockText = text;
 }
 
@@ -196,10 +195,8 @@ void HomeScreen::drawBattery() {
   tft.drawRect(x, y, 32, 16, TFT_WHITE);
   tft.fillRect(x + 32, y + 5, 3, 6, TFT_WHITE);
   tft.fillRect(x + 1, y + 1, 30, 14, fill);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, fill);
-  tft.drawNumber(_batteryPercent, x + 16, y + 8, 1);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, String(_batteryPercent), x + 16, y + 8, TFT_WHITE, fill,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 void HomeScreen::drawApps() {
@@ -212,10 +209,8 @@ void HomeScreen::drawApps() {
     drawAppIcon(app, centerX, centerY);
 
     String label = truncateLabel(String(app.label), app.w - 12);
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(label, centerX, app.y + 94, 2);
-    tft.setTextDatum(TL_DATUM);
+    UiText::draw(tft, label, centerX, app.y + 94, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Compact, TC_DATUM);
   }
 }
 
@@ -237,16 +232,7 @@ String HomeScreen::clockText(const struct tm &localTime) const {
 }
 
 String HomeScreen::truncateLabel(const String &label, int16_t maxWidth) {
-  TFT_eSPI &tft = _display.tft();
-  if (tft.textWidth(label, 2) <= maxWidth) {
-    return label;
-  }
-
-  String result = label;
-  while (result.length() > 3 && tft.textWidth(result + "...", 2) > maxWidth) {
-    result.remove(result.length() - 1);
-  }
-  return result + "...";
+  return UiText::ellipsize(label, maxWidth, UiText::Size::Compact);
 }
 
 void HomeScreen::setSdState(bool mounted) {

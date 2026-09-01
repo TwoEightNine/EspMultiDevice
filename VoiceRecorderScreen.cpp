@@ -151,26 +151,20 @@ void VoiceRecorderScreen::drawDynamicSections(bool force) {
   String storage = storageText();
   if (force || storage != _lastStorageText) {
     tft.fillRect(20, 58, width - 40, 24, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(storage, 20, 58, 2);
+    UiText::draw(tft, storage, 20, 58, TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact);
     _lastStorageText = storage;
   }
 
   if (force || _status != _lastStatusText) {
     tft.fillRect(20, 170, width - 40, 24, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString(_status, 20, 170, 2);
+    UiText::draw(tft, _status, 20, 170, TFT_CYAN, TFT_BLACK, UiText::Size::Compact);
     _lastStatusText = _status;
   }
 
   String details = detailsText();
   if (force || details != _lastDetailsText) {
     tft.fillRect(20, 196, width - 40, 24, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(details, 20, 196, 2);
+    UiText::draw(tft, details, 20, 196, TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact);
     _lastDetailsText = details;
   }
 }
@@ -197,10 +191,8 @@ void VoiceRecorderScreen::drawButton(const Button &button,
 
   tft.fillRoundRect(button.x, button.y, button.w, button.h, 6, fill);
   tft.drawRoundRect(button.x, button.y, button.w, button.h, 6, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(text, fill);
-  tft.drawString(label, button.x + button.w / 2, button.y + button.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, label, button.x + button.w / 2, button.y + button.h / 2,
+               text, fill, UiText::Size::Compact, MC_DATUM);
 }
 
 String VoiceRecorderScreen::storageText() {

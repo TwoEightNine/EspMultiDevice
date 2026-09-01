@@ -25,7 +25,7 @@ def main():
     codes = sorted(set(range(0x21, 0x7F)) | set(range(0xA0, 0x100)) |
                    set(range(0x400, 0x500)) | set(extras))
     print("#pragma once\n")
-    print("// Browser-only Unicode fonts. Generated from GNU FreeSans 20120503.")
+    print("// Shared Unicode UI fonts. Generated from GNU FreeSans 20120503.")
     print("// with TFT_eSPI's VLW metric/bitmap layout. GNU FreeFont is licensed under")
     print("// the GNU GPL v3 with the FreeFont embedding exception; see LICENSE.FreeFont.")
     print("// Glyph coverage: Basic Latin, Latin-1/Windows-1252 additions, Cyrillic.")

@@ -142,8 +142,8 @@ void WiFiScreen::draw() {
 
   if (!_wifi.isEnabled()) {
     TFT_eSPI &tft = _display.tft();
-    tft.setTextColor(MutedColor, TFT_BLACK);
-    tft.drawString("Wi-Fi is disabled", ContentPadding, 120, 2);
+    UiText::draw(tft, "Wi-Fi is disabled", ContentPadding, 120,
+                 MutedColor, TFT_BLACK, UiText::Size::Compact);
   } else if (_wifi.isConnected()) {
     drawConnected();
   } else {
@@ -186,11 +186,10 @@ void WiFiScreen::drawSwitch() {
 
 void WiFiScreen::drawConnected() {
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(_wifi.ssid(), ContentPadding, 116, 2);
-  tft.setTextColor(MutedColor, TFT_BLACK);
-  tft.drawString(_wifi.networkType(), ContentPadding, 140, 2);
+  UiText::draw(tft, _wifi.ssid(), ContentPadding, 116, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Content);
+  UiText::draw(tft, _wifi.networkType(), ContentPadding, 140, MutedColor, TFT_BLACK,
+               UiText::Size::Compact);
   drawButton(_forgetBounds, "Forget network", ButtonColor);
 }
 
@@ -207,12 +206,11 @@ void WiFiScreen::drawDisconnected(uint32_t nowMs) {
 
 void WiFiScreen::drawNetworkList() {
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Available networks", ContentPadding, 108, 2);
+  UiText::draw(tft, "Available networks", ContentPadding, 108, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact);
   if (_wifi.error().length() > 0) {
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(_wifi.error(), ContentPadding + 220, 111, 1);
+    UiText::draw(tft, _wifi.error(), ContentPadding + 220, 111, TFT_YELLOW, TFT_BLACK,
+                 UiText::Size::Compact);
   }
 
   const int16_t firstRowY = FirstNetworkRowY;
@@ -229,9 +227,8 @@ void WiFiScreen::drawNetworkList() {
   }
 
   if (shown == 0) {
-    tft.setTextColor(MutedColor, TFT_BLACK);
-    tft.drawString(_wifi.error().length() > 0 ? _wifi.error() : "No networks found",
-                   ContentPadding, 148, 2);
+    UiText::draw(tft, _wifi.error().length() > 0 ? _wifi.error() : "No networks found",
+                 ContentPadding, 148, MutedColor, TFT_BLACK, UiText::Size::Compact);
   }
 
   _rescanBounds = {ContentPadding, shown == 0 ? 192 : (int16_t)(firstRowY + shown * rowHeight + 8),
@@ -243,21 +240,16 @@ void WiFiScreen::drawButton(const Rect &bounds, const char *label, uint16_t fill
   TFT_eSPI &tft = _display.tft();
   tft.fillRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, fill);
   tft.drawRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, fill);
-  tft.drawString(label, bounds.x + bounds.w / 2,
-                 bounds.y + bounds.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, label, bounds.x + bounds.w / 2, bounds.y + bounds.h / 2,
+               TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
 }
 
 void WiFiScreen::drawLoader(const char *message, uint32_t nowMs) {
   TFT_eSPI &tft = _display.tft();
   static const char *dots[] = {"", ".", "..", "..."};
   const uint8_t frame = (nowMs / 500) % 4;
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(String(message) + dots[frame], _display.width() / 2, 156, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, String(message) + dots[frame], _display.width() / 2, 156,
+               TFT_WHITE, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
 }
 
 bool WiFiScreen::contains(const Rect &bounds, int16_t x, int16_t y) const {

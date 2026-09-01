@@ -1,6 +1,6 @@
 #pragma once
 
-// Browser-only Unicode font. Generated from GNU FreeSans 20120503 at 18px
+// Shared Unicode UI font. Generated from GNU FreeSans 20120503 at 18px
 // with TFT_eSPI's VLW metric/bitmap layout. GNU FreeFont is licensed under
 // the GNU GPL v3 with the FreeFont embedding exception; see LICENSE.FreeFont.
 // Glyph coverage: Basic Latin, Latin-1/Windows-1252 additions, Cyrillic.

@@ -561,8 +561,11 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
 #else
     const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
 #endif
+    // This worker only prepares disposable cache data and saved state.  It
+    // must never outrun the core's idle task: on the usual Arduino dual-core
+    // setup it is pinned to CPU 0, whose idle task feeds the task watchdog.
     xTaskCreatePinnedToCore(lifecycleWorkerTask, "browser-startup", 6144, this,
-                            tskIDLE_PRIORITY + 1, &_lifecycleWorker, workerCore);
+                            tskIDLE_PRIORITY, &_lifecycleWorker, workerCore);
   } else {
     browserLog(F("browser startup worker unavailable"));
   }
@@ -645,6 +648,9 @@ void BrowserScreen::lifecycleWorkerTask(void *context) {
     }
     if (job.generation == screen->_lifecycleGeneration) {
       if (!screen->_loaded) {
+        // Let IDLE0 run between the cache walk and potentially long state
+        // parse, even when this task shares its priority with the idle task.
+        vTaskDelay(1);
         screen->loadState();
         screen->_loaded = true;
       }
@@ -788,8 +794,10 @@ void BrowserScreen::drawHeader() {
   String heading = _showStart ? "Browser" : (_title.length() ? _title : _currentUrl);
   TFT_eSPI &tft = _display.tft();
   UiKit::drawTopAppBar(tft, _display.width(), "");
-  BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, _display.width() - 72),
-                    UiKit::NavigationIconSize + UiKit::ContentPadding, 16, TFT_WHITE, UiKit::AppBarColor);
+  BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, _display.width() - 72,
+                                                 BrowserText::Size::Title),
+                    UiKit::NavigationIconSize + UiKit::ContentPadding, 11, TFT_WHITE,
+                    UiKit::AppBarColor, BrowserText::Size::Title);
 }
 
 void BrowserScreen::drawStartPage() {
@@ -797,22 +805,21 @@ void BrowserScreen::drawStartPage() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.fillRoundRect(_openBounds.x, _openBounds.y, _openBounds.w, _openBounds.h, 5, TFT_BLUE);
-  tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  tft.drawString("Open URL", _openBounds.x + _openBounds.w / 2, _openBounds.y + _openBounds.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
-
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString("Recent sites", 10, RecentListTop - 18, 2);
+  UiText::draw(tft, "Open URL", _openBounds.x + _openBounds.w / 2,
+               _openBounds.y + _openBounds.h / 2, TFT_WHITE, TFT_BLUE,
+               UiText::Size::Compact, MC_DATUM);
+  UiText::draw(tft, "Recent sites", 10, RecentListTop - 18, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact);
   // Recent-site records are populated by the lifecycle worker.  Avoid
   // reading their Strings until its hand-off frame in tick().
   if (_lifecycleLoading) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("Loading saved browser data...", 10, RecentListTop + 10, 2);
+    UiText::draw(tft, "Loading saved browser data...", 10, RecentListTop + 10,
+                 TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
     return;
   }
   if (_recentCount == 0) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("No recent sites yet", 10, RecentListTop + 10, 2);
+    UiText::draw(tft, "No recent sites yet", 10, RecentListTop + 10,
+                 TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
     return;
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
@@ -822,7 +829,8 @@ void BrowserScreen::drawStartPage() {
     String label = site.title.length() ? site.title : site.url;
     tft.fillRect(0, bounds.y, bounds.w, UiKit::ListCellHeight, TFT_BLACK);
     BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding * 2),
-                      UiKit::ContentPadding, bounds.y + 12, TFT_WHITE, TFT_BLACK);
+                      UiKit::ContentPadding, bounds.y + 10, TFT_WHITE, TFT_BLACK,
+                      BrowserText::Size::Content);
     tft.drawFastHLine(UiKit::ContentPadding, bounds.y + UiKit::ListCellHeight - 1,
                       bounds.w - UiKit::ContentPadding * 2, UiKit::DividerColor);
   }
@@ -839,17 +847,18 @@ void BrowserScreen::drawDocument() {
   }
   if (_message.length() > 0) {
     const String hint = shortText(_message, _display.width() - 28);
-    const int16_t hintWidth = BrowserText::width(tft, hint) + 14;
+    const int16_t hintWidth = UiText::width(tft, hint, UiText::Size::Compact) + 14;
     const int16_t hintX = (_display.width() - hintWidth) / 2;
     const uint16_t hintBackground = TFT_RED;
     const uint16_t hintForeground = TFT_WHITE;
     tft.fillRoundRect(hintX, textTop + 7, hintWidth, 26, 5, hintBackground);
-    BrowserText::draw(tft, hint, hintX + 7, textTop + 12, hintForeground, hintBackground);
+    UiText::draw(tft, hint, hintX + 7, textTop + 12, hintForeground, hintBackground,
+                 UiText::Size::Compact);
     return;
   }
   if (_rowCount == 0) {
-    tft.setTextColor(TFT_DARKGREY, _documentBackgroundColor);
-    tft.drawString("Page has no readable text", 10, textTop, 2);
+    UiText::draw(tft, "Page has no readable text", 10, textTop,
+                 TFT_DARKGREY, _documentBackgroundColor, UiText::Size::Compact);
     return;
   }
   uint16_t start = _page < _pageCount ? _pageStarts[_page] : 0;
@@ -946,16 +955,14 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
     tft.fillRect(0, textTop, _display.width(), 27, _documentBackgroundColor);
     const String phase = shortText(_loadingPhase.length() ? _loadingPhase : String(F("Loading")),
                                    _display.width() - 28);
-    tft.setTextColor(TFT_BLACK, _documentBackgroundColor);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString(phase, _display.width() / 2, textTop + 18, 2);
+    UiText::draw(tft, phase, _display.width() / 2, textTop + 18,
+                 TFT_BLACK, _documentBackgroundColor, UiText::Size::Compact, MC_DATUM);
   }
   // Only this short line and the bar interior change during a transfer. This
   // leaves the loading title and the bar frame on screen, eliminating flicker.
   tft.fillRect(0, textTop + 28, _display.width(), 21, _documentBackgroundColor);
-  tft.setTextColor(TFT_DARKGREY, _documentBackgroundColor);
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString(detail, _display.width() / 2, textTop + 39, 2);
+  UiText::draw(tft, detail, _display.width() / 2, textTop + 39,
+               TFT_DARKGREY, _documentBackgroundColor, UiText::Size::Compact, MC_DATUM);
   if (knownSize && _lastLoadingKnownSize && !drawBarFrame) {
     UiKit::updateProgressBar(tft, barX, barY, barWidth, 12, _lastLoadingPercent, percent,
                              TFT_BLUE, _documentBackgroundColor);
@@ -966,7 +973,6 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
   }
   _lastLoadingPercent = percent;
   _lastLoadingKnownSize = knownSize;
-  tft.setTextDatum(TL_DATUM);
 }
 
 void BrowserScreen::redrawDocument() {
@@ -1330,6 +1336,10 @@ bool BrowserScreen::clearSessionCacheLocked() {
       String path = item.name();
       item.close();
       SD.remove(path.c_str());
+      // FAT deletes can involve several SPI metadata transactions.  Yield
+      // after each entry so this low-priority CPU 0 worker cannot starve
+      // IDLE0 and trip the task watchdog on a large or dirty cache.
+      vTaskDelay(1);
       item = directory.openNextFile();
     }
     directory.close();
@@ -3099,7 +3109,10 @@ int8_t BrowserScreen::addFormControl(FormControlKind kind, int8_t formIndex, con
   control.name = decodeEntities(attributeValue(attributes, "name"));
   control.id = decodeEntities(attributeValue(attributes, "id"));
   if (!control.label.length()) control.label = decodeEntities(attributeValue(attributes, "aria-label"));
-  if (!control.label.length()) control.label = decodeEntities(attributeValue(attributes, "placeholder"));
+  if (!control.label.length()) {
+    control.label = decodeEntities(attributeValue(attributes, "placeholder"));
+    control.labelIsPlaceholder = control.label.length() > 0;
+  }
   if (!control.label.length()) control.label = control.name.length() ? control.name : control.id;
   control.value = decodeEntities(attributeValue(attributes, "value"));
   if ((kind == FormControlKind::Checkbox || kind == FormControlKind::Radio) && !control.value.length()) control.value = "on";
@@ -3379,15 +3392,17 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
   const uint16_t border = control.disabled ? TFT_DARKGREY : TFT_DARKCYAN;
   const uint16_t fill = control.disabled ? TFT_LIGHTGREY : TFT_WHITE;
   const uint16_t textColor = control.disabled ? TFT_DARKGREY : row.style.color;
-  const String label = shortText(formControlLabel(control), width - 14);
+  const UiText::Size labelSize = control.labelIsPlaceholder
+    ? UiText::Size::Compact : row.style.size;
+  const String label = UiText::ellipsize(formControlLabel(control), width - 14, labelSize);
 
   if (control.kind == FormControlKind::Submit || control.kind == FormControlKind::Reset) {
     const uint16_t buttonColor = control.disabled ? TFT_DARKGREY :
       (control.kind == FormControlKind::Submit ? TFT_BLUE : TFT_DARKCYAN);
     tft.fillRoundRect(x, y + 4, width, height - 8, 5, buttonColor);
-    const String centered = BrowserText::ellipsize(tft, label, width - 14);
-    BrowserText::draw(tft, centered, x + (width - BrowserText::width(tft, centered)) / 2, y + 13,
-                      TFT_WHITE, buttonColor);
+    const String centered = UiText::ellipsize(label, width - 14, UiText::Size::Compact);
+    UiText::draw(tft, centered, x + (width - UiText::width(tft, centered, UiText::Size::Compact)) / 2,
+                 y + 13, TFT_WHITE, buttonColor, UiText::Size::Compact);
     return;
   }
   if (control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) {
@@ -3404,18 +3419,21 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
       tft.drawCircle(markerX + 9, markerY + 9, 8, border);
       if (control.checked) tft.fillCircle(markerX + 9, markerY + 9, 4, TFT_BLUE);
     }
-    BrowserText::draw(tft, shortText(label, width - 34), markerX + 25, y + (height - 16) / 2,
-                      textColor, _documentBackgroundColor);
+    UiText::draw(tft, UiText::ellipsize(label, width - 34, labelSize), markerX + 25,
+                 y + (height - UiText::lineHeight(labelSize)) / 2, textColor,
+                 _documentBackgroundColor, labelSize);
     return;
   }
   tft.fillRoundRect(x, y + 2, width, height - 4, 4, fill);
   tft.drawRoundRect(x, y + 2, width, height - 4, 4, border);
-  BrowserText::draw(tft, label, x + 7, y + 6, textColor, fill);
+  UiText::draw(tft, label, x + 7, y + 6, textColor, fill, labelSize);
   String value = formControlValue(control);
   if (control.kind == FormControlKind::Unsupported) value = "Unsupported";
-  if (!value.length() && control.kind != FormControlKind::Select) value = "Tap to enter";
-  value = shortText(value, width - 30);
-  BrowserText::draw(tft, value, x + 7, y + 23, control.disabled ? TFT_DARKGREY : TFT_BLACK, fill);
+  const bool generatedPlaceholder = !value.length() && control.kind != FormControlKind::Select;
+  if (generatedPlaceholder) value = "Tap to enter";
+  const UiText::Size valueSize = generatedPlaceholder ? UiText::Size::Compact : row.style.size;
+  value = UiText::ellipsize(value, width - 30, valueSize);
+  UiText::draw(tft, value, x + 7, y + 23, control.disabled ? TFT_DARKGREY : TFT_BLACK, fill, valueSize);
   if (control.kind == FormControlKind::Select) {
     tft.fillTriangle(x + width - 18, y + height / 2 - 3, x + width - 8, y + height / 2 - 3,
                      x + width - 13, y + height / 2 + 4, control.disabled ? TFT_DARKGREY : TFT_DARKCYAN);
@@ -4411,6 +4429,9 @@ void BrowserScreen::loadState() {
       cookie.secure = fields[4] == "1";
       cookie.expiresAt = strtoull(fields[5].c_str(), nullptr, 10);
     }
+    // The state file is normally small, but it is user-writable SD data.
+    // Keep a malformed or unexpectedly large file from monopolising CPU 0.
+    vTaskDelay(1);
   }
   file.close();
   SpiBusLock::unlock();

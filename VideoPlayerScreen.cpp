@@ -1058,33 +1058,30 @@ void VideoPlayerScreen::drawProgress() {
 void VideoPlayerScreen::drawStatus() {
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(48, UiKit::AppBarHeight + 3, _display.width() - 96, 24, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   String text;
   if (_state == State::Building) text = "Caching video " + String(_videoSample) + "/" + String(_videoSamples);
   else if (_audioStatus.length()) text = _audioStatus;
   else text = _fileName;
-  tft.drawString(UiKit::ellipsize(tft, text, _display.width() - 96, 2),
-                 _display.width() / 2, UiKit::AppBarHeight + 14, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, UiKit::ellipsize(text, _display.width() - 96, UiText::Size::Compact),
+               _display.width() / 2, UiKit::AppBarHeight + 14, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 void VideoPlayerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_RED, TFT_BLACK);
   int newline = _error.indexOf('\n');
   String first = newline < 0 ? _error : _error.substring(0, newline);
   String second = newline < 0 ? String() : _error.substring(newline + 1);
   const int16_t centerX = _display.width() / 2;
   const int16_t centerY = _display.height() / 2;
-  tft.drawString(UiKit::ellipsize(tft, first, _display.width() - 32, 2), centerX,
-                 second.length() ? centerY - 12 : centerY, 2);
+  UiText::draw(tft, UiKit::ellipsize(first, _display.width() - 32, UiText::Size::Compact), centerX,
+               second.length() ? centerY - 12 : centerY, TFT_RED, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
   if (second.length()) {
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(UiKit::ellipsize(tft, second, _display.width() - 32, 2), centerX, centerY + 12, 2);
+    UiText::draw(tft, UiKit::ellipsize(second, _display.width() - 32, UiText::Size::Compact),
+                 centerX, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
+                 UiText::Size::Compact, MC_DATUM);
   }
-  tft.setTextDatum(TL_DATUM);
 }
 
 bool VideoPlayerScreen::controlContains(int16_t x, int16_t y) const {

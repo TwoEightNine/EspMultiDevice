@@ -10,11 +10,6 @@ constexpr int16_t ListIconX = 8;
 constexpr int16_t ListIconY = (ListCellHeight - ListIconSize) / 2;
 constexpr int16_t ListTextWithIconX = ListIconX + ListIconSize + ContentPadding;
 
-void resetTextState(TFT_eSPI &tft) {
-  tft.setFreeFont();
-  tft.setTextDatum(TL_DATUM);
-}
-
 void drawBackIcon(TFT_eSPI &tft) {
   const int16_t centerY = AppBarHeight / 2;
   const int16_t left = 11;
@@ -43,15 +38,8 @@ bool navigationIconContains(int16_t x, int16_t y) {
   return x >= 0 && x < TitleX && y >= 0 && y < AppBarHeight;
 }
 
-String ellipsize(TFT_eSPI &tft, const String &text, int16_t maxWidth, uint8_t font) {
-  if (maxWidth <= 0) return String();
-  if (tft.textWidth(text, font) <= maxWidth) return text;
-
-  String result = text;
-  while (result.length() > 3 && tft.textWidth(result + "...", font) > maxWidth) {
-    result.remove(result.length() - 1);
-  }
-  return result.length() == text.length() ? result : result + "...";
+String ellipsize(const String &text, int16_t maxWidth, UiText::Size size) {
+  return UiText::ellipsize(text, maxWidth, size);
 }
 
 void drawTopAppBar(TFT_eSPI &tft,
@@ -64,12 +52,10 @@ void drawTopAppBar(TFT_eSPI &tft,
 
   const int16_t titleWidth = width - TitleX - ContentPadding;
   if (titleWidth > 0 && title.length() > 0) {
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(TFT_WHITE, AppBarColor);
-    tft.drawString(ellipsize(tft, title, titleWidth, TitleFont),
-                   TitleX, TitleCenterY, TitleFont);
+    UiText::draw(tft, UiKit::ellipsize(title, titleWidth, UiText::Size::Title),
+                 TitleX, TitleCenterY, TFT_WHITE, AppBarColor,
+                 UiText::Size::Title, ML_DATUM);
   }
-  resetTextState(tft);
 }
 
 void drawScaledXBitmap(TFT_eSPI &tft,
@@ -106,21 +92,18 @@ void drawListCell(TFT_eSPI &tft,
 
   int16_t trailingWidth = 0;
   if (trailingText.length() > 0) {
-    trailingWidth = tft.textWidth(trailingText, 1);
-    tft.setTextDatum(MR_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(trailingText, width - ContentPadding, y + ListCellHeight / 2, 1);
+    trailingWidth = UiText::measure(trailingText, UiText::Size::Compact);
+    UiText::draw(tft, trailingText, width - ContentPadding, y + ListCellHeight / 2,
+                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MR_DATUM);
   }
 
   const int16_t labelEnd = width - ContentPadding -
                            (trailingWidth > 0 ? trailingWidth + 8 : 0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(ellipsize(tft, label, labelEnd - textX, ListFont),
-                 textX, y + ListCellHeight / 2, ListFont);
+  UiText::draw(tft, UiKit::ellipsize(label, labelEnd - textX, UiText::Size::Content),
+               textX, y + ListCellHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Content, ML_DATUM);
   tft.drawFastHLine(textX, y + ListCellHeight - 1,
                     width - ContentPadding - textX, DividerColor);
-  resetTextState(tft);
 }
 
 void drawProgressBar(TFT_eSPI &tft,

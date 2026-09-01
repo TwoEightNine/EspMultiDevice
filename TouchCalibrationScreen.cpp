@@ -96,12 +96,10 @@ void TouchCalibrationScreen::handleTouch(const TouchPoint &point) {
     tft.fillRect(0, HeaderHeight, _display.width(), _display.height() - HeaderHeight, TFT_BLACK);
     int16_t dotY = min((int16_t)point.y, (int16_t)(_display.height() - InfoHeight - 2));
     tft.fillCircle(point.x, dotY, 5, TFT_GREEN);
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     char info[48];
     snprintf(info, sizeof(info), "x: %u   y: %u   z: %u", point.x, point.y, point.z);
-    tft.drawString(info, 10, _display.height() - InfoHeight / 2, 2);
-    tft.setTextDatum(TL_DATUM);
+    UiText::draw(tft, info, 10, _display.height() - InfoHeight / 2, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Compact, ML_DATUM);
     return;
   }
 
@@ -141,32 +139,26 @@ void TouchCalibrationScreen::drawMenu() {
              firstY + 2 * (ButtonHeight + ButtonGap), false);
 
   if (_status.length() > 0) {
-    tft.setTextDatum(BC_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(_status, _display.width() / 2, _display.height() - 10, 2);
+    UiText::draw(tft, _status, _display.width() / 2, _display.height() - 10,
+                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, BC_DATUM);
   }
-  tft.setTextDatum(TL_DATUM);
 }
 
 void TouchCalibrationScreen::drawDrawMode() {
   drawHeader("Draw");
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(BC_DATUM);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString(F("Touch the screen to draw a point"),
-                 _display.width() / 2, _display.height() - InfoHeight + 14, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Touch the screen to draw a point"), _display.width() / 2,
+               _display.height() - InfoHeight + 14, TFT_DARKGREY, TFT_BLACK,
+               UiText::Size::Compact, BC_DATUM);
 }
 
 void TouchCalibrationScreen::drawCalibrationMode() {
   drawHeader("Calibrate");
   drawCalibrationTarget();
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(BC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("Touch the target"), _display.width() / 2,
-                 _display.height() - 10, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("Touch the target"), _display.width() / 2,
+               _display.height() - 10, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, BC_DATUM);
 }
 
 void TouchCalibrationScreen::drawHeader(const char *title) {
@@ -181,10 +173,8 @@ void TouchCalibrationScreen::drawButton(const char *label,
   uint16_t fill = selected ? TFT_DARKGREEN : TFT_DARKGREY;
   tft.fillRoundRect(x, y, ButtonWidth, ButtonHeight, 7, fill);
   tft.drawRoundRect(x, y, ButtonWidth, ButtonHeight, 7, TFT_WHITE);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, fill);
-  tft.drawString(label, x + ButtonWidth / 2, y + ButtonHeight / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, label, x + ButtonWidth / 2, y + ButtonHeight / 2,
+               TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
 }
 
 void TouchCalibrationScreen::drawCalibrationTarget() {
@@ -215,13 +205,11 @@ void TouchCalibrationScreen::drawCalibrationTouch(const TouchPoint &point,
 
   tft.fillRect(0, _display.height() - InfoHeight,
                _display.width(), InfoHeight, TFT_BLACK);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   char info[72];
   snprintf(info, sizeof(info), "%s  x:%u y:%u z:%u",
            status, point.x, point.y, point.z);
-  tft.drawString(info, 8, _display.height() - InfoHeight / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, info, 8, _display.height() - InfoHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, ML_DATUM);
 }
 
 void TouchCalibrationScreen::acceptCalibrationPoint(const TouchPoint &point) {

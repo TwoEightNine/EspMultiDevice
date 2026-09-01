@@ -20,7 +20,7 @@ private:
   static const uint16_t MaxVisualLines = 256;
   static const uint16_t CursorBlinkMs = 500;
   static const uint16_t KeyFeedbackMs = 120;
-  static const int16_t LineHeight = 18;
+  static const int16_t LineHeight = 21;
 
   enum class KeyAction : uint8_t {
     Character,

@@ -3,20 +3,21 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
-// Text handling used only by BrowserScreen. It deliberately keeps web-page
-// text separate from the small ASCII-only fonts used by the rest of the UI.
+#include "UiText.h"
+
+// Browser-specific text decoding plus compatibility wrappers around the shared
+// UI renderer used for document text.
 namespace BrowserText {
 
-enum class Size : uint8_t { Small, Normal, Large };
+using Size = UiText::Size;
 
 // Converts a textual HTTP response into well-formed UTF-8. `error` is set
 // only when the page explicitly declares an unsupported charset.
 bool normalizeToUtf8(const String &source, const String &contentType,
                      String &normalized, String &error);
 
-// Starts and ends a single browser-only smooth Unicode font scope. Calls to
-// draw() and width() also work outside a scope, but a scope avoids repeatedly
-// loading glyph metrics while a page is laid out or painted.
+// Starts and ends a shared smooth Unicode font scope. Calls to draw() and
+// width() also work outside a scope, but a scope avoids repeated font loads.
 void begin(TFT_eSPI &tft, Size size = Size::Normal);
 void end(TFT_eSPI &tft);
 

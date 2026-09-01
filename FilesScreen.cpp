@@ -819,10 +819,8 @@ void FilesScreen::drawTopBar() {
 void FilesScreen::drawPathHeader() {
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(16, 56, _display.width() - 32, 24, TFT_DARKGREY);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString(UiKit::ellipsize(tft, _currentPath, _display.width() - 48, 2), 24, 68, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, UiKit::ellipsize(_currentPath, _display.width() - 48, UiText::Size::Compact),
+               24, 68, TFT_WHITE, TFT_DARKGREY, UiText::Size::Compact, ML_DATUM);
 }
 
 void FilesScreen::layoutPaging() {
@@ -946,12 +944,11 @@ void FilesScreen::drawFooter() {
   tft.setTextDatum(MC_DATUM);
   drawPagingArrow(_previousBounds.x + _previousBounds.w / 2, footerTop + FooterHeight / 2,
                   false, previous ? TFT_WHITE : 0x8410);
-  tft.setTextColor(TFT_LIGHTGREY, MenuColor);
-  tft.drawString(String(F("Page ")) + String(_page + 1) + F(" / ") + String(_pageCount),
-                 _display.width() / 2, footerTop + FooterHeight / 2, 2);
+  UiText::draw(tft, String(F("Page ")) + String(_page + 1) + F(" / ") + String(_pageCount),
+               _display.width() / 2, footerTop + FooterHeight / 2, TFT_LIGHTGREY, MenuColor,
+               UiText::Size::Compact, MC_DATUM);
   drawPagingArrow(_nextBounds.x + _nextBounds.w / 2, footerTop + FooterHeight / 2,
                   true, next ? TFT_WHITE : 0x8410);
-  tft.setTextDatum(TL_DATUM);
 }
 
 void FilesScreen::drawContextMenu() {
@@ -972,25 +969,23 @@ void FilesScreen::drawContextMenu() {
   tft.drawRoundRect(x, y, menuWidth, menuHeight, 5, TFT_LIGHTGREY);
   if (canMove) tft.drawFastHLine(x + 8, _moveBounds.y, menuWidth - 16, TFT_DARKGREY);
   tft.drawFastHLine(x + 8, _deleteBounds.y, menuWidth - 16, TFT_DARKGREY);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, MenuColor);
   const Entry *entry = entryAt(_menuEntryIndex);
-  tft.drawString(entry && entry->directory ? F("Rename folder") : F("Rename"),
-                 x + 14, _renameBounds.y + _renameBounds.h / 2, 2);
+  UiText::draw(tft, entry && entry->directory ? F("Rename folder") : F("Rename"),
+               x + 14, _renameBounds.y + _renameBounds.h / 2, TFT_WHITE, MenuColor,
+               UiText::Size::Compact, ML_DATUM);
   if (canMove) {
-    tft.setTextColor(TFT_WHITE, MenuColor);
-    tft.drawString(F("Move to secret"), x + 14, _moveBounds.y + _moveBounds.h / 2, 2);
+    UiText::draw(tft, F("Move to secret"), x + 14, _moveBounds.y + _moveBounds.h / 2,
+                 TFT_WHITE, MenuColor, UiText::Size::Compact, ML_DATUM);
   }
   const bool holding = _menuState == MenuState::DeleteHolding;
-  tft.setTextColor(holding ? TFT_WHITE : TFT_RED, holding ? DangerColor : MenuColor);
   if (holding) {
     uint32_t elapsed = millis() - _deleteStartedMs;
     uint8_t percent = elapsed >= DeleteHoldMs ? 100 : (uint8_t)(elapsed * 100UL / DeleteHoldMs);
     tft.fillRect(x + 4, _deleteBounds.y + 3, (menuWidth - 8) * percent / 100, _deleteBounds.h - 6, DangerColor);
   }
-  tft.drawString(holding ? F("Keep holding...") : F("Hold to delete"), x + 14,
-                 _deleteBounds.y + _deleteBounds.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, holding ? F("Keep holding...") : F("Hold to delete"), x + 14,
+               _deleteBounds.y + _deleteBounds.h / 2, holding ? TFT_WHITE : TFT_RED,
+               holding ? DangerColor : MenuColor, UiText::Size::Compact, ML_DATUM);
 }
 
 void FilesScreen::drawStatus() {
@@ -998,22 +993,19 @@ void FilesScreen::drawStatus() {
   TFT_eSPI &tft = _display.tft();
   const Rect bounds = statusBounds();
   tft.fillRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 5, TFT_DARKGREY);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString(UiKit::ellipsize(tft, _message, bounds.w - 12, 2), _display.width() / 2, bounds.y + bounds.h / 2, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, UiKit::ellipsize(_message, bounds.w - 12, UiText::Size::Compact),
+               _display.width() / 2, bounds.y + bounds.h / 2, TFT_WHITE, TFT_DARKGREY,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 void FilesScreen::drawUnavailable() {
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
   tft.fillRect(centerX - 24, 116, 48, 48, TFT_DARKGREY);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(F("SD card unavailable"), centerX, 190, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(F("Insert or mount an SD card"), centerX, 216, 2);
-  tft.setTextDatum(TL_DATUM);
+  UiText::draw(tft, F("SD card unavailable"), centerX, 185, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Title, MC_DATUM);
+  UiText::draw(tft, F("Insert or mount an SD card"), centerX, 218, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
 }
 
 void FilesScreen::drawVerticalEllipsis(int16_t centerX, int16_t centerY, uint16_t color) const {

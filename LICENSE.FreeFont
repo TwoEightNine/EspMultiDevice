@@ -1,4 +1,5 @@
-GNU FreeFont is used only for BrowserFreeSans.h.
+GNU FreeFont is used for the shared UI font assets: BrowserFreeSans.h,
+BrowserFreeSans14.h, and BrowserFreeSans24.h.
 
 Source: https://ftp.gnu.org/gnu/freefont/freefont-ttf-20120503.zip
 Font: FreeSans.ttf (20120503)

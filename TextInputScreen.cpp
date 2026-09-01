@@ -351,14 +351,12 @@ void TextInputScreen::drawInput() {
     const int16_t textWidthPixels = textWidth(value);
     const int16_t centerX = _inputBounds.x + _inputBounds.w / 2;
     const int16_t centerY = _inputBounds.y + _inputBounds.h / 2;
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(value, centerX, centerY, 2);
+    UiText::draw(tft, value, centerX, centerY, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Content, MC_DATUM);
     if (_cursorVisible) {
       const int16_t caretX = centerX - textWidthPixels / 2 + textWidthPixels;
       tft.drawFastVLine(caretX, centerY - LineHeight / 2 + 1, LineHeight - 3, CursorColor);
     }
-    tft.setTextDatum(TL_DATUM);
     return;
   }
 
@@ -379,15 +377,14 @@ void TextInputScreen::drawInput() {
 
   const int16_t textX = _inputBounds.x + TextPadding;
   const int16_t textY = _inputBounds.y + TextPadding;
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   for (uint16_t i = 0; i < visible; i++) {
     uint16_t lineIndex = _scrollLine + i;
     if (lineIndex >= _lineCount) {
       break;
     }
     String line = displayText(_text.substring(_lines[lineIndex].start, _lines[lineIndex].end));
-    tft.drawString(line, textX, textY + i * LineHeight, 2);
+    UiText::draw(tft, line, textX, textY + i * LineHeight, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Content);
   }
 
   if (_cursorVisible && caretLine >= _scrollLine &&
@@ -402,7 +399,6 @@ void TextInputScreen::drawInput() {
     int16_t caretY = textY + (caretLine - _scrollLine) * LineHeight;
     tft.drawFastVLine(caretX, caretY + 1, LineHeight - 3, CursorColor);
   }
-  tft.setTextDatum(TL_DATUM);
 }
 
 void TextInputScreen::drawInputCaretLine() {
@@ -427,9 +423,7 @@ void TextInputScreen::drawInputCaretLine() {
   tft.fillRect(_inputBounds.x + 1, textY, _inputBounds.w - 2, LineHeight, TFT_BLACK);
   String line = displayText(_text.substring(_lines[caretLine].start,
                                             _lines[caretLine].end));
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(line, textX, textY, 2);
+  UiText::draw(tft, line, textX, textY, TFT_WHITE, TFT_BLACK, UiText::Size::Content);
 
   if (_cursorVisible) {
     uint32_t beforeEnd = _cursor;
@@ -440,7 +434,6 @@ void TextInputScreen::drawInputCaretLine() {
     tft.drawFastVLine(textX + textWidth(before), textY + 1,
                       LineHeight - 3, CursorColor);
   }
-  tft.setTextDatum(TL_DATUM);
 }
 
 void TextInputScreen::drawKeyboard() {
@@ -479,13 +472,9 @@ void TextInputScreen::drawKey(uint8_t index) {
       key.action == KeyAction::Shift) {
     drawKeyIcon(key, textColor);
   } else {
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(textColor, fill);
-    tft.drawString(key.label,
-                   key.bounds.x + key.bounds.w / 2,
-                   key.bounds.y + key.bounds.h / 2,
-                   2);
-    tft.setTextDatum(TL_DATUM);
+    UiText::draw(tft, key.label, key.bounds.x + key.bounds.w / 2,
+                 key.bounds.y + key.bounds.h / 2, textColor, fill,
+                 UiText::Size::Compact, MC_DATUM);
   }
 }
 
@@ -640,7 +629,6 @@ void TextInputScreen::placeCursor(int16_t x, int16_t y) {
 }
 
 void TextInputScreen::buildVisualLines() {
-  TFT_eSPI &tft = _display.tft();
   const uint16_t width = _inputBounds.w - TextPadding * 2;
   _lineCount = 0;
   uint32_t lineStart = 0;
@@ -657,7 +645,7 @@ void TextInputScreen::buildVisualLines() {
       continue;
     }
 
-    uint16_t characterWidth = tft.textWidth(String(value), 2);
+    uint16_t characterWidth = UiText::measure(String(value), UiText::Size::Content);
     if (lineStart != index && lineWidth + characterWidth > width) {
       if (_lineCount < MaxVisualLines) {
         _lines[_lineCount++] = {lineStart, index};
@@ -692,7 +680,7 @@ uint16_t TextInputScreen::visibleLineCount() const {
 }
 
 uint16_t TextInputScreen::textWidth(const String &value) const {
-  return _display.tft().textWidth(value, 2);
+  return UiText::measure(value, UiText::Size::Content);
 }
 
 String TextInputScreen::displayText(const String &value) const {
