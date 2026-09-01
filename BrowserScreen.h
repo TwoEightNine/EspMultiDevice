@@ -85,6 +85,7 @@ private:
     int statusCode;
     String location;
     String contentType;
+    String contentDisposition;
     bool chunked;
     bool compressed;
     int32_t contentLength;

@@ -723,7 +723,8 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     }
     String linkUrl = documentLinkAt(point.x, point.y);
     if (linkUrl.length()) {
-      browserLog(F("opening document link"));
+      browserLog(String(F("link tapped: current=")) + _currentUrl + F(", target=") + linkUrl +
+                 F(", targetIsCurrent=") + (linkUrl == _currentUrl ? F("yes") : F("no")));
       openUrl(linkUrl);
     }
   }
@@ -1870,8 +1871,13 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
         error = "Redirect has no destination";
         return false;
       }
-      next = resolveUrl(url, response.location);
-      browserLog(String(F("redirect ")) + String(response.statusCode) + F(" -> ") + next);
+      const String resolvedLocation = resolveUrl(url, response.location);
+      browserLog(String(F("redirect received: status=")) + String(response.statusCode) +
+                 F(", request=") + next + F(", Location=") + response.location +
+                 F(", resolved=") + resolvedLocation +
+                 F(", returnsToInitial=") +
+                 (resolvedLocation == initialUrl ? F("yes") : F("no")));
+      next = resolvedLocation;
       continue;
     }
     if (response.statusCode == 401) {
@@ -1891,6 +1897,8 @@ bool BrowserScreen::fetch(const String &initialUrl, String &finalUrl, String &bo
     bool downloadable = FileFormats::isDownloadable(format);
     browserLog(String(F("response accepted: type=")) +
                (contentType.length() ? contentType : String(F("unspecified"))) +
+               (response.contentDisposition.length() ? String(F(", disposition=")) + response.contentDisposition
+                                                     : String()) +
                F(", length=") + String(response.contentLength) +
                (response.chunked ? F(", chunked") : F("")) +
                (downloadable ? F(", media download") : F(", page response")));
@@ -2045,6 +2053,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
   response.compressed = false;
   response.contentLength = -1;
   response.contentType = "";
+  response.contentDisposition = "";
   response.location = "";
   for (uint8_t count = 0; count < 48; count++) {
     if (!readLine(*client, line, ConnectTimeoutMs)) {
@@ -2063,11 +2072,14 @@ bool BrowserScreen::requestOne(const Url &url, HttpResponse &response, WiFiClien
     else if (name == "transfer-encoding" && lower(headerValue).indexOf("chunked") >= 0) response.chunked = true;
     else if (name == "content-encoding" && !headerValue.equalsIgnoreCase("identity")) response.compressed = true;
     else if (name == "content-type") response.contentType = lower(headerValue);
+    else if (name == "content-disposition") response.contentDisposition = headerValue;
     else if (name == "location") response.location = headerValue;
     else if (name == "set-cookie") acceptCookie(headerValue, url);
   }
   browserLog(String(F("headers complete: length=")) + String(response.contentLength) +
              F(", type=") + (response.contentType.length() ? response.contentType : String(F("unspecified"))) +
+             (response.contentDisposition.length() ? String(F(", disposition=")) + response.contentDisposition
+                                                   : String()) +
              (response.chunked ? F(", chunked") : F("")) +
              (response.compressed ? F(", compressed") : F("")));
   return true;
