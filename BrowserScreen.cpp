@@ -42,7 +42,7 @@ const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
 const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
-const char *DownloadDirectory = "/.system/browser_media";
+const char *DownloadDirectory = "/Downloads";
 const char *SessionCacheDirectory = "/.system/browser_session";
 
 void browserLog(const __FlashStringHelper *message) {
@@ -2257,12 +2257,13 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
     error = "SD card is busy";
     return false;
   }
-  bool ready = (SD.exists("/.system") || SD.mkdir("/.system")) &&
-               (SD.exists(DownloadDirectory) || SD.mkdir(DownloadDirectory));
+  // Downloads are user files, not disposable browser cache. Create the
+  // top-level directory on first use so it is also visible in Files.
+  bool ready = SD.exists(DownloadDirectory) || SD.mkdir(DownloadDirectory);
   if (!ready) {
     SpiBusLock::unlock();
-    error = "Cannot create download cache";
-    browserLog(F("download cache directory creation failed"));
+    error = "Cannot create Downloads directory";
+    browserLog(F("Downloads directory creation failed"));
     return false;
   }
 
@@ -2281,7 +2282,7 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   }
   SpiBusLock::unlock();
   if (!file) {
-    browserLog(F("download cache file creation failed"));
+    browserLog(F("download file creation failed"));
     error = "Cannot create download file";
     return false;
   }
