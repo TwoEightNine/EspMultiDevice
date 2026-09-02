@@ -1,4 +1,4 @@
--DPNG_MAX_BUFFERED_PIXELS=32770
+-DPNG_MAX_BUFFERED_PIXELS=32832
 -DHAVE_AV_CONFIG_H
 -I{build.source.path}/third_party/libhelix
 -I{build.source.path}/third_party/libhelix/libhelix-aac

@@ -8,7 +8,7 @@
 #include <SD.h>
 #include <JPEGDEC.h>
 #ifndef PNG_MAX_BUFFERED_PIXELS
-#define PNG_MAX_BUFFERED_PIXELS ((4096 * 4 + 1) * 2)
+#define PNG_MAX_BUFFERED_PIXELS (((4096 * 4 + 1) * 2) + 32)
 #endif
 #include <PNGdec.h>
 #include <esp32-hal-psram.h>
@@ -43,6 +43,11 @@ public:
   static const uint8_t Size = 32;
   static const uint16_t MaxPath = 256;
   static const uint8_t CacheHeaderBytes = 20;
+  // This matches the 4,096px RGBA scanline buffer configured for PNGdec.
+  // A thumbnail never needs a larger source row, and bounding it prevents a
+  // malformed PNG header from overrunning PNGdec's fixed two-row buffer.
+  static const uint32_t MaxPngDimension = 4096;
+  static const uint32_t MaxPngScanlineBytes = MaxPngDimension * 4;
   struct Result { uint32_t generation; char path[MaxPath]; uint16_t *pixels; };
 
   FileThumbnailWorker(SecretStorage &secretStorage)
@@ -343,8 +348,11 @@ private:
     return position;
   }
   static int pngDraw(PNGDRAW *draw) {
-    if (!_owner || !draw) return 0;
-    uint16_t *line = static_cast<uint16_t *>(malloc((size_t)draw->iWidth * 2));
+    if (!_owner || !draw || draw->iWidth <= 0) return 0;
+    // PNGdec expands packed indexed rows in groups of up to four pixels. Its
+    // ESP32-S3 RGBA fast path likewise stores complete eight-pixel groups.
+    // Keep tail room for that final group; only draw->iWidth pixels are read.
+    uint16_t *line = static_cast<uint16_t *>(malloc(((size_t)draw->iWidth + 7) * sizeof(uint16_t)));
     if (!line) return 0;
     _owner->_png.getLineAsRGB565(draw, line, PNG_RGB565_LITTLE_ENDIAN, 0);
     for (int x = 0; x < draw->iWidth; x++) _owner->store(x, draw->y, line[x], false);
@@ -394,7 +402,23 @@ private:
       return false;
     }
     if (_png.isInterlaced()) { _failure = F("PNG interlaced"); _png.close(); return false; }
-    if (!prepare(_png.getWidth(), _png.getHeight(), _png.getWidth(), _png.getHeight())) { _png.close(); return false; }
+    const int width = _png.getWidth();
+    const int height = _png.getHeight();
+    const int bitsPerChannel = _png.getBpp();
+    const int pixelType = _png.getPixelType();
+    const int channels = pixelType == PNG_PIXEL_GRAYSCALE || pixelType == PNG_PIXEL_INDEXED ? 1 :
+                         pixelType == PNG_PIXEL_TRUECOLOR ? 3 :
+                         pixelType == PNG_PIXEL_GRAY_ALPHA ? 2 :
+                         pixelType == PNG_PIXEL_TRUECOLOR_ALPHA ? 4 : 0;
+    const uint64_t scanlineBytes = channels > 0 && bitsPerChannel > 0
+      ? ((uint64_t)width * (uint32_t)channels * (uint32_t)bitsPerChannel + 7) / 8 : 0;
+    if (width <= 0 || height <= 0 || width > (int)MaxPngDimension || height > (int)MaxPngDimension ||
+        scanlineBytes == 0 || scanlineBytes > MaxPngScanlineBytes) {
+      _failure = F("PNG dimensions exceed thumbnail limit");
+      _png.close();
+      return false;
+    }
+    if (!prepare((uint16_t)width, (uint16_t)height, (uint16_t)width, (uint16_t)height)) { _png.close(); return false; }
     bool ok = _png.decode(this, PNG_CHECK_CRC) == PNG_SUCCESS;
     if (!ok) _failure = String(F("PNG decode error ")) + String(_png.getLastError());
     _png.close();

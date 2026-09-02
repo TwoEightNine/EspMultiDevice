@@ -321,6 +321,7 @@ private:
   volatile bool _sessionCacheInitialized;
   bool _usingSessionPage;
   bool _deferCachedPageDraw;
+  uint32_t _deferCachedPageDrawStartedMs;
   uint32_t _sessionCacheBytes;
   uint32_t _sessionCacheClock;
   uint32_t _sessionCacheSequence;
@@ -402,8 +403,10 @@ private:
                 String &body, String &error);
   bool readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
                         FileFormats::Format format, String &downloadedPath, String &error,
-                        uint32_t downloadLimit);
+                        uint32_t downloadLimit, const String &suggestedFileName);
   FileFormats::Format downloadableFormatForResponse(const String &contentType, const Url &url) const;
+  String downloadFileName(const String &contentDisposition, const Url &url,
+                          FileFormats::Format format) const;
   bool isSupportedDownloadFile(const String &path, FileFormats::Format expected) const;
   String resolveUrl(const Url &base, const String &reference) const;
   String cookieHeaderFor(const Url &url) const;
@@ -445,6 +448,7 @@ private:
   void pumpImageJobs();
   void collectImageResults();
   bool cachedPageImagesComplete() const;
+  bool imageIsVisibleOnCurrentPage(uint16_t imageIndex) const;
   bool fetchEmbeddedImageOnWorker(const String &url, uint16_t backgroundColor,
                                   bool useSessionCache, uint16_t *&pixels,
                                   uint8_t &width, uint8_t &height);

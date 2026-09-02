@@ -15,7 +15,7 @@ using File = fs::File;
 #ifndef PNG_MAX_BUFFERED_PIXELS
 // PNGdec needs two uncompressed input rows. This supports common images up
 // to 4096 pixels wide, including 32-bit RGBA PNG files.
-#define PNG_MAX_BUFFERED_PIXELS ((4096 * 4 + 1) * 2)
+#define PNG_MAX_BUFFERED_PIXELS (((4096 * 4 + 1) * 2) + 32)
 #endif
 
 #include <JPEGDEC.h>
@@ -47,6 +47,7 @@ private:
   static const uint16_t CacheHeight = 320;
   static const uint16_t CacheHeaderSize = 24;
   static const uint16_t AnimationCacheHeaderSize = 40;
+  static const uint32_t MaxPngScanlineBytes = 4096UL * 4UL;
   // Animated cache records use packed RGB444 pixels. They are expanded into
   // the RGB565 PSRAM ring by the worker without palette shimmer.
   static const uint32_t AnimationFrameHeaderSize = 4;

@@ -401,8 +401,10 @@ private:
   }
 
   static int pngDraw(PNGDRAW *draw) {
-    if (!_owner || !draw) return 0;
-    const size_t lineBytes = (size_t)draw->iWidth * sizeof(uint16_t);
+    if (!_owner || !draw || draw->iWidth <= 0) return 0;
+    // PNGdec emits a complete packed/SIMD group, including up to seven
+    // pixels past a non-aligned visible width.
+    const size_t lineBytes = ((size_t)draw->iWidth + 7) * sizeof(uint16_t);
     uint16_t *line = static_cast<uint16_t *>(psramFound() ? ps_malloc(lineBytes) : malloc(lineBytes));
     if (!line) return 0;
     const uint16_t background = _owner->_backgroundColor;
@@ -507,6 +509,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _sessionCacheInitialized(false),
     _usingSessionPage(false),
     _deferCachedPageDraw(false),
+    _deferCachedPageDrawStartedMs(0),
     _sessionCacheBytes(0),
     _sessionCacheClock(0),
     _sessionCacheSequence(0),
@@ -604,12 +607,15 @@ void BrowserScreen::tick(uint32_t nowMs) {
   }
   collectImageResults();
   pumpImageJobs();
-  if (_deferCachedPageDraw && cachedPageImagesComplete()) {
+  if (_deferCachedPageDraw &&
+      (cachedPageImagesComplete() || millis() - _deferCachedPageDrawStartedMs >= 1000)) {
+    const bool imagesComplete = cachedPageImagesComplete();
     _deferCachedPageDraw = false;
     updateImageLayout();
     buildPages();
     finishLoading();
-    browserLog(F("cached page images ready; drawing page"));
+    browserLog(imagesComplete ? F("cached page images ready; drawing page")
+                              : F("cached image wait exceeded one second; drawing page"));
     draw();
   }
 }
@@ -717,16 +723,16 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     if (_page > 0) {
       _page--;
       browserLog(String(F("moved to page ")) + String(_page + 1));
+      redrawDocument();
     }
-    draw();
     return;
   }
   if (!_showStart && contains(_nextBounds, point.x, point.y)) {
     if (hasNextPage()) {
       _page++;
       browserLog(String(F("moved to page ")) + String(_page + 1));
+      redrawDocument();
     }
-    draw();
     return;
   }
   if (_showStart) {
@@ -936,7 +942,8 @@ void BrowserScreen::drawDocument() {
 
 void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
   TFT_eSPI &tft = _display.tft();
-  const int16_t textTop = HeaderHeight + DocumentPadding;
+  const int16_t documentHeight = _display.height() - HeaderHeight - ControlsHeight;
+  const int16_t panelTop = HeaderHeight + (documentHeight - 74) / 2;
   const bool knownSize = _loadingTotalBytes > 0;
   uint8_t percent = 0;
   if (knownSize) {
@@ -948,20 +955,20 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
       String(((uint32_t)_loadingTotalBytes + 1023) / 1024) + F(" KB")
     : (_loadingBytes ? String(_loadingBytes / 1024) + F(" KB received") : String(F("Please wait")));
   const int16_t barX = 18;
-  const int16_t barY = textTop + 54;
+  const int16_t barY = panelTop + 54;
   const int16_t barWidth = _display.width() - barX * 2;
 
   if (redrawPhase) {
-    tft.fillRect(0, textTop, _display.width(), 27, _documentBackgroundColor);
+    tft.fillRect(0, panelTop, _display.width(), 27, _documentBackgroundColor);
     const String phase = shortText(_loadingPhase.length() ? _loadingPhase : String(F("Loading")),
                                    _display.width() - 28);
-    UiText::draw(tft, phase, _display.width() / 2, textTop + 18,
+    UiText::draw(tft, phase, _display.width() / 2, panelTop + 18,
                  TFT_BLACK, _documentBackgroundColor, UiText::Size::Compact, MC_DATUM);
   }
   // Only this short line and the bar interior change during a transfer. This
   // leaves the loading title and the bar frame on screen, eliminating flicker.
-  tft.fillRect(0, textTop + 28, _display.width(), 21, _documentBackgroundColor);
-  UiText::draw(tft, detail, _display.width() / 2, textTop + 39,
+  tft.fillRect(0, panelTop + 28, _display.width(), 21, _documentBackgroundColor);
+  UiText::draw(tft, detail, _display.width() / 2, panelTop + 39,
                TFT_DARKGREY, _documentBackgroundColor, UiText::Size::Compact, MC_DATUM);
   if (knownSize && _lastLoadingKnownSize && !drawBarFrame) {
     UiKit::updateProgressBar(tft, barX, barY, barWidth, 12, _lastLoadingPercent, percent,
@@ -1694,6 +1701,7 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   _loadCancelled = false;
   _usingSessionPage = cacheHit;
   _deferCachedPageDraw = false;
+  _deferCachedPageDrawStartedMs = 0;
   // Navigation can be initiated by the Back button itself.  That tap remains
   // down while this synchronous request starts, so treat it as already
   // consumed; otherwise pollLoadingCancel() cancels the Back request at once.
@@ -1776,6 +1784,7 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   saveState();
   if (cacheHit && _embeddedImageCount > 0 && _imageJobs && _imageResults) {
     _deferCachedPageDraw = true;
+    _deferCachedPageDrawStartedMs = millis();
     setLoadingPhase(F("Loading cached images"));
     browserLog(String(F("waiting for cached images: ")) + String(_embeddedImageCount));
     return true;
@@ -1985,7 +1994,8 @@ bool BrowserScreen::fetch(const HttpRequest &initialRequest, String &finalUrl, S
       error = "Compressed file response unsupported";
     } else if (downloadable) {
       readOk = readDownloadBody(*client, response.chunked, response.contentLength, format,
-                                downloadedPath, error, downloadLimit);
+                                downloadedPath, error, downloadLimit,
+                                downloadFileName(response.contentDisposition, url, format));
     } else {
       readOk = readBody(*client, response.chunked, response.contentLength, body, error);
     }
@@ -2342,6 +2352,74 @@ FileFormats::Format BrowserScreen::downloadableFormatForResponse(const String &c
   return FileFormats::Format::Unknown;
 }
 
+String BrowserScreen::downloadFileName(const String &contentDisposition, const Url &url,
+                                       FileFormats::Format format) const {
+  String candidate;
+  String disposition = contentDisposition;
+  const String lowerDisposition = lower(disposition);
+  int position = lowerDisposition.indexOf("filename*=");
+  if (position >= 0) {
+    candidate = trimCopy(disposition.substring(position + 10));
+    const int separator = candidate.indexOf(';');
+    if (separator >= 0) candidate.remove(separator);
+    if (candidate.length() >= 2 && candidate[0] == '"' && candidate[candidate.length() - 1] == '"') {
+      candidate = candidate.substring(1, candidate.length() - 1);
+    }
+    const int charsetEnd = candidate.indexOf('\'');
+    const int languageEnd = charsetEnd < 0 ? -1 : candidate.indexOf('\'', charsetEnd + 1);
+    if (languageEnd >= 0) candidate = candidate.substring(languageEnd + 1);
+  }
+  if (!candidate.length()) {
+    position = lowerDisposition.indexOf("filename=");
+    if (position >= 0) {
+      candidate = trimCopy(disposition.substring(position + 9));
+      const int separator = candidate.indexOf(';');
+      if (separator >= 0) candidate.remove(separator);
+      if (candidate.length() >= 2 && candidate[0] == '"' && candidate[candidate.length() - 1] == '"') {
+        candidate = candidate.substring(1, candidate.length() - 1);
+      }
+    }
+  }
+  if (!candidate.length()) {
+    candidate = url.path;
+    const int query = candidate.indexOf('?');
+    if (query >= 0) candidate.remove(query);
+    const int slash = candidate.lastIndexOf('/');
+    if (slash >= 0) candidate = candidate.substring(slash + 1);
+  }
+
+  String decoded;
+  for (uint16_t index = 0; index < candidate.length(); index++) {
+    if (candidate[index] == '%' && index + 2 < candidate.length() &&
+        isxdigit((unsigned char)candidate[index + 1]) && isxdigit((unsigned char)candidate[index + 2])) {
+      char encoded[] = {candidate[index + 1], candidate[index + 2], '\0'};
+      decoded += (char)strtoul(encoded, nullptr, 16);
+      index += 2;
+    } else {
+      decoded += candidate[index];
+    }
+  }
+
+  String safe;
+  for (uint16_t index = 0; index < decoded.length() && safe.length() < 96; index++) {
+    const uint8_t character = (uint8_t)decoded[index];
+    if (character < 0x20 || character == 0x7f || character == '/' || character == '\\' ||
+        character == ':' || character == '*' || character == '?' || character == '"' ||
+        character == '<' || character == '>' || character == '|') continue;
+    safe += (char)character;
+  }
+  safe.trim();
+  while (safe.endsWith(".")) safe.remove(safe.length() - 1);
+  if (!safe.length() || safe == "." || safe == "..") return "";
+
+  if (FileFormats::fromPath(safe) != format) {
+    const int dot = safe.lastIndexOf('.');
+    if (dot > 0) safe.remove(dot);
+    safe += FileFormats::extension(format);
+  }
+  return safe;
+}
+
 bool BrowserScreen::isSupportedDownloadFile(const String &path, FileFormats::Format expected) const {
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   File file = SD.open(path.c_str(), FILE_READ);
@@ -2359,7 +2437,7 @@ bool BrowserScreen::isSupportedDownloadFile(const String &path, FileFormats::For
 
 bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
                                      FileFormats::Format format, String &downloadedPath, String &error,
-                                     uint32_t downloadLimit) {
+                                     uint32_t downloadLimit, const String &suggestedFileName) {
   downloadedPath = "";
   setLoadingPhase(String(F("Downloading ")) + FileFormats::extension(format), chunked ? -1 : contentLength);
   browserLog(String(F("starting file download: format=")) + FileFormats::extension(format) +
@@ -2397,7 +2475,15 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
   String tempPath;
   File file;
   for (uint16_t attempt = 0; attempt < 1000; attempt++) {
-    path = String(DownloadDirectory) + "/media-" + String((unsigned long)stamp) + "-" + String(attempt) + extension;
+    String name = suggestedFileName;
+    if (!name.length()) name = "media-" + String((unsigned long)stamp) + extension;
+    if (attempt) {
+      const int dot = name.lastIndexOf('.');
+      const String suffix = dot > 0 ? name.substring(dot) : extension;
+      const String stem = dot > 0 ? name.substring(0, dot) : name;
+      name = stem + "-" + String(attempt) + suffix;
+    }
+    path = String(DownloadDirectory) + "/" + name;
     tempPath = path + ".tmp";
     if (SD.exists(path)) continue;
     if (SD.exists(tempPath)) SD.remove(tempPath);
@@ -3391,7 +3477,7 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
   const int16_t height = rowHeight(row);
   const uint16_t border = control.disabled ? TFT_DARKGREY : TFT_DARKCYAN;
   const uint16_t fill = control.disabled ? TFT_LIGHTGREY : TFT_WHITE;
-  const uint16_t textColor = control.disabled ? TFT_DARKGREY : row.style.color;
+  const uint16_t textColor = TFT_DARKGREY;
   const UiText::Size labelSize = control.labelIsPlaceholder
     ? UiText::Size::Compact : row.style.size;
   const String label = UiText::ellipsize(formControlLabel(control), width - 14, labelSize);
@@ -3429,9 +3515,7 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
   UiText::draw(tft, label, x + 7, y + 6, textColor, fill, labelSize);
   String value = formControlValue(control);
   if (control.kind == FormControlKind::Unsupported) value = "Unsupported";
-  const bool generatedPlaceholder = !value.length() && control.kind != FormControlKind::Select;
-  if (generatedPlaceholder) value = "Tap to enter";
-  const UiText::Size valueSize = generatedPlaceholder ? UiText::Size::Compact : row.style.size;
+  const UiText::Size valueSize = row.style.size;
   value = UiText::ellipsize(value, width - 30, valueSize);
   UiText::draw(tft, value, x + 7, y + 23, control.disabled ? TFT_DARKGREY : TFT_BLACK, fill, valueSize);
   if (control.kind == FormControlKind::Select) {
@@ -3574,6 +3658,7 @@ void BrowserScreen::releaseEmbeddedImages() {
   _embeddedImageCount = 0;
   _nextImageToQueue = 0;
   _deferCachedPageDraw = false;
+  _deferCachedPageDrawStartedMs = 0;
 }
 
 void BrowserScreen::updateImageLayout() {
@@ -3604,7 +3689,9 @@ void BrowserScreen::pumpImageJobs() {
     job.imageIndex = index;
     job.generation = image.generation;
     job.backgroundColor = image.backgroundColor;
-    job.useSessionCache = _usingSessionPage;
+    // The image cache belongs to the browser session, not one cached page.
+    // A shared icon on the next site can therefore decode locally too.
+    job.useSessionCache = _sessionCacheActive;
     image.url.toCharArray(job.url, sizeof(job.url));
     if (xQueueSend(_imageJobs, &job, 0) != pdTRUE) {
       _nextImageToQueue--;
@@ -3618,13 +3705,14 @@ void BrowserScreen::pumpImageJobs() {
 void BrowserScreen::collectImageResults() {
   if (!_imageResults) return;
   bool redraw = false;
-  bool updateControls = false;
+  bool redrawCurrentPage = false;
+  const bool wasLoading = isLoading();
   ImageResult result{};
   while (xQueueReceive(_imageResults, &result, 0) == pdTRUE) {
-    updateControls = true;
     if (result.generation == _imageGeneration && result.imageIndex < _embeddedImageCount) {
       EmbeddedImage &image = _embeddedImages[result.imageIndex];
       if (image.generation == result.generation && image.state == 1 && result.pixels && result.width && result.height) {
+        if (imageIsVisibleOnCurrentPage(result.imageIndex)) redrawCurrentPage = true;
         image.pixels = result.pixels;
         image.width = result.width;
         image.height = result.height;
@@ -3644,9 +3732,11 @@ void BrowserScreen::collectImageResults() {
   if (redraw && !_deferCachedPageDraw && !_showStart && _message.length() == 0) {
     updateImageLayout();
     buildPages();
-    redrawDocument();
+    // Do not repaint a page that has no visible placeholder to replace. It
+    // avoids a perceptible flash while images below or above this page load.
+    if (redrawCurrentPage) redrawDocument();
   }
-  if (updateControls && !_showStart) drawControls();
+  if (wasLoading != isLoading() && !_showStart) drawControls();
 }
 
 bool BrowserScreen::cachedPageImagesComplete() const {
@@ -3655,6 +3745,20 @@ bool BrowserScreen::cachedPageImagesComplete() const {
     if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].state < 2) return false;
   }
   return true;
+}
+
+bool BrowserScreen::imageIsVisibleOnCurrentPage(uint16_t imageIndex) const {
+  if (_pageCount == 0 || _page >= _pageCount) return false;
+  const uint16_t start = _pageStarts[_page];
+  const uint16_t end = pageEndRow(_page);
+  for (uint16_t rowIndex = start; rowIndex < end; rowIndex++) {
+    const VisualRow &row = _rows[rowIndex];
+    if (row.image && row.imageIndex == (int16_t)imageIndex) return true;
+    for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
+      if (row.runs[runIndex].image && row.runs[runIndex].imageIndex == (int16_t)imageIndex) return true;
+    }
+  }
+  return false;
 }
 
 void BrowserScreen::imageWorkerTask(void *context) {

@@ -123,8 +123,12 @@ void drawProgressBar(TFT_eSPI &tft,
   const int16_t innerY = y + 2;
   const int16_t innerWidth = width - 4;
   const int16_t innerHeight = height - 4;
-  if (drawFrame) tft.drawRoundRect(x, y, width, height, 4, frameColor);
-  tft.fillRect(innerX, innerY, innerWidth, innerHeight, backgroundColor);
+  const int16_t outerRadius = height / 2;
+  const int16_t innerRadius = innerHeight / 2;
+  if (drawFrame) tft.drawRoundRect(x, y, width, height, outerRadius, frameColor);
+  // Keep both layers pill-shaped. Filling the interior as a rectangle made
+  // the progress track appear square at its ends on some displays.
+  tft.fillRoundRect(innerX, innerY, innerWidth, innerHeight, innerRadius, backgroundColor);
 
   int16_t fillWidth = 0;
   int16_t fillX = innerX;
@@ -137,7 +141,7 @@ void drawProgressBar(TFT_eSPI &tft,
     if (value > 100) value = 100;
     fillWidth = (int16_t)((int32_t)innerWidth * value / 100);
   }
-  if (fillWidth > 0) tft.fillRoundRect(fillX, innerY, fillWidth, innerHeight, 3, fillColor);
+  if (fillWidth > 0) tft.fillRoundRect(fillX, innerY, fillWidth, innerHeight, innerRadius, fillColor);
 }
 
 void updateProgressBar(TFT_eSPI &tft,
@@ -149,22 +153,20 @@ void updateProgressBar(TFT_eSPI &tft,
                        uint8_t value,
                        uint16_t fillColor,
                        uint16_t backgroundColor) {
+  (void)previousValue;
   if (width < 5 || height < 5) return;
-  if (previousValue > 100) previousValue = 100;
   if (value > 100) value = 100;
   const int16_t innerX = x + 2;
   const int16_t innerY = y + 2;
   const int16_t innerWidth = width - 4;
   const int16_t innerHeight = height - 4;
-  const int16_t previousWidth = (int16_t)((int32_t)innerWidth * previousValue / 100);
   const int16_t currentWidth = (int16_t)((int32_t)innerWidth * value / 100);
-  if (currentWidth < previousWidth) {
-    tft.fillRect(innerX, innerY, innerWidth, innerHeight, backgroundColor);
-    if (currentWidth > 0) tft.fillRect(innerX, innerY, currentWidth, innerHeight, fillColor);
-    return;
-  }
-  if (currentWidth > previousWidth) {
-    tft.fillRect(innerX + previousWidth, innerY, currentWidth - previousWidth, innerHeight, fillColor);
+  const int16_t innerRadius = innerHeight / 2;
+  // Repaint only the rounded interior, retaining the outer frame. This
+  // avoids square corners when a determinate fill advances or resets.
+  tft.fillRoundRect(innerX, innerY, innerWidth, innerHeight, innerRadius, backgroundColor);
+  if (currentWidth > 0) {
+    tft.fillRoundRect(innerX, innerY, currentWidth, innerHeight, innerRadius, fillColor);
   }
 }
 

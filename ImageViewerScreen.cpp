@@ -668,12 +668,24 @@ bool ImageViewerScreen::readRasterHeader() {
       _png.close();
       return false;
     }
-    _sourceWidth = (uint32_t)_png.getWidth();
-    _sourceHeight = (uint32_t)_png.getHeight();
-    if (_sourceWidth == 0 || _sourceHeight == 0) {
-      _error = F("PNG has invalid dimensions");
+    const int pngWidth = _png.getWidth();
+    const int pngHeight = _png.getHeight();
+    const int bitsPerChannel = _png.getBpp();
+    const int pixelType = _png.getPixelType();
+    const int channels = pixelType == PNG_PIXEL_GRAYSCALE || pixelType == PNG_PIXEL_INDEXED ? 1 :
+                         pixelType == PNG_PIXEL_TRUECOLOR ? 3 :
+                         pixelType == PNG_PIXEL_GRAY_ALPHA ? 2 :
+                         pixelType == PNG_PIXEL_TRUECOLOR_ALPHA ? 4 : 0;
+    const uint64_t scanlineBytes = channels > 0 && bitsPerChannel > 0
+      ? ((uint64_t)pngWidth * (uint32_t)channels * (uint32_t)bitsPerChannel + 7) / 8 : 0;
+    if (pngWidth <= 0 || pngHeight <= 0 || scanlineBytes == 0 || scanlineBytes > MaxPngScanlineBytes) {
+      _error = F("PNG row exceeds decoder limit");
+      _png.close();
+      _decoderOwner = nullptr;
       return false;
     }
+    _sourceWidth = (uint32_t)pngWidth;
+    _sourceHeight = (uint32_t)pngHeight;
     return true;
   }
   if (sourceFormat == FileFormats::Format::Jpeg) {
@@ -2318,9 +2330,11 @@ int32_t ImageViewerScreen::jpegSeek(JPEGFILE *file, int32_t position) {
 }
 
 int ImageViewerScreen::pngDraw(PNGDRAW *draw) {
-  if (!_decoderOwner || !draw) return 0;
+  if (!_decoderOwner || !draw || draw->iWidth <= 0) return 0;
   ImageViewerScreen &viewer = *_decoderOwner;
-  uint16_t *pixels = (uint16_t *)malloc((size_t)draw->iWidth * sizeof(uint16_t));
+  // PNGdec can expand the final packed/SIMD group beyond the visible width.
+  // The converter needs the padding, while the loop below uses only iWidth.
+  uint16_t *pixels = (uint16_t *)malloc(((size_t)draw->iWidth + 7) * sizeof(uint16_t));
   if (!pixels) return 0;
   viewer._png.getLineAsRGB565(draw, pixels, PNG_RGB565_LITTLE_ENDIAN, 0);
   for (int x = 0; x < draw->iWidth; x++) viewer.storeRasterPixel((uint32_t)x, (uint32_t)draw->y, pixels[x]);
