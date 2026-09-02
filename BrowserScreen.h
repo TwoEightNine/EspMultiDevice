@@ -29,7 +29,9 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t MaxRecentSites = 8;
+  // Start-page lists are paged in eight-row screens, with room for two pages
+  // of independently persisted recent and favorite entries.
+  static const uint8_t MaxRecentSites = 16;
   static const uint8_t MaxCookies = 16;
   static const uint16_t MaxRows = 192;
   static const uint8_t MaxRunsPerRow = 16;
@@ -293,14 +295,20 @@ private:
   uint8_t _linkCount;
   uint8_t _historyCount;
   RecentSite _recentSites[MaxRecentSites];
+  RecentSite _favoriteSites[MaxRecentSites];
   Cookie _cookies[MaxCookies];
   uint8_t _recentCount;
+  uint8_t _favoriteCount;
   uint8_t _cookieCount;
   bool _loaded;
   volatile bool _lifecycleLoading;
   volatile bool _lifecycleDrawPending;
   uint32_t _lifecycleGeneration;
   bool _showStart;
+  bool _showFavorites;
+  uint8_t _startListScroll;
+  bool _androidUserAgent;
+  bool _menuOpen;
   bool _lastTouchDown;
   bool _loadCancelled;
   bool _loadCancelTouchDown;
@@ -355,18 +363,26 @@ private:
   Rect _closeBounds;
   Rect _backBounds;
   Rect _homeBounds;
-  Rect _openBounds;
+  Rect _startAddBounds;
+  Rect _startToggleBounds;
+  Rect _startPreviousBounds;
+  Rect _startNextBounds;
   Rect _previousBounds;
   Rect _nextBounds;
-  Rect _recentBounds[MaxRecentSites];
+  Rect _startSiteBounds[MaxRecentSites];
+  Rect _menuBounds;
+  Rect _menuAgentBounds;
+  Rect _menuFavoriteBounds;
 
   void draw();
   void drawHeader();
   void drawStartPage();
   void drawDocument();
+  void drawPageMenu();
   void drawLoadingPanel(bool redrawPhase, bool drawBarFrame);
   void redrawDocument();
   void drawControls();
+  void drawPageControls();
   void layout();
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
   bool isLoading() const;
@@ -390,6 +406,14 @@ private:
   bool openRequest(const HttpRequest &request, bool addToHistory = true,
                    bool addToRecent = false, bool useSessionCache = false);
   void goBack();
+  void toggleUserAgent();
+  void toggleFavorite();
+  bool isFavorite(const String &url) const;
+  void addFavorite(const String &url, const String &title);
+  void removeFavorite(const String &url);
+  uint8_t startSiteCount() const;
+  const RecentSite &startSiteAt(uint8_t index) const;
+  void clampStartListScroll();
 
   bool normalizeUrl(const String &value, String &normalized, String &error) const;
   bool parseUrl(const String &value, Url &url) const;

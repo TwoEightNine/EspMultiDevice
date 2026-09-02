@@ -32,22 +32,23 @@ const int16_t FormControlHeight = 42;
 const int16_t FormTextareaHeight = 58;
 const int16_t DocumentPadding = 7;
 const int16_t DocumentSidePadding = 8;
+const uint8_t StartListVisibleRows = 8;
 const uint8_t ThumbnailMaxWidth = 200;
 const uint8_t ThumbnailMaxHeight = 200;
 const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
-const int16_t StartOpenButtonTop = HeaderHeight + 8;
-const int16_t StartOpenButtonHeight = 32;
-const int16_t RecentListTop = StartOpenButtonTop + StartOpenButtonHeight + 24;
+const int16_t RecentListTop = HeaderHeight + 24;
 const uint16_t DefaultTextColor = TFT_BLACK;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
+const char *ImagePlaceholderLabel = "image";
 const char *StatePath = "/.system/browser_state.txt";
 const char *StateTempPath = "/.system/browser_state.tmp";
 const char *DownloadDirectory = "/Downloads";
 const char *SessionCacheDirectory = "/.system/browser_session";
 // Some file hosts route unknown clients to an informational page instead of
-// returning the requested media. Present a conventional mobile browser
-// identity so servers can use their normal mobile response path.
+// returning the requested media. The menu can temporarily present this
+// conventional mobile identity so servers use their normal mobile response.
+const char *EspUserAgent = "ESP-Media-Browser/1.0";
 const char *MobileUserAgent =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
   "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
@@ -130,6 +131,44 @@ void drawFooterClose(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t c
     tft.drawLine(centerX - 7, centerY - 7 + offset, centerX + 7, centerY + 7 + offset, color);
     tft.drawLine(centerX - 7, centerY + 7 + offset, centerX + 7, centerY - 7 + offset, color);
   }
+}
+
+void drawFooterPlus(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    tft.drawLine(centerX - 8, centerY + offset, centerX + 8, centerY + offset, color);
+    tft.drawLine(centerX + offset, centerY - 8, centerX + offset, centerY + 8, color);
+  }
+}
+
+void drawFooterRecent(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  tft.drawCircle(centerX, centerY, 9, color);
+  tft.drawCircle(centerX, centerY, 10, color);
+  tft.drawLine(centerX, centerY, centerX, centerY - 6, color);
+  tft.drawLine(centerX, centerY, centerX + 5, centerY + 3, color);
+}
+
+void drawFooterFavorite(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  const int16_t points[][2] = {{0, -10}, {3, -3}, {10, -3}, {5, 2}, {7, 9}, {0, 5}, {-7, 9}, {-5, 2}, {-10, -3}, {-3, -3}};
+  for (uint8_t i = 0; i < 10; i++) {
+    const uint8_t next = (i + 1) % 10;
+    tft.drawLine(centerX + points[i][0], centerY + points[i][1],
+                 centerX + points[next][0], centerY + points[next][1], color);
+  }
+}
+
+void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
+  tft.fillCircle(centerX, centerY - 7, 2, color);
+  tft.fillCircle(centerX, centerY, 2, color);
+  tft.fillCircle(centerX, centerY + 7, 2, color);
+}
+
+void drawCheckbox(TFT_eSPI &tft, int16_t x, int16_t y, bool checked, uint16_t color) {
+  tft.drawRect(x, y, 16, 16, color);
+  if (!checked) return;
+  tft.drawLine(x + 3, y + 8, x + 7, y + 12, color);
+  tft.drawLine(x + 7, y + 12, x + 13, y + 4, color);
+  tft.drawLine(x + 3, y + 9, x + 7, y + 13, color);
+  tft.drawLine(x + 7, y + 13, x + 14, y + 4, color);
 }
 
 uint64_t parseHttpDate(const String &source) {
@@ -483,12 +522,17 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _linkCount(0),
     _historyCount(0),
     _recentCount(0),
+    _favoriteCount(0),
     _cookieCount(0),
     _loaded(false),
     _lifecycleLoading(false),
     _lifecycleDrawPending(false),
     _lifecycleGeneration(0),
     _showStart(true),
+    _showFavorites(false),
+    _startListScroll(0),
+    _androidUserAgent(false),
+    _menuOpen(false),
     _lastTouchDown(false),
     _loadCancelled(false),
     _loadCancelTouchDown(false),
@@ -536,14 +580,20 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _closeBounds{0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize},
     _backBounds{0, 0, 0, 0},
     _homeBounds{0, 0, 0, 0},
-    _openBounds{0, 0, 0, 0},
+    _startAddBounds{0, 0, 0, 0},
+    _startToggleBounds{0, 0, 0, 0},
+    _startPreviousBounds{0, 0, 0, 0},
+    _startNextBounds{0, 0, 0, 0},
     _previousBounds{0, 0, 0, 0},
-    _nextBounds{0, 0, 0, 0} {
+    _nextBounds{0, 0, 0, 0},
+    _menuBounds{0, 0, 0, 0},
+    _menuAgentBounds{0, 0, 0, 0},
+    _menuFavoriteBounds{0, 0, 0, 0} {
   for (uint16_t i = 0; i < MaxEmbeddedImages; i++) {
     _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
-    _recentBounds[i] = {0, 0, 0, 0};
+    _startSiteBounds[i] = {0, 0, 0, 0};
   }
   resetSessionCacheEntries();
   if (_imageJobs && _imageResults) {
@@ -621,6 +671,12 @@ void BrowserScreen::tick(uint32_t nowMs) {
 }
 
 void BrowserScreen::startLifecycleLoad() {
+  // User-agent override is intentionally session-only.  Starting Browser
+  // after it has been closed always returns to the lightweight ESP identity.
+  _androidUserAgent = false;
+  _showFavorites = false;
+  _startListScroll = 0;
+  _menuOpen = false;
   _lifecycleGeneration++;
   if (_lifecycleGeneration == 0) _lifecycleGeneration = 1;
   _lifecycleLoading = true;
@@ -675,6 +731,20 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   if (_lastTouchDown) return;
   _lastTouchDown = true;
 
+  if (_menuOpen) {
+    if (contains(_menuAgentBounds, point.x, point.y)) {
+      toggleUserAgent();
+      return;
+    }
+    if (contains(_menuFavoriteBounds, point.x, point.y)) {
+      toggleFavorite();
+      return;
+    }
+    _menuOpen = false;
+    draw();
+    return;
+  }
+
   if (contains(_closeBounds, point.x, point.y)) {
     browserLog(F("close requested"));
     releaseEmbeddedImages();
@@ -691,11 +761,19 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _pageCount = 0;
     _page = 0;
     _showStart = true;
+    _showFavorites = false;
+    _startListScroll = 0;
+    _menuOpen = false;
     _navigator.pop();
     return;
   }
   if (_lifecycleLoading) return;
-  if (contains(_backBounds, point.x, point.y)) {
+  if (!_showStart && contains(_menuBounds, point.x, point.y)) {
+    _menuOpen = true;
+    draw();
+    return;
+  }
+  if (!_showStart && contains(_backBounds, point.x, point.y)) {
     if (isLoading()) {
       browserLog(F("cancel requested"));
       cancelLoading();
@@ -711,12 +789,37 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _showStart = true;
     _page = 0;
     _message = "";
+    _showFavorites = false;
+    _startListScroll = 0;
+    _menuOpen = false;
     draw();
     return;
   }
-  if (_showStart && contains(_openBounds, point.x, point.y)) {
+  if (_showStart && contains(_startAddBounds, point.x, point.y)) {
     browserLog(F("opening URL input"));
     openUrlInput();
+    return;
+  }
+  if (_showStart && contains(_startToggleBounds, point.x, point.y)) {
+    _showFavorites = !_showFavorites;
+    _startListScroll = 0;
+    browserLog(_showFavorites ? F("showing favorite sites") : F("showing recent sites"));
+    draw();
+    return;
+  }
+  if (_showStart && contains(_startPreviousBounds, point.x, point.y)) {
+    if (_startListScroll > 0) {
+      _startListScroll -= StartListVisibleRows;
+      draw();
+    }
+    return;
+  }
+  if (_showStart && contains(_startNextBounds, point.x, point.y)) {
+    const uint8_t count = startSiteCount();
+    if (_startListScroll + StartListVisibleRows < count) {
+      _startListScroll += StartListVisibleRows;
+      draw();
+    }
     return;
   }
   if (!_showStart && contains(_previousBounds, point.x, point.y)) {
@@ -724,6 +827,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
       _page--;
       browserLog(String(F("moved to page ")) + String(_page + 1));
       redrawDocument();
+      drawPageControls();
     }
     return;
   }
@@ -732,14 +836,24 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
       _page++;
       browserLog(String(F("moved to page ")) + String(_page + 1));
       redrawDocument();
+      drawPageControls();
     }
     return;
   }
   if (_showStart) {
     for (uint8_t i = 0; i < MaxRecentSites; i++) {
-      if (contains(_recentBounds[i], point.x, point.y)) {
-        browserLog(String(F("opening recent site #")) + String(i + 1));
-        openUrl(_recentSites[i].url);
+      if (contains(_startSiteBounds[i], point.x, point.y)) {
+        browserLog(String(_showFavorites ? F("opening favorite site #") : F("opening recent site #")) + String(i + 1));
+        const RecentSite &site = startSiteAt(i);
+        const String url = site.url;
+        const String title = site.title;
+        if (!_showFavorites) {
+          // Promote immediately so the tap is reflected even if the reload
+          // fails; a successful load below refreshes this title from the page.
+          addRecent(url, title);
+          saveState();
+        }
+        openUrl(url, true, !_showFavorites);
         return;
       }
     }
@@ -766,21 +880,33 @@ void BrowserScreen::layout() {
   _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
   _backBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _homeBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
-  _openBounds = {70, StartOpenButtonTop, (int16_t)(width - 140), StartOpenButtonHeight};
+  _startAddBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
+  _startToggleBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
+  _startPreviousBounds = {(int16_t)(buttonWidth * 2), (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
+  _startNextBounds = {(int16_t)(buttonWidth * 3), (int16_t)(height - ControlsHeight),
+                      (int16_t)(width - buttonWidth * 3), ControlsHeight};
   _previousBounds = {(int16_t)(buttonWidth * 2), (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _nextBounds = {(int16_t)(buttonWidth * 3), (int16_t)(height - ControlsHeight),
                  (int16_t)(width - buttonWidth * 3), ControlsHeight};
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
-    _recentBounds[i] = {0, 0, 0, 0};
+    _startSiteBounds[i] = {0, 0, 0, 0};
   }
-  const int16_t footerTop = height - ControlsHeight;
-  const uint8_t capacity = footerTop > RecentListTop
-    ? (uint8_t)((footerTop - RecentListTop) / UiKit::ListCellHeight) : 0;
-  const uint8_t visible = _lifecycleLoading ? 0 : (_recentCount < capacity ? _recentCount : capacity);
-  for (uint8_t i = 0; i < visible; i++) {
-    _recentBounds[i] = {0, (int16_t)(RecentListTop + i * UiKit::ListCellHeight),
+  clampStartListScroll();
+  const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
+  const uint8_t visible = count - _startListScroll < StartListVisibleRows
+    ? count - _startListScroll : StartListVisibleRows;
+  for (uint8_t row = 0; row < visible; row++) {
+    const uint8_t index = _startListScroll + row;
+    _startSiteBounds[index] = {0, (int16_t)(RecentListTop + row * UiKit::ListCellHeight),
                         width, UiKit::ListCellHeight};
   }
+  _menuBounds = {(int16_t)(width - UiKit::NavigationIconSize - 4), 4,
+                 UiKit::NavigationIconSize, UiKit::NavigationIconSize};
+  const int16_t menuWidth = width > 240 ? 224 : width - 16;
+  const int16_t menuX = width - menuWidth - 8;
+  _menuAgentBounds = {menuX, (int16_t)(HeaderHeight + 6), menuWidth, UiKit::ListCellHeight};
+  _menuFavoriteBounds = {menuX, (int16_t)(HeaderHeight + 6 + UiKit::ListCellHeight),
+                         menuWidth, UiKit::ListCellHeight};
 }
 
 void BrowserScreen::draw() {
@@ -793,6 +919,7 @@ void BrowserScreen::draw() {
   if (_showStart) drawStartPage();
   else drawDocument();
   drawControls();
+  if (_menuOpen && !_showStart) drawPageMenu();
   BrowserText::end(tft);
 }
 
@@ -800,21 +927,20 @@ void BrowserScreen::drawHeader() {
   String heading = _showStart ? "Browser" : (_title.length() ? _title : _currentUrl);
   TFT_eSPI &tft = _display.tft();
   UiKit::drawTopAppBar(tft, _display.width(), "");
-  BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, _display.width() - 72,
+  const int16_t titleWidth = _display.width() - (_showStart ? 72 : 120);
+  BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, titleWidth,
                                                  BrowserText::Size::Title),
                     UiKit::NavigationIconSize + UiKit::ContentPadding, 11, TFT_WHITE,
                     UiKit::AppBarColor, BrowserText::Size::Title);
+  if (!_showStart) {
+    drawMoreIcon(tft, _menuBounds.x + _menuBounds.w / 2, _menuBounds.y + _menuBounds.h / 2,
+                 TFT_WHITE);
+  }
 }
 
 void BrowserScreen::drawStartPage() {
   TFT_eSPI &tft = _display.tft();
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.fillRoundRect(_openBounds.x, _openBounds.y, _openBounds.w, _openBounds.h, 5, TFT_BLUE);
-  UiText::draw(tft, "Open URL", _openBounds.x + _openBounds.w / 2,
-               _openBounds.y + _openBounds.h / 2, TFT_WHITE, TFT_BLUE,
-               UiText::Size::Compact, MC_DATUM);
-  UiText::draw(tft, "Recent sites", 10, RecentListTop - 18, TFT_LIGHTGREY, TFT_BLACK,
+  UiText::draw(tft, _showFavorites ? "Favorite sites" : "Recent sites", 10, RecentListTop - 18, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact);
   // Recent-site records are populated by the lifecycle worker.  Avoid
   // reading their Strings until its hand-off frame in tick().
@@ -823,15 +949,16 @@ void BrowserScreen::drawStartPage() {
                  TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
     return;
   }
-  if (_recentCount == 0) {
-    UiText::draw(tft, "No recent sites yet", 10, RecentListTop + 10,
+  const uint8_t count = startSiteCount();
+  if (count == 0) {
+    UiText::draw(tft, _showFavorites ? "No favorite sites yet" : "No recent sites yet", 10, RecentListTop + 10,
                  TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
     return;
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
-    if (_recentBounds[i].w == 0) break;
-    const RecentSite &site = _recentSites[i];
-    const Rect &bounds = _recentBounds[i];
+    if (_startSiteBounds[i].w == 0) continue;
+    const RecentSite &site = startSiteAt(i);
+    const Rect &bounds = _startSiteBounds[i];
     String label = site.title.length() ? site.title : site.url;
     tft.fillRect(0, bounds.y, bounds.w, UiKit::ListCellHeight, TFT_BLACK);
     BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding * 2),
@@ -840,6 +967,27 @@ void BrowserScreen::drawStartPage() {
     tft.drawFastHLine(UiKit::ContentPadding, bounds.y + UiKit::ListCellHeight - 1,
                       bounds.w - UiKit::ContentPadding * 2, UiKit::DividerColor);
   }
+}
+
+void BrowserScreen::drawPageMenu() {
+  TFT_eSPI &tft = _display.tft();
+  const int16_t menuX = _menuAgentBounds.x;
+  const int16_t menuY = _menuAgentBounds.y;
+  const int16_t menuWidth = _menuAgentBounds.w;
+  const int16_t menuHeight = _menuAgentBounds.h + _menuFavoriteBounds.h;
+  tft.fillRoundRect(menuX, menuY, menuWidth, menuHeight, 4, TFT_BLACK);
+  tft.drawRoundRect(menuX, menuY, menuWidth, menuHeight, 4, TFT_DARKGREY);
+  UiText::draw(tft, "Override User-Agent", menuX + UiKit::ContentPadding,
+               _menuAgentBounds.y + UiKit::ListCellHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Compact, ML_DATUM);
+  drawCheckbox(tft, menuX + menuWidth - UiKit::ContentPadding - 16,
+               _menuAgentBounds.y + (_menuAgentBounds.h - 16) / 2,
+               _androidUserAgent, TFT_WHITE);
+  tft.drawFastHLine(menuX + UiKit::ContentPadding, _menuFavoriteBounds.y,
+                    menuWidth - UiKit::ContentPadding * 2, UiKit::DividerColor);
+  UiText::draw(tft, isFavorite(_currentUrl) ? "Remove from favorites" : "Add to favorites",
+               menuX + UiKit::ContentPadding, _menuFavoriteBounds.y + UiKit::ListCellHeight / 2,
+               TFT_WHITE, TFT_BLACK, UiText::Size::Compact, ML_DATUM);
 }
 
 void BrowserScreen::drawDocument() {
@@ -895,7 +1043,7 @@ void BrowserScreen::drawDocument() {
         drawThumbnail(row.imageIndex, DocumentSidePadding, y);
       } else {
         tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
-        BrowserText::draw(tft, shortImageLabel(row.imageLabel, width - 26),
+        BrowserText::draw(tft, ImagePlaceholderLabel,
                           DocumentSidePadding + 22, y + 3, color, rowBackground);
       }
     } else {
@@ -909,7 +1057,8 @@ void BrowserScreen::drawDocument() {
         const VisualRun &run = row.runs[runIndex];
         const int16_t x = DocumentSidePadding + run.x;
         if (run.image) {
-          uint16_t color = run.style.linkIndex ? LinkImageColor : ImagePlaceholderColor;
+          const bool hasDirectImageLink = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount;
+          uint16_t color = (run.style.linkIndex || hasDirectImageLink) ? LinkImageColor : ImagePlaceholderColor;
           const int16_t imageHeight = run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount &&
                                  _embeddedImages[run.imageIndex].pixels
             ? _embeddedImages[run.imageIndex].height : TextRowHeight;
@@ -920,7 +1069,7 @@ void BrowserScreen::drawDocument() {
             drawThumbnail(run.imageIndex, x, y);
           } else {
             tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
-            BrowserText::draw(tft, run.text, x + 22, y + 3, color,
+            BrowserText::draw(tft, ImagePlaceholderLabel, x + 22, y + 3, color,
                               run.style.hasBackground ? run.style.backgroundColor : rowBackground, run.style.size);
           }
           continue;
@@ -991,6 +1140,30 @@ void BrowserScreen::redrawDocument() {
 
 void BrowserScreen::drawControls() {
   TFT_eSPI &tft = _display.tft();
+  if (_showStart) {
+    const Rect buttons[] = {_startAddBounds, _startToggleBounds, _startPreviousBounds, _startNextBounds};
+    const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
+    const bool ready = !_lifecycleLoading;
+    const bool active[] = {ready, ready, ready && _startListScroll > 0,
+                           ready && _startListScroll + StartListVisibleRows < count};
+    for (uint8_t i = 0; i < 4; i++) {
+      const Rect &button = buttons[i];
+      const uint16_t color = active[i] ? 0x2965 : TFT_DARKGREY;
+      const uint16_t iconColor = active[i] ? TFT_WHITE : 0x8410;
+      tft.fillRect(button.x, button.y, button.w - 1, button.h, color);
+      const int16_t centerX = button.x + button.w / 2;
+      const int16_t centerY = button.y + button.h / 2;
+      if (i == 0) drawFooterPlus(tft, centerX, centerY, iconColor);
+      else if (i == 1) {
+        if (_showFavorites) drawFooterRecent(tft, centerX, centerY, iconColor);
+        else drawFooterFavorite(tft, centerX, centerY, iconColor);
+      } else {
+        drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
+      }
+    }
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
   const Rect buttons[] = {_backBounds, _homeBounds, _previousBounds, _nextBounds};
   const bool loading = isLoading();
   for (uint8_t i = 0; i < 4; i++) {
@@ -1007,6 +1180,20 @@ void BrowserScreen::drawControls() {
     else if (i == 0) drawFooterArrow(tft, centerX, centerY, false, false, iconColor);
     else if (i == 1) drawFooterHome(tft, centerX, centerY, iconColor);
     else drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
+  }
+  tft.setTextDatum(TL_DATUM);
+}
+
+void BrowserScreen::drawPageControls() {
+  TFT_eSPI &tft = _display.tft();
+  const Rect buttons[] = {_previousBounds, _nextBounds};
+  for (uint8_t index = 0; index < 2; index++) {
+    const bool active = index == 0 ? _page > 0 : hasNextPage();
+    const Rect &button = buttons[index];
+    tft.fillRect(button.x, button.y, button.w - 1, button.h,
+                 active ? 0x2965 : TFT_DARKGREY);
+    drawFooterArrow(tft, button.x + button.w / 2, button.y + button.h / 2,
+                    true, index == 1, active ? TFT_WHITE : 0x8410);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -1152,16 +1339,28 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
       if (row.image) {
         int16_t width = imageWidth(row.imageLabel);
         if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
-          width = _embeddedImages[row.imageIndex].width;
+          const EmbeddedImage &image = _embeddedImages[row.imageIndex];
+          if (image.pixels && image.width) width = image.width;
         }
         bool insideImage = x >= DocumentSidePadding && x < DocumentSidePadding + width;
-        return insideImage && row.imageLinkIndex ? _linkUrls[row.imageLinkIndex - 1] : "";
+        if (!insideImage) return "";
+        if (row.imageLinkIndex && row.imageLinkIndex <= _linkCount) {
+          return _linkUrls[row.imageLinkIndex - 1];
+        }
+        if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
+          return _embeddedImages[row.imageIndex].url;
+        }
+        return "";
       }
       for (uint8_t runIndex = 0; runIndex < row.runCount; runIndex++) {
         const VisualRun &run = row.runs[runIndex];
-        if (run.style.linkIndex && x >= DocumentSidePadding + run.x &&
-            x < DocumentSidePadding + run.x + run.width) {
-          return _linkUrls[run.style.linkIndex - 1];
+        if (x >= DocumentSidePadding + run.x && x < DocumentSidePadding + run.x + run.width) {
+          if (run.style.linkIndex && run.style.linkIndex <= _linkCount) {
+            return _linkUrls[run.style.linkIndex - 1];
+          }
+          if (run.image && run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
+            return _embeddedImages[run.imageIndex].url;
+          }
         }
       }
       return "";
@@ -1626,6 +1825,7 @@ bool BrowserScreen::openUrl(const String &value, bool addToHistory, bool addToRe
 
 bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHistory,
                                 bool addToRecent, bool useSessionCache) {
+  _menuOpen = false;
   const bool hadDocument = !_showStart && _currentUrl.length() > 0;
   const String previousUrl = _currentUrl;
   String url;
@@ -2102,8 +2302,9 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
   bool defaultPort = (url.scheme == "http" && url.port == 80) || (url.scheme == "https" && url.port == 443);
   if (!defaultPort) hostHeader += ":" + String(url.port);
   const bool post = method == HttpMethod::Post;
+  const char *userAgent = _androidUserAgent ? MobileUserAgent : EspUserAgent;
   String request = String(post ? "POST" : "GET") + " " + url.path + " HTTP/1.1\r\nHost: " + hostHeader +
-                   "\r\nUser-Agent: " + MobileUserAgent + "\r\nAccept: text/html,*/*;q=0.1\r\n"
+                   "\r\nUser-Agent: " + userAgent + "\r\nAccept: text/html,*/*;q=0.1\r\n"
                    "Accept-Encoding: identity\r\nConnection: close\r\n";
   if (post) {
     request += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
@@ -2949,22 +3150,21 @@ void BrowserScreen::renderDocument(const String &html) {
       } else if (tag == "br") {
         appendBreak();
       } else if (tag == "img") {
-        String alt = decodeEntities(attributeValue(attributes, "alt"));
         String source = decodeEntities(attributeValue(attributes, "src"));
         TextStyle imageStyle = styledForTag(tag, attributes);
         const uint16_t imageBackground = imageStyle.hasBackground ? imageStyle.backgroundColor :
           (imageStyle.hasBlockBackground ? imageStyle.blockBackgroundColor : _documentBackgroundColor);
         int16_t imageIndex = fetchEmbeddedImage(source, imageBackground);
         uint8_t imageLinkIndex = _currentStyle.linkIndex;
-      if (imageLinkIndex == 0 && source.length()) {
-          Url base;
-          String resolved;
-          String normalized;
-          String error;
-          if (parseUrl(_currentUrl, base)) resolved = resolveUrl(base, source);
-          if (normalizeUrl(resolved, normalized, error)) imageLinkIndex = registerLink(normalized);
-        }
-        appendImage(alt.length() ? alt : "image", imageStyle, imageLinkIndex != 0,
+        // An image source already lives in its bounded EmbeddedImage entry.
+        // Do not also copy every source URL into the general link table: an
+        // image-heavy page otherwise keeps two independently allocated String
+        // copies per image while the page body and TLS buffers are still live.
+        // The tap handler falls back to image.url when this image is not
+        // inside an anchor, preserving direct-image navigation.
+        const bool hasDirectImageLink = imageIndex >= 0;
+        appendImage("", imageStyle,
+                    imageLinkIndex != 0 || hasDirectImageLink,
                     imageLinkIndex, imageStyle.fullWidthImage, imageIndex);
       } else if (tag == "audio" || tag == "video" || tag == "source") {
         String source = decodeEntities(attributeValue(attributes, "src"));
@@ -3083,6 +3283,10 @@ void BrowserScreen::appendBreak() {
 
 void BrowserScreen::appendImage(const String &label, const TextStyle &sourceStyle, bool linked,
                                 uint8_t linkIndex, bool fullWidth, int16_t imageIndex) {
+  // Image labels from the web are untrusted and can be unexpectedly large.
+  // Keep placeholders allocation-free: the image record already owns the URL
+  // needed for jobs and direct taps, while the UI uses a fixed label.
+  (void)label;
   TextStyle style = sourceStyle;
   style.link = linked;
   style.linkIndex = linkIndex;
@@ -3095,7 +3299,6 @@ void BrowserScreen::appendImage(const String &label, const TextStyle &sourceStyl
   VisualRow &row = _rows[_rowCount++];
   row.image = true;
   row.formControlIndex = -1;
-  row.imageLabel = label;
   row.imageLink = linked;
   row.imageLinkIndex = linkIndex;
   row.imageIndex = imageIndex;
@@ -3105,12 +3308,12 @@ void BrowserScreen::appendImage(const String &label, const TextStyle &sourceStyl
 }
 
 void BrowserScreen::appendInlineImage(const String &label, const TextStyle &style, int16_t imageIndex) {
+  (void)label;
   const int16_t maxWidth = _display.width() - DocumentSidePadding * 2;
   const bool hasImageSlot = imageIndex >= 0 && imageIndex < _embeddedImageCount;
   const bool hasThumbnail = hasImageSlot && _embeddedImages[imageIndex].pixels;
-  String displayLabel = hasThumbnail ? "" : shortImageLabel(label, maxWidth - 26);
   int16_t width = hasThumbnail ? _embeddedImages[imageIndex].width
-                                : imageWidth(displayLabel);
+                                : imageWidth("");
   beginTextRow();
   if (_rowCount == 0) return;
 
@@ -3138,7 +3341,6 @@ void BrowserScreen::appendInlineImage(const String &label, const TextStyle &styl
   }
   VisualRun &run = row->runs[row->runCount++];
   run.image = true;
-  run.text = displayLabel;
   run.style = style;
   run.imageIndex = imageIndex;
   run.x = row->contentWidth;
@@ -4458,8 +4660,9 @@ bool BrowserScreen::isBlockTag(const String &tag) const {
 }
 
 int16_t BrowserScreen::imageWidth(const String &label) const {
+  (void)label;
   TextStyle style{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false};
-  return 26 + textWidth(label, style);
+  return 26 + textWidth(ImagePlaceholderLabel, style);
 }
 
 void BrowserScreen::addHistory(const String &url) {
@@ -4492,9 +4695,81 @@ void BrowserScreen::addRecent(const String &url, const String &title) {
   browserLog(String(F("recent site saved: entries=")) + String(_recentCount));
 }
 
+uint8_t BrowserScreen::startSiteCount() const {
+  return _showFavorites ? _favoriteCount : _recentCount;
+}
+
+const BrowserScreen::RecentSite &BrowserScreen::startSiteAt(uint8_t index) const {
+  return _showFavorites ? _favoriteSites[index] : _recentSites[index];
+}
+
+void BrowserScreen::clampStartListScroll() {
+  const uint8_t count = startSiteCount();
+  if (count == 0) {
+    _startListScroll = 0;
+    return;
+  }
+  const uint8_t finalPage = ((count - 1) / StartListVisibleRows) * StartListVisibleRows;
+  if (_startListScroll > finalPage) _startListScroll = finalPage;
+  else _startListScroll = (_startListScroll / StartListVisibleRows) * StartListVisibleRows;
+}
+
+bool BrowserScreen::isFavorite(const String &url) const {
+  if (url.length() == 0) return false;
+  for (uint8_t i = 0; i < _favoriteCount; i++) {
+    if (_favoriteSites[i].url == url) return true;
+  }
+  return false;
+}
+
+void BrowserScreen::addFavorite(const String &url, const String &title) {
+  if (url.length() == 0 || isFavorite(url)) return;
+  if (_favoriteCount >= MaxRecentSites) {
+    browserLog(F("favorite site ignored: list is full"));
+    return;
+  }
+  _favoriteSites[_favoriteCount++] = {url, title};
+  browserLog(String(F("favorite site saved: entries=")) + String(_favoriteCount));
+}
+
+void BrowserScreen::removeFavorite(const String &url) {
+  for (uint8_t i = 0; i < _favoriteCount; i++) {
+    if (_favoriteSites[i].url != url) continue;
+    for (uint8_t next = i + 1; next < _favoriteCount; next++) {
+      _favoriteSites[next - 1] = _favoriteSites[next];
+    }
+    _favoriteCount--;
+    _favoriteSites[_favoriteCount] = {"", ""};
+    clampStartListScroll();
+    browserLog(String(F("favorite site removed: entries=")) + String(_favoriteCount));
+    return;
+  }
+}
+
+void BrowserScreen::toggleFavorite() {
+  if (_currentUrl.length() == 0) return;
+  if (isFavorite(_currentUrl)) removeFavorite(_currentUrl);
+  else addFavorite(_currentUrl, _title);
+  saveState();
+  _menuOpen = false;
+  draw();
+}
+
+void BrowserScreen::toggleUserAgent() {
+  _androidUserAgent = !_androidUserAgent;
+  _menuOpen = false;
+  browserLog(_androidUserAgent ? F("Android user agent enabled") : F("ESP user agent enabled"));
+  // Re-fetch the same URL without touching Browser history or the persistent
+  // recent list, so the changed identity is reflected immediately.
+  openUrl(_currentUrl, false, false, false);
+}
+
 void BrowserScreen::loadState() {
   _recentCount = 0;
+  _favoriteCount = 0;
   _cookieCount = 0;
+  bool recentsTrimmed = false;
+  bool favoritesTrimmed = false;
   if (!_sdCard.isMounted()) {
     browserLog(F("saved state skipped: SD card is not mounted"));
     return;
@@ -4522,8 +4797,18 @@ void BrowserScreen::loadState() {
       if (end < 0) break;
       start = end + 1;
     }
-    if (line[0] == 'R' && fieldCount >= 2 && _recentCount < MaxRecentSites) {
-      _recentSites[_recentCount++] = {decodeField(fields[0]), decodeField(fields[1])};
+    if (line[0] == 'R' && fieldCount >= 2) {
+      if (_recentCount < MaxRecentSites) {
+        _recentSites[_recentCount++] = {decodeField(fields[0]), decodeField(fields[1])};
+      } else {
+        recentsTrimmed = true;
+      }
+    } else if (line[0] == 'F' && fieldCount >= 2) {
+      if (_favoriteCount < MaxRecentSites) {
+        _favoriteSites[_favoriteCount++] = {decodeField(fields[0]), decodeField(fields[1])};
+      } else {
+        favoritesTrimmed = true;
+      }
     } else if (line[0] == 'C' && fieldCount >= 6 && _cookieCount < MaxCookies) {
       Cookie &cookie = _cookies[_cookieCount++];
       cookie.name = decodeField(fields[0]);
@@ -4540,7 +4825,13 @@ void BrowserScreen::loadState() {
   file.close();
   SpiBusLock::unlock();
   pruneCookies();
+  if (recentsTrimmed || favoritesTrimmed) {
+    // Rewrite the state file after releasing the SD lock so obsolete entries
+    // are removed rather than merely hidden by the new seven-site cap.
+    saveState();
+  }
   browserLog(String(F("saved state loaded: recent=")) + String(_recentCount) +
+             F(", favorite=") + String(_favoriteCount) +
              F(", cookies=") + String(_cookieCount));
 }
 
@@ -4570,6 +4861,10 @@ void BrowserScreen::saveState() {
   for (uint8_t i = 0; i < _recentCount; i++) {
     written = written && file.printf("R\t%s\t%s\n", encodeField(_recentSites[i].url).c_str(),
                                      encodeField(_recentSites[i].title).c_str()) > 0;
+  }
+  for (uint8_t i = 0; i < _favoriteCount; i++) {
+    written = written && file.printf("F\t%s\t%s\n", encodeField(_favoriteSites[i].url).c_str(),
+                                     encodeField(_favoriteSites[i].title).c_str()) > 0;
   }
   for (uint8_t i = 0; i < _cookieCount; i++) {
     const Cookie &cookie = _cookies[i];
