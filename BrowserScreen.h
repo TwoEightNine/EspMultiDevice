@@ -48,12 +48,12 @@ private:
   static const uint8_t MaxCssRules = 32;
   static const uint8_t MaxCssSelectorLength = 48;
   static const uint16_t MaxCssDeclarationLength = 256;
-  static const uint8_t MaxPages = 32;
+  static const uint8_t MaxPages = 128;
   // A thumbnail is kept only while there is enough memory for it. The row
   // limit still bounds metadata and placeholders for pathological pages.
   // Retain enough previews for a long article without allowing image-heavy
   // pages to consume the internal heap needed by HTTPS.
-  static const uint16_t MaxEmbeddedImages = 24;
+  static const uint16_t MaxEmbeddedImages = 48;
   static const uint8_t ImageJobQueueLength = 4;
   static const uint8_t LifecycleJobQueueLength = 1;
   static const uint16_t ImageUrlMaxLength = 384;
@@ -63,6 +63,11 @@ private:
   static const uint16_t MaxFormPostBytes = 8UL * 1024UL;
   static const uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
   static const uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
+  // Keep the retained part of an HTTP line small.  Some sites send very
+  // large informational headers (notably Content-Security-Policy); those
+  // can be discarded while continuing to the blank header terminator.
+  static const uint16_t MaxHttpLineBytes = 2048;
+  static const uint8_t MaxResponseHeaderLines = 64;
   static const uint32_t ConnectTimeoutMs = 10000;
   static const uint8_t TlsRetryHandshakeTimeoutSeconds = 15;
   // A stale background image request must never keep a foreground navigation
@@ -228,7 +233,10 @@ private:
     uint8_t width;
     uint8_t height;
     uint16_t backgroundColor;
-    String url;
+    // Image records outlive parsing and worker jobs. Keeping their source as
+    // a fixed buffer avoids long-lived Arduino String state in this shared
+    // array; a corrupted String here previously crashed the dedupe scan.
+    char url[ImageUrlMaxLength];
     uint32_t generation;
     uint8_t state;
   };
@@ -421,7 +429,8 @@ private:
              String &downloadedPath, String &error, uint32_t downloadLimit = MaxDownloadBytes);
   bool requestOne(const Url &url, HttpMethod method, const String &requestBody,
                   HttpResponse &response, WiFiClient *&client, String &error);
-  bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs);
+  bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs,
+                bool discardLongLine = false, bool *lineTruncated = nullptr);
   int readByte(WiFiClient &client, uint32_t timeoutMs);
   bool readBody(WiFiClient &client, bool chunked, int32_t contentLength,
                 String &body, String &error);

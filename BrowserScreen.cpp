@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <esp32-hal-psram.h>
+#include <esp_heap_caps.h>
 
 // JPEGDEC's filesystem overload refers to File without its fs namespace.
 using File = fs::File;
@@ -62,6 +63,31 @@ void browserLog(const String &message) {
   Serial.print(F("[Browser] "));
   Serial.println(message);
 }
+
+// Thumbnail buffers cross from the image worker to the UI task.  Verify that
+// a pointer still belongs to a heap before releasing it: an invalid value must
+// not turn a cancelled page load into an ESP-IDF heap assertion and reboot.
+void freeThumbnailPixels(uint16_t *pixels, const __FlashStringHelper *owner) {
+  if (!pixels) return;
+  if (!heap_caps_check_integrity_addr(reinterpret_cast<intptr_t>(pixels), false)) {
+    browserLog(String(F("thumbnail buffer was not freed: invalid pointer in ")) + owner);
+    return;
+  }
+  free(pixels);
+}
+
+// The TFT, SD card, and image decoders share the SPI bus.  Image decoding
+// runs on the other core, so every Browser display transaction must wait for
+// the same lock used by SD operations before touching the TFT.
+class BrowserDisplayLock {
+public:
+  BrowserDisplayLock() : _locked(SpiBusLock::lock(pdMS_TO_TICKS(100))) {}
+  ~BrowserDisplayLock() { if (_locked) SpiBusLock::unlock(); }
+  bool locked() const { return _locked; }
+
+private:
+  bool _locked;
+};
 
 String trimCopy(const String &value) {
   String result = value;
@@ -288,7 +314,7 @@ private:
       delete _gif;
       _gif = nullptr;
     }
-    if (_pixels) free(_pixels);
+    freeThumbnailPixels(_pixels, F("thumbnail decoder"));
     _pixels = nullptr;
     _width = _height = 0;
   }
@@ -590,7 +616,8 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _menuAgentBounds{0, 0, 0, 0},
     _menuFavoriteBounds{0, 0, 0, 0} {
   for (uint16_t i = 0; i < MaxEmbeddedImages; i++) {
-    _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
+    _embeddedImages[i] = {};
+    _embeddedImages[i].backgroundColor = TFT_WHITE;
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _startSiteBounds[i] = {0, 0, 0, 0};
@@ -911,6 +938,11 @@ void BrowserScreen::layout() {
 
 void BrowserScreen::draw() {
   if (!_display.isReady()) return;
+  BrowserDisplayLock lock;
+  if (!lock.locked()) {
+    browserLog(F("display update deferred: SPI bus is busy"));
+    return;
+  }
   layout();
   TFT_eSPI &tft = _display.tft();
   BrowserText::begin(tft);
@@ -1133,6 +1165,8 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
 
 void BrowserScreen::redrawDocument() {
   if (!_display.isReady()) return;
+  BrowserDisplayLock lock;
+  if (!lock.locked()) return;
   BrowserText::begin(_display.tft());
   drawDocument();
   BrowserText::end(_display.tft());
@@ -1185,6 +1219,8 @@ void BrowserScreen::drawControls() {
 }
 
 void BrowserScreen::drawPageControls() {
+  BrowserDisplayLock lock;
+  if (!lock.locked()) return;
   TFT_eSPI &tft = _display.tft();
   const Rect buttons[] = {_previousBounds, _nextBounds};
   for (uint8_t index = 0; index < 2; index++) {
@@ -1263,6 +1299,8 @@ void BrowserScreen::refreshLoadingDisplay(bool force) {
   if (!force && now - _lastLoadingDrawMs < 125 && _loadingBytes - _lastLoadingDrawBytes < 4096) return;
   _lastLoadingDrawMs = now;
   _lastLoadingDrawBytes = _loadingBytes;
+  BrowserDisplayLock lock;
+  if (!lock.locked()) return;
   drawLoadingPanel(force, false);
 }
 
@@ -1348,7 +1386,7 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
           return _linkUrls[row.imageLinkIndex - 1];
         }
         if (row.imageIndex >= 0 && row.imageIndex < _embeddedImageCount) {
-          return _embeddedImages[row.imageIndex].url;
+          return String(_embeddedImages[row.imageIndex].url);
         }
         return "";
       }
@@ -1359,7 +1397,7 @@ String BrowserScreen::documentLinkAt(int16_t x, int16_t y) const {
             return _linkUrls[run.style.linkIndex - 1];
           }
           if (run.image && run.imageIndex >= 0 && run.imageIndex < _embeddedImageCount) {
-            return _embeddedImages[run.imageIndex].url;
+            return String(_embeddedImages[run.imageIndex].url);
           }
         }
       }
@@ -2365,15 +2403,27 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
   response.contentType = "";
   response.contentDisposition = "";
   response.location = "";
-  for (uint8_t count = 0; count < 48; count++) {
-    if (!readLine(*client, line, ConnectTimeoutMs)) {
-      browserLog(String(F("response headers timed out: host=")) + url.host + F(", headerCount=") +
-                 String(count) + F(", timeoutMs=") + String(ConnectTimeoutMs) + F(", ") + clientState(*client));
+  bool headersComplete = false;
+  for (uint8_t count = 0; count < MaxResponseHeaderLines; count++) {
+    bool lineTruncated = false;
+    if (!readLine(*client, line, ConnectTimeoutMs, true, &lineTruncated)) {
+      browserLog(String(F("response header read failed: host=")) + url.host + F(", headerCount=") +
+                 String(count) + F(", retainedLineBytes=") + String(line.length()) + F(", timeoutMs=") +
+                 String(ConnectTimeoutMs) + F(", ") + clientState(*client));
       client->stop();
       error = "Response headers timed out";
       return false;
     }
-    if (line.length() == 0) break;
+    if (lineTruncated) {
+      browserLog(String(F("discarded oversized response header: host=")) + url.host + F(", headerCount=") +
+                 String(count) + F(", retainedBytes=") + String(line.length()) + F(", maxBytes=") +
+                 String(MaxHttpLineBytes));
+      continue;
+    }
+    if (line.length() == 0) {
+      headersComplete = true;
+      break;
+    }
     int colon = line.indexOf(':');
     if (colon <= 0) continue;
     String name = lower(trimCopy(line.substring(0, colon)));
@@ -2386,6 +2436,13 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
     else if (name == "location") response.location = headerValue;
     else if (name == "set-cookie") acceptCookie(headerValue, url);
   }
+  if (!headersComplete) {
+    browserLog(String(F("too many response headers: host=")) + url.host + F(", limit=") +
+               String(MaxResponseHeaderLines) + F(", ") + clientState(*client));
+    client->stop();
+    error = "Too many response headers";
+    return false;
+  }
   browserLog(String(F("headers complete: length=")) + String(response.contentLength) +
              F(", type=") + (response.contentType.length() ? response.contentType : String(F("unspecified"))) +
              (response.contentDisposition.length() ? String(F(", disposition=")) + response.contentDisposition
@@ -2395,8 +2452,11 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
   return true;
 }
 
-bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutMs) {
+bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutMs,
+                             bool discardLongLine, bool *lineTruncated) {
   line = "";
+  if (lineTruncated) *lineTruncated = false;
+  bool truncated = false;
   uint32_t started = millis();
   while (millis() - started < timeoutMs) {
     if (pollLoadingCancel()) return false;
@@ -2405,13 +2465,22 @@ bool BrowserScreen::readLine(WiFiClient &client, String &line, uint32_t timeoutM
       int value = client.read();
       if (value < 0) continue;
       if (value == '\n') {
-        if (line.endsWith("\r")) line.remove(line.length() - 1);
+        if (!truncated && line.endsWith("\r")) line.remove(line.length() - 1);
+        if (lineTruncated) *lineTruncated = truncated;
         return true;
       }
-      if (line.length() >= 2048) return false;
+      if (truncated) continue;
+      if (line.length() >= MaxHttpLineBytes) {
+        if (!discardLongLine) return false;
+        truncated = true;
+        continue;
+      }
       line += (char)value;
     }
-    if (!client.connected() && !client.available()) return line.length() > 0;
+    if (!client.connected() && !client.available()) {
+      if (lineTruncated) *lineTruncated = truncated;
+      return line.length() > 0;
+    }
     delay(1);
     yield();
   }
@@ -3667,7 +3736,8 @@ void BrowserScreen::drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) cons
   if (imageIndex < 0 || imageIndex >= _embeddedImageCount) return;
   const EmbeddedImage &image = _embeddedImages[imageIndex];
   if (!image.pixels || !image.width || !image.height) return;
-  _display.tft().pushImage(x, y, image.width, image.height, image.pixels);
+  uint16_t *pixels = image.pixels;
+  _display.tft().pushImage(x, y, image.width, image.height, pixels);
 }
 
 void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
@@ -3740,12 +3810,16 @@ int16_t BrowserScreen::fetchEmbeddedImage(const String &source, uint16_t backgro
   // Reuse a preview only when it will be composited against the same page
   // color; transparent PNG/GIF pixels are resolved by the worker.
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
-    if (_embeddedImages[i].generation == _imageGeneration && _embeddedImages[i].url == url &&
+    if (_embeddedImages[i].generation == _imageGeneration && strcmp(_embeddedImages[i].url, url.c_str()) == 0 &&
         _embeddedImages[i].backgroundColor == backgroundColor) return i;
   }
 
   const uint16_t index = _embeddedImageCount++;
-  _embeddedImages[index] = {nullptr, 0, 0, backgroundColor, url, _imageGeneration, 0};
+  EmbeddedImage &image = _embeddedImages[index];
+  image = {};
+  image.backgroundColor = backgroundColor;
+  image.generation = _imageGeneration;
+  url.toCharArray(image.url, sizeof(image.url));
   browserLog(String(F("image placeholder registered #")) + String(index + 1));
   return index;
 }
@@ -3817,7 +3891,7 @@ bool BrowserScreen::fetchEmbeddedImageOnWorker(const String &url, uint16_t backg
   }
   if (!decoded || !pixels || !width || !height) {
     if (cachedSource) discardSessionImage(url);
-    if (pixels) free(pixels);
+    freeThumbnailPixels(pixels, F("image decode failure"));
     pixels = nullptr;
     return false;
   }
@@ -3849,13 +3923,14 @@ void BrowserScreen::releaseEmbeddedImages() {
   if (_imageResults) {
     ImageResult result{};
     while (xQueueReceive(_imageResults, &result, 0) == pdTRUE) {
-      if (result.pixels) free(result.pixels);
+      freeThumbnailPixels(result.pixels, F("cancelled result queue"));
     }
   }
 
   for (uint16_t i = 0; i < _embeddedImageCount; i++) {
-    if (_embeddedImages[i].pixels) free(_embeddedImages[i].pixels);
-    _embeddedImages[i] = {nullptr, 0, 0, TFT_WHITE, "", 0, 0};
+    freeThumbnailPixels(_embeddedImages[i].pixels, F("cancelled preview"));
+    _embeddedImages[i] = {};
+    _embeddedImages[i].backgroundColor = TFT_WHITE;
   }
   _embeddedImageCount = 0;
   _nextImageToQueue = 0;
@@ -3886,7 +3961,7 @@ void BrowserScreen::pumpImageJobs() {
   while (_nextImageToQueue < _embeddedImageCount) {
     EmbeddedImage &image = _embeddedImages[_nextImageToQueue];
     const uint16_t index = _nextImageToQueue++;
-    if (image.state != 0 || image.generation != _imageGeneration || image.url.length() >= ImageUrlMaxLength) continue;
+    if (image.state != 0 || image.generation != _imageGeneration || image.url[0] == '\0') continue;
     ImageJob job{};
     job.imageIndex = index;
     job.generation = image.generation;
@@ -3894,7 +3969,7 @@ void BrowserScreen::pumpImageJobs() {
     // The image cache belongs to the browser session, not one cached page.
     // A shared icon on the next site can therefore decode locally too.
     job.useSessionCache = _sessionCacheActive;
-    image.url.toCharArray(job.url, sizeof(job.url));
+    memcpy(job.url, image.url, sizeof(job.url));
     if (xQueueSend(_imageJobs, &job, 0) != pdTRUE) {
       _nextImageToQueue--;
       return;
@@ -3929,7 +4004,7 @@ void BrowserScreen::collectImageResults() {
         browserLog(String(F("image preview failed #")) + String(result.imageIndex + 1));
       }
     }
-    if (result.pixels) free(result.pixels);
+    freeThumbnailPixels(result.pixels, F("stale image result"));
   }
   if (redraw && !_deferCachedPageDraw && !_showStart && _message.length() == 0) {
     updateImageLayout();
@@ -3938,7 +4013,10 @@ void BrowserScreen::collectImageResults() {
     // avoids a perceptible flash while images below or above this page load.
     if (redrawCurrentPage) redrawDocument();
   }
-  if (wasLoading != isLoading() && !_showStart) drawControls();
+  if (wasLoading != isLoading() && !_showStart) {
+    BrowserDisplayLock lock;
+    if (lock.locked()) drawControls();
+  }
 }
 
 bool BrowserScreen::cachedPageImagesComplete() const {
@@ -3987,7 +4065,7 @@ void BrowserScreen::imageWorkerTask(void *context) {
     // Keep the buffer on this worker in that case; the UI thread has already
     // released the old document and must never receive it.
     if (job.generation != screen->_imageGeneration) {
-      if (result.pixels) free(result.pixels);
+      freeThumbnailPixels(result.pixels, F("cancelled worker result"));
       continue;
     }
 
@@ -3995,7 +4073,7 @@ void BrowserScreen::imageWorkerTask(void *context) {
     // the queue is full while the user navigates away.
     while (xQueueSend(screen->_imageResults, &result, pdMS_TO_TICKS(50)) != pdTRUE) {
       if (job.generation != screen->_imageGeneration) {
-        if (result.pixels) free(result.pixels);
+        freeThumbnailPixels(result.pixels, F("cancelled queued result"));
         result.pixels = nullptr;
         break;
       }

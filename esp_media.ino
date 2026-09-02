@@ -244,7 +244,7 @@ void setup() {
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
-  workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker);
+  workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));

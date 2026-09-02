@@ -14,9 +14,11 @@ const uint16_t StageProgressColor = TFT_CYAN;
 WorkoutScreen::WorkoutScreen(Navigator &navigator,
                              TouchController &touch,
                              DisplayController &display,
-                             SpeakerController &speaker)
+                             SpeakerController &speaker,
+                             AudioSettings &audioSettings)
   : Screen(navigator, touch, display),
     _speaker(speaker),
+    _audioSettings(audioSettings),
     _mode(Mode::Setup),
     _stage(Stage::Init),
     _workoutSeconds(25),
@@ -30,7 +32,13 @@ WorkoutScreen::WorkoutScreen(Navigator &navigator,
     _stageElapsedBeforePauseMs(0),
     _totalStartedMs(0),
     _totalElapsedBeforePauseMs(0),
-    _lastDrawMs(0),
+    _workoutFrameDrawn(false),
+    _drawnStage(Stage::Init),
+    _drawnCycleIndex(0),
+    _drawnTotalSeconds(0xffffffffUL),
+    _drawnStageSeconds(0xffff),
+    _drawnProgress(0xff),
+    _drawnPaused(false),
     _initToneSecond(0),
     _workoutFirstThirdTonePlayed(false),
     _workoutSecondThirdTonePlayed(false),
@@ -79,16 +87,24 @@ void WorkoutScreen::handleTouch(const TouchPoint &point) {
       startWorkout(millis());
     } else if (_workoutMinusButton.contains(point.x, point.y) && _workoutSeconds > MinDurationSeconds) {
       _workoutSeconds -= DurationStepSeconds;
-      drawSetup();
+      drawStepperValue(_workoutSeconds, _workoutMinusButton);
     } else if (_workoutPlusButton.contains(point.x, point.y) && _workoutSeconds < MaxDurationSeconds) {
       _workoutSeconds += DurationStepSeconds;
-      drawSetup();
+      drawStepperValue(_workoutSeconds, _workoutMinusButton);
     } else if (_restMinusButton.contains(point.x, point.y) && _restSeconds > MinDurationSeconds) {
       _restSeconds -= DurationStepSeconds;
-      drawSetup();
+      drawStepperValue(_restSeconds, _restMinusButton);
     } else if (_restPlusButton.contains(point.x, point.y) && _restSeconds < MaxDurationSeconds) {
       _restSeconds += DurationStepSeconds;
-      drawSetup();
+      drawStepperValue(_restSeconds, _restMinusButton);
+    } else if (_volumeMinusButton.contains(point.x, point.y) &&
+               _audioSettings.volume() > AudioSettings::MinVolume) {
+      _audioSettings.setVolume(_audioSettings.volume() - 1);
+      drawStepperValue(_audioSettings.volume(), _volumeMinusButton);
+    } else if (_volumePlusButton.contains(point.x, point.y) &&
+               _audioSettings.volume() < AudioSettings::MaxVolume) {
+      _audioSettings.setVolume(_audioSettings.volume() + 1);
+      drawStepperValue(_audioSettings.volume(), _volumeMinusButton);
     }
     return;
   }
@@ -107,9 +123,7 @@ void WorkoutScreen::tick(uint32_t nowMs) {
     serviceTone();
   }
 
-  if (_lastDrawMs == 0 || nowMs - _lastDrawMs >= 100) {
-    drawWorkout(false);
-  }
+  drawWorkoutDynamic(nowMs, false);
 }
 
 void WorkoutScreen::layout() {
@@ -118,11 +132,14 @@ void WorkoutScreen::layout() {
   const int16_t stepperButtonWidth = 72;
   const int16_t stepperButtonHeight = 42;
 
-  _startButton = { ButtonMargin, 64, (int16_t)(width - ButtonMargin * 2), ButtonHeight };
-  _workoutMinusButton = { (int16_t)(centerX - 142), 170, stepperButtonWidth, stepperButtonHeight };
-  _workoutPlusButton = { (int16_t)(centerX + 70), 170, stepperButtonWidth, stepperButtonHeight };
-  _restMinusButton = { (int16_t)(centerX - 142), 242, stepperButtonWidth, stepperButtonHeight };
-  _restPlusButton = { (int16_t)(centerX + 70), 242, stepperButtonWidth, stepperButtonHeight };
+  _workoutMinusButton = { (int16_t)(centerX - 142), 72, stepperButtonWidth, stepperButtonHeight };
+  _workoutPlusButton = { (int16_t)(centerX + 70), 72, stepperButtonWidth, stepperButtonHeight };
+  _restMinusButton = { (int16_t)(centerX - 142), 132, stepperButtonWidth, stepperButtonHeight };
+  _restPlusButton = { (int16_t)(centerX + 70), 132, stepperButtonWidth, stepperButtonHeight };
+  _volumeMinusButton = { (int16_t)(centerX - 142), 192, stepperButtonWidth, stepperButtonHeight };
+  _volumePlusButton = { (int16_t)(centerX + 70), 192, stepperButtonWidth, stepperButtonHeight };
+  _startButton = { ButtonMargin, (int16_t)(_display.height() - ButtonHeight - 16),
+                   (int16_t)(width - ButtonMargin * 2), ButtonHeight };
   _pauseButton = { ButtonMargin, (int16_t)(_display.height() - ButtonHeight - 16),
                    (int16_t)(width - ButtonMargin * 2), ButtonHeight };
 }
@@ -130,7 +147,10 @@ void WorkoutScreen::layout() {
 void WorkoutScreen::draw() {
   layout();
   if (_mode == Mode::Setup) drawSetup();
-  else drawWorkout(true);
+  else {
+    drawWorkoutStatic();
+    drawWorkoutDynamic(millis(), true);
+  }
 }
 
 void WorkoutScreen::drawSetup() {
@@ -140,9 +160,10 @@ void WorkoutScreen::drawSetup() {
   TFT_eSPI &tft = _display.tft();
   tft.fillScreen(TFT_BLACK);
   UiKit::drawTopAppBar(tft, _display.width(), F("Workout"));
-  drawButton(_startButton, F("Start"), PrimaryButtonColor);
   drawStepper(F("workout"), _workoutSeconds, _workoutMinusButton, _workoutPlusButton);
   drawStepper(F("rest"), _restSeconds, _restMinusButton, _restPlusButton);
+  drawStepper(F("volume"), _audioSettings.volume(), _volumeMinusButton, _volumePlusButton);
+  drawButton(_startButton, F("Start"), PrimaryButtonColor);
 }
 
 void WorkoutScreen::drawStepper(const String &label,
@@ -158,54 +179,104 @@ void WorkoutScreen::drawStepper(const String &label,
                UiText::Size::Compact, MC_DATUM);
   drawButton(minus, F("-"), SecondaryButtonColor);
   drawButton(plus, F("+"), SecondaryButtonColor);
+  drawStepperValue(value, minus);
+}
+
+void WorkoutScreen::drawStepperValue(uint16_t value, const Button &minus) {
+  if (!_display.isReady()) return;
+
+  TFT_eSPI &tft = _display.tft();
+  const int16_t centerX = _display.width() / 2;
+  const int16_t buttonCenterY = minus.y + minus.h / 2;
+  // The value is isolated between the two fixed +/- targets, so changing it
+  // cannot disturb an in-progress touch on either control.
+  tft.fillRect(centerX - 66, minus.y, 132, minus.h, TFT_BLACK);
   UiText::draw(tft, String(value), centerX, buttonCenterY, TFT_WHITE, TFT_BLACK,
                UiText::Size::Title, MC_DATUM);
 }
 
-void WorkoutScreen::drawWorkout(bool staticFrame) {
+void WorkoutScreen::drawWorkoutStatic() {
   if (!_display.isReady()) return;
 
   layout();
   TFT_eSPI &tft = _display.tft();
-  if (staticFrame) {
-    tft.fillScreen(TFT_BLACK);
-    UiKit::drawTopAppBar(tft, _display.width(), F("Workout"));
+  tft.fillScreen(TFT_BLACK);
+  UiKit::drawTopAppBar(tft, _display.width(), F("Workout"));
+  _workoutFrameDrawn = false;
+}
+
+void WorkoutScreen::drawWorkoutDynamic(uint32_t nowMs, bool force) {
+  if (!_display.isReady() || _mode != Mode::Workout) return;
+  if (!_workoutFrameDrawn) force = true;
+
+  TFT_eSPI &tft = _display.tft();
+  const uint32_t totalSeconds = totalElapsed(nowMs) / 1000UL;
+  const uint16_t currentStageSeconds = shownStageSeconds(nowMs);
+  const uint8_t currentProgress = stageProgress(nowMs);
+  const bool stageChanged = force || _drawnStage != _stage;
+
+  if (force || _drawnTotalSeconds != totalSeconds) {
+    tft.fillRect(0, 54, _display.width(), 18, TFT_BLACK);
+    String total = F("Total ");
+    total += formatTotalTime(totalSeconds * 1000UL);
+    UiText::draw(tft, total, _display.width() / 2, 63, TFT_LIGHTGREY, TFT_BLACK,
+                 UiText::Size::Compact, MC_DATUM);
   }
 
-  const int16_t contentBottom = _pauseButton.y - 12;
-  tft.fillRect(0, UiKit::AppBarHeight, _display.width(),
-               contentBottom - UiKit::AppBarHeight, TFT_BLACK);
+  if (force || _drawnCycleIndex != _cycleIndex) {
+    tft.fillRect(0, 73, _display.width(), 22, TFT_BLACK);
+    String cycle = F("Cycle ");
+    cycle += _cycleIndex;
+    UiText::draw(tft, cycle, _display.width() / 2, 84, TFT_LIGHTGREY, TFT_BLACK,
+                 UiText::Size::Content, MC_DATUM);
+  }
 
-  const uint32_t nowMs = millis();
-  const uint32_t stageElapsedMs = elapsedInStage(nowMs);
-  const uint32_t durationMs = stageDurationMs();
-  const uint32_t shownStageMs = _stage == Stage::Init && stageElapsedMs < durationMs
-    ? durationMs - stageElapsedMs : stageElapsedMs;
+  if (stageChanged) {
+    tft.fillRect(0, 97, _display.width(), 24, TFT_BLACK);
+    UiText::draw(tft, String(stageName()), _display.width() / 2, 109, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Content, MC_DATUM);
+  }
 
-  String total = F("Total ");
-  total += formatTime(totalElapsed(nowMs), true);
-  UiText::draw(tft, total, _display.width() / 2, 76, TFT_LIGHTGREY, TFT_BLACK,
-               UiText::Size::Compact, MC_DATUM);
+  if (force || _drawnStageSeconds != currentStageSeconds) {
+    drawStageSeconds(currentStageSeconds);
+  }
 
-  String cycle = F("Cycle ");
-  cycle += _cycleIndex;
-  UiText::draw(tft, cycle, _display.width() / 2, 104, TFT_LIGHTGREY, TFT_BLACK,
-               UiText::Size::Content, MC_DATUM);
+  if (force || _drawnProgress != currentProgress) {
+    const int16_t barX = ButtonMargin;
+    const int16_t barY = 205;
+    const int16_t barWidth = _display.width() - ButtonMargin * 2;
+    if (force || stageChanged) {
+      UiKit::drawProgressBar(tft, barX, barY, barWidth, 14, currentProgress, false,
+                             StageProgressColor, TFT_DARKGREY, TFT_BLACK, true);
+    } else {
+      UiKit::updateProgressBar(tft, barX, barY, barWidth, 14, _drawnProgress, currentProgress,
+                               StageProgressColor, TFT_BLACK);
+    }
+  }
 
-  UiText::draw(tft, String(stageName()), _display.width() / 2, 143, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Title, MC_DATUM);
-  UiText::draw(tft, formatTime(shownStageMs), _display.width() / 2, 178, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Title, MC_DATUM);
+  if (force || _drawnPaused != _paused) {
+    drawButton(_pauseButton, _paused ? F("Continue") : F("Pause"),
+               _paused ? PrimaryButtonColor : SecondaryButtonColor);
+  }
 
-  const int16_t barX = ButtonMargin;
-  const int16_t barY = 205;
-  const int16_t barWidth = _display.width() - ButtonMargin * 2;
-  UiKit::drawProgressBar(tft, barX, barY, barWidth, 14, stageProgress(nowMs), false,
-                         StageProgressColor, TFT_DARKGREY, TFT_BLACK, true);
+  _workoutFrameDrawn = true;
+  _drawnStage = _stage;
+  _drawnCycleIndex = _cycleIndex;
+  _drawnTotalSeconds = totalSeconds;
+  _drawnStageSeconds = currentStageSeconds;
+  _drawnProgress = currentProgress;
+  _drawnPaused = _paused;
+}
 
-  drawButton(_pauseButton, _paused ? F("Continue") : F("Pause"),
-             _paused ? PrimaryButtonColor : SecondaryButtonColor);
-  _lastDrawMs = nowMs;
+void WorkoutScreen::drawStageSeconds(uint16_t seconds) {
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(0, 122, _display.width(), 74, TFT_BLACK);
+  tft.setTextFont(8);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawNumber(seconds, _display.width() / 2, 157);
+  tft.setTextFont(1);
+  tft.setTextDatum(TL_DATUM);
 }
 
 void WorkoutScreen::drawButton(const Button &button, const String &label, uint16_t fill) {
@@ -229,8 +300,9 @@ void WorkoutScreen::startWorkout(uint32_t nowMs) {
   _totalElapsedBeforePauseMs = 0;
   _audioAvailable = _speaker.start(ToneSampleRate);
   resetStageToneCues();
-  _lastDrawMs = 0;
-  drawWorkout(true);
+  _workoutFrameDrawn = false;
+  drawWorkoutStatic();
+  drawWorkoutDynamic(millis(), true);
 }
 
 void WorkoutScreen::cancelWorkout() {
@@ -254,7 +326,7 @@ void WorkoutScreen::togglePause(uint32_t nowMs) {
     _paused = true;
     clearTones();
   }
-  drawWorkout(false);
+  drawWorkoutDynamic(nowMs, false);
 }
 
 void WorkoutScreen::advanceStages(uint32_t nowMs) {
@@ -396,10 +468,10 @@ const char *WorkoutScreen::stageName() const {
   return "Rest";
 }
 
-String WorkoutScreen::formatTime(uint32_t elapsedMs, bool hoursWhenNeeded) const {
+String WorkoutScreen::formatTotalTime(uint32_t elapsedMs) const {
   const uint32_t seconds = elapsedMs / 1000UL;
   char buffer[12];
-  if (hoursWhenNeeded && seconds >= 3600UL) {
+  if (seconds >= 3600UL) {
     snprintf(buffer, sizeof(buffer), "%lu:%02lu:%02lu",
              (unsigned long)(seconds / 3600UL),
              (unsigned long)((seconds / 60UL) % 60UL),
@@ -409,6 +481,16 @@ String WorkoutScreen::formatTime(uint32_t elapsedMs, bool hoursWhenNeeded) const
              (unsigned long)(seconds / 60UL), (unsigned long)(seconds % 60UL));
   }
   return String(buffer);
+}
+
+uint16_t WorkoutScreen::shownStageSeconds(uint32_t nowMs) const {
+  const uint32_t elapsedMs = elapsedInStage(nowMs);
+  const uint32_t durationMs = stageDurationMs();
+  if (_stage == Stage::Init) {
+    const uint32_t remainingMs = elapsedMs >= durationMs ? 0 : durationMs - elapsedMs;
+    return (uint16_t)((remainingMs + 999UL) / 1000UL);
+  }
+  return (uint16_t)(elapsedMs / 1000UL);
 }
 
 uint8_t WorkoutScreen::stageProgress(uint32_t nowMs) const {

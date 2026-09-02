@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "AudioSettings.h"
 #include "Screen.h"
 #include "SpeakerController.h"
 
@@ -10,7 +11,8 @@ public:
   WorkoutScreen(Navigator &navigator,
                 TouchController &touch,
                 DisplayController &display,
-                SpeakerController &speaker);
+                SpeakerController &speaker,
+                AudioSettings &audioSettings);
 
   void onEnter() override;
   void onExit() override;
@@ -46,6 +48,7 @@ private:
   static const uint8_t ToneQueueCapacity = 8;
 
   SpeakerController &_speaker;
+  AudioSettings &_audioSettings;
   Mode _mode;
   Stage _stage;
   uint16_t _workoutSeconds;
@@ -59,7 +62,13 @@ private:
   uint32_t _stageElapsedBeforePauseMs;
   uint32_t _totalStartedMs;
   uint32_t _totalElapsedBeforePauseMs;
-  uint32_t _lastDrawMs;
+  bool _workoutFrameDrawn;
+  Stage _drawnStage;
+  uint32_t _drawnCycleIndex;
+  uint32_t _drawnTotalSeconds;
+  uint16_t _drawnStageSeconds;
+  uint8_t _drawnProgress;
+  bool _drawnPaused;
   uint8_t _initToneSecond;
   bool _workoutFirstThirdTonePlayed;
   bool _workoutSecondThirdTonePlayed;
@@ -77,13 +86,18 @@ private:
   Button _workoutPlusButton;
   Button _restMinusButton;
   Button _restPlusButton;
+  Button _volumeMinusButton;
+  Button _volumePlusButton;
   Button _pauseButton;
 
   void layout();
   void draw();
   void drawSetup();
   void drawStepper(const String &label, uint16_t value, const Button &minus, const Button &plus);
-  void drawWorkout(bool staticFrame);
+  void drawStepperValue(uint16_t value, const Button &minus);
+  void drawWorkoutStatic();
+  void drawWorkoutDynamic(uint32_t nowMs, bool force);
+  void drawStageSeconds(uint16_t seconds);
   void drawButton(const Button &button, const String &label, uint16_t fill);
   void startWorkout(uint32_t nowMs);
   void cancelWorkout();
@@ -98,7 +112,8 @@ private:
   uint32_t totalElapsed(uint32_t nowMs) const;
   uint32_t stageDurationMs() const;
   const char *stageName() const;
-  String formatTime(uint32_t elapsedMs, bool hoursWhenNeeded = false) const;
+  String formatTotalTime(uint32_t elapsedMs) const;
+  uint16_t shownStageSeconds(uint32_t nowMs) const;
   uint8_t stageProgress(uint32_t nowMs) const;
   void resetStageToneCues();
 };
