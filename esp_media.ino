@@ -25,6 +25,7 @@
 #include "VoiceRecorderScreen.h"
 #include "WiFiController.h"
 #include "WiFiScreen.h"
+#include "WorkoutScreen.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
@@ -81,6 +82,7 @@ VideoPlayerScreen *videoPlayerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
+WorkoutScreen *workoutScreen = nullptr;
 
 void updateTouch();
 
@@ -242,6 +244,7 @@ void setup() {
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
+  workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -281,6 +284,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Browser, *browserScreen)) {
     Serial.println(F("Navigator failed to register Browser screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::Workout, *workoutScreen)) {
+    Serial.println(F("Navigator failed to register Workout screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

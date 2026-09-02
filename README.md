@@ -61,6 +61,7 @@ Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding ru
 - `SpeakerController.cpp`: speaker I2S setup and PCM writes.
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
+- `WorkoutScreen.h` / `WorkoutScreen.cpp`: configurable interval workout timer with audible stage cues.
 - `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
 - `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, WebP, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
 - `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.

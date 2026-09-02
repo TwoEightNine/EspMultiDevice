@@ -19,12 +19,13 @@ enum class ScreenId : uint8_t {
   VideoPlayer,
   TextInput,
   Browser,
-  AudioSettings
+  AudioSettings,
+  Workout
 };
 
 class Navigator {
 public:
-  static const uint8_t MaxScreens = 13;
+  static const uint8_t MaxScreens = 14;
   static const uint8_t MaxStackDepth = 8;
 
   Navigator();

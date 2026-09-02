@@ -22,7 +22,7 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t AppCount = 4;
+  static const uint8_t AppCount = 5;
   static const uint8_t AppColumns = 3;
   static const int16_t StatusBarHeight = 24;
   static const int16_t IconDiameter = 80;
@@ -33,7 +33,8 @@ private:
     Files,
     Recorder,
     Settings,
-    Browser
+    Browser,
+    Workout
   };
 
   struct AppTile {

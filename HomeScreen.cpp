@@ -37,6 +37,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
   _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
   _apps[2] = { "Settings", AppAction::Settings, TFT_DARKGREEN, nullptr, 0, 0, 0, 0 };
   _apps[3] = { "Browser", AppAction::Browser, TFT_CYAN, nullptr, 0, 0, 0, 0 };
+  _apps[4] = { "Workout", AppAction::Workout, TFT_ORANGE, nullptr, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -82,6 +83,8 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::Settings);
     } else if (app.action == AppAction::Browser) {
       _navigator.push(ScreenId::Browser);
+    } else if (app.action == AppAction::Workout) {
+      _navigator.push(ScreenId::Workout);
     }
     return;
   }
