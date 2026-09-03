@@ -578,6 +578,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _sessionCacheActive(false),
     _sessionCacheInitialized(false),
     _usingSessionPage(false),
+    _downloadReturnUrl(),
     _deferCachedPageDraw(false),
     _deferCachedPageDrawStartedMs(0),
     _sessionCacheBytes(0),
@@ -596,6 +597,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _lifecycleJobs(xQueueCreate(LifecycleJobQueueLength, sizeof(LifecycleJob))),
     _lifecycleWorker(nullptr),
     _httpMutex(xSemaphoreCreateMutex()),
+    _sessionCacheMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
     _currentStyle{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false},
     _styleDepth(0),
@@ -621,6 +623,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
   }
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _startSiteBounds[i] = {0, 0, 0, 0};
+    _startRemoveBounds[i] = {0, 0, 0, 0};
   }
   resetSessionCacheEntries();
   if (_imageJobs && _imageResults) {
@@ -659,6 +662,24 @@ void BrowserScreen::onEnter() {
   // other core; this avoids holding the Home screen during Browser entry.
   if ((!_sessionCacheActive || !_loaded) && !_lifecycleLoading) startLifecycleLoad();
   draw();
+}
+
+void BrowserScreen::onResume() {
+  _lastTouchDown = false;
+  if (_downloadReturnUrl.length() == 0) {
+    onEnter();
+    return;
+  }
+
+  const String sourceUrl = _downloadReturnUrl;
+  _downloadReturnUrl = "";
+  browserLog(String(F("restoring download source from session cache: ")) + sourceUrl);
+  // A download is not a browser page.  Reopen the document that initiated it
+  // without changing history; openUrl() uses the retained session copy first
+  // and only falls back to the network if that copy is unavailable.
+  if (!openUrl(sourceUrl, false, false, true)) {
+    browserLog(F("could not restore download source"));
+  }
 }
 
 void BrowserScreen::onResult(const ScreenResult &result) {
@@ -730,7 +751,7 @@ void BrowserScreen::lifecycleWorkerTask(void *context) {
     screen->_sessionCacheActive = true;
     screen->_sessionCacheInitialized = false;
     {
-      HttpLock lock(screen->_httpMutex);
+      HttpLock lock(screen->_sessionCacheMutex);
       if (lock.locked() && job.generation == screen->_lifecycleGeneration) {
         screen->_sessionCacheInitialized = screen->clearSessionCacheLocked();
       }
@@ -782,6 +803,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     endSessionCache();
     _historyCount = 0;
     _currentUrl = "";
+    _downloadReturnUrl = "";
     _title = "";
     _message = "";
     _rowCount = 0;
@@ -794,7 +816,6 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _navigator.pop();
     return;
   }
-  if (_lifecycleLoading) return;
   if (!_showStart && contains(_menuBounds, point.x, point.y)) {
     _menuOpen = true;
     draw();
@@ -834,14 +855,14 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     draw();
     return;
   }
-  if (_showStart && contains(_startPreviousBounds, point.x, point.y)) {
+  if (_showStart && !_lifecycleLoading && contains(_startPreviousBounds, point.x, point.y)) {
     if (_startListScroll > 0) {
       _startListScroll -= StartListVisibleRows;
       draw();
     }
     return;
   }
-  if (_showStart && contains(_startNextBounds, point.x, point.y)) {
+  if (_showStart && !_lifecycleLoading && contains(_startNextBounds, point.x, point.y)) {
     const uint8_t count = startSiteCount();
     if (_startListScroll + StartListVisibleRows < count) {
       _startListScroll += StartListVisibleRows;
@@ -870,8 +891,20 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   if (_showStart) {
     for (uint8_t i = 0; i < MaxRecentSites; i++) {
       if (contains(_startSiteBounds[i], point.x, point.y)) {
-        browserLog(String(_showFavorites ? F("opening favorite site #") : F("opening recent site #")) + String(i + 1));
         const RecentSite &site = startSiteAt(i);
+        if (contains(_startRemoveBounds[i], point.x, point.y)) {
+          if (_showFavorites) {
+            browserLog(String(F("removing favorite site #")) + String(i + 1));
+            removeFavorite(site.url);
+          } else {
+            browserLog(String(F("removing recent site #")) + String(i + 1));
+            removeRecent(i);
+          }
+          saveState();
+          draw();
+          return;
+        }
+        browserLog(String(_showFavorites ? F("opening favorite site #") : F("opening recent site #")) + String(i + 1));
         const String url = site.url;
         const String title = site.title;
         if (!_showFavorites) {
@@ -917,6 +950,7 @@ void BrowserScreen::layout() {
                  (int16_t)(width - buttonWidth * 3), ControlsHeight};
   for (uint8_t i = 0; i < MaxRecentSites; i++) {
     _startSiteBounds[i] = {0, 0, 0, 0};
+    _startRemoveBounds[i] = {0, 0, 0, 0};
   }
   clampStartListScroll();
   const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
@@ -926,6 +960,9 @@ void BrowserScreen::layout() {
     const uint8_t index = _startListScroll + row;
     _startSiteBounds[index] = {0, (int16_t)(RecentListTop + row * UiKit::ListCellHeight),
                         width, UiKit::ListCellHeight};
+    _startRemoveBounds[index] = {(int16_t)(width - UiKit::ListCellHeight),
+                                 (int16_t)(RecentListTop + row * UiKit::ListCellHeight),
+                                 UiKit::ListCellHeight, UiKit::ListCellHeight};
   }
   _menuBounds = {(int16_t)(width - UiKit::NavigationIconSize - 4), 4,
                  UiKit::NavigationIconSize, UiKit::NavigationIconSize};
@@ -974,8 +1011,9 @@ void BrowserScreen::drawStartPage() {
   TFT_eSPI &tft = _display.tft();
   UiText::draw(tft, _showFavorites ? "Favorite sites" : "Recent sites", 10, RecentListTop - 18, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact);
-  // Recent-site records are populated by the lifecycle worker.  Avoid
-  // reading their Strings until its hand-off frame in tick().
+  // Recent-site records are populated by the lifecycle worker.  The footer
+  // remains usable while it works, but the list itself is read only after its
+  // hand-off frame in tick().
   if (_lifecycleLoading) {
     UiText::draw(tft, "Loading saved browser data...", 10, RecentListTop + 10,
                  TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
@@ -991,11 +1029,14 @@ void BrowserScreen::drawStartPage() {
     if (_startSiteBounds[i].w == 0) continue;
     const RecentSite &site = startSiteAt(i);
     const Rect &bounds = _startSiteBounds[i];
+    const Rect &removeBounds = _startRemoveBounds[i];
     String label = site.title.length() ? site.title : site.url;
     tft.fillRect(0, bounds.y, bounds.w, UiKit::ListCellHeight, TFT_BLACK);
-    BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding * 2),
+    BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding - removeBounds.w - 6),
                       UiKit::ContentPadding, bounds.y + 10, TFT_WHITE, TFT_BLACK,
                       BrowserText::Size::Content);
+    drawFooterClose(tft, removeBounds.x + removeBounds.w / 2,
+                    removeBounds.y + removeBounds.h / 2, TFT_LIGHTGREY);
     tft.drawFastHLine(UiKit::ContentPadding, bounds.y + UiKit::ListCellHeight - 1,
                       bounds.w - UiKit::ContentPadding * 2, UiKit::DividerColor);
   }
@@ -1177,9 +1218,11 @@ void BrowserScreen::drawControls() {
   if (_showStart) {
     const Rect buttons[] = {_startAddBounds, _startToggleBounds, _startPreviousBounds, _startNextBounds};
     const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
-    const bool ready = !_lifecycleLoading;
-    const bool active[] = {ready, ready, ready && _startListScroll > 0,
-                           ready && _startListScroll + StartListVisibleRows < count};
+    // Opening a URL and switching between the two lists do not inspect the
+    // records being loaded on the other core, so keep those controls live.
+    // Paging waits for the completed, consistent list hand-off.
+    const bool active[] = {true, true, !_lifecycleLoading && _startListScroll > 0,
+                           !_lifecycleLoading && _startListScroll + StartListVisibleRows < count};
     for (uint8_t i = 0; i < 4; i++) {
       const Rect &button = buttons[i];
       const uint16_t color = active[i] ? 0x2965 : TFT_DARKGREY;
@@ -1574,24 +1617,42 @@ bool BrowserScreen::clearSessionCacheLocked() {
   resetSessionCacheEntries();
   if (!_sdCard.isMounted() || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   File directory = SD.open(SessionCacheDirectory, FILE_READ);
-  if (directory && directory.isDirectory()) {
-    File item = directory.openNextFile();
-    while (item) {
-      String path = item.name();
-      item.close();
+  const bool isDirectory = directory && directory.isDirectory();
+  SpiBusLock::unlock();
+  if (isDirectory) {
+    while (true) {
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+      File item = directory.openNextFile();
+      String path = item ? String(item.name()) : String();
+      if (item) item.close();
+      SpiBusLock::unlock();
+      if (path.length() == 0) break;
+      // FS implementations differ: some report a full path here while
+      // others return only the filename.  Always remove the actual session
+      // entry, otherwise stale page-N.html files survive a new session.
+      if (!path.startsWith("/")) {
+        path = path.startsWith(".system/") ? "/" + path : String(SessionCacheDirectory) + "/" + path;
+      }
+
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
       SD.remove(path.c_str());
-      // FAT deletes can involve several SPI metadata transactions.  Yield
-      // after each entry so this low-priority CPU 0 worker cannot starve
-      // IDLE0 and trip the task watchdog on a large or dirty cache.
+      SpiBusLock::unlock();
+      // Let the display and touch task use the shared bus between FAT
+      // updates. This cleanup happens on the lifecycle worker, but holding
+      // SPI during the entire directory walk still made Browser look frozen.
       vTaskDelay(1);
-      item = directory.openNextFile();
     }
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
     directory.close();
     SD.rmdir(SessionCacheDirectory);
+    SpiBusLock::unlock();
   } else if (directory) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
     directory.close();
     SD.remove(SessionCacheDirectory);
+    SpiBusLock::unlock();
   }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   const bool ready = (SD.exists("/.system") || SD.mkdir("/.system")) &&
                      (SD.exists(SessionCacheDirectory) || SD.mkdir(SessionCacheDirectory));
   SpiBusLock::unlock();
@@ -1647,10 +1708,30 @@ bool BrowserScreen::evictOldestSessionEntryLocked() {
   return true;
 }
 
-bool BrowserScreen::ensureSessionCacheSpaceLocked(uint32_t bytes) {
+bool BrowserScreen::evictOldestSessionImageLocked() {
+  int16_t index = -1;
+  uint32_t oldest = 0xffffffffUL;
+  for (uint8_t i = 0; i < MaxSessionImages; i++) {
+    if (_sessionImages[i].used && _sessionImages[i].lastUse <= oldest) {
+      index = i;
+      oldest = _sessionImages[i].lastUse;
+    }
+  }
+  if (index < 0) return false;
+  if (!removeSessionFileLocked(_sessionImages[index].path)) return false;
+  removeSessionImageLocked((uint8_t)index);
+  browserLog(F("session image cache evicted to retain browser pages"));
+  return true;
+}
+
+bool BrowserScreen::ensureSessionCacheSpaceLocked(uint32_t bytes, bool preservePages) {
   if (bytes > MaxSessionCacheBytes) return false;
   while (_sessionCacheBytes > MaxSessionCacheBytes - bytes) {
-    if (!evictOldestSessionEntryLocked()) return false;
+    // Page bodies are the browser's Back cache.  Preview files are optional,
+    // so never let an image download evict a page the user may navigate back
+    // to.  The decoder can still use the downloaded file when the image cache
+    // has no room left.
+    if (preservePages ? !evictOldestSessionImageLocked() : !evictOldestSessionEntryLocked()) return false;
   }
   return true;
 }
@@ -1684,16 +1765,36 @@ int8_t BrowserScreen::sessionImageIndex(const String &url) const {
 bool BrowserScreen::loadSessionPage(const String &url, String &body, String &contentType) {
   body = "";
   contentType = "";
-  HttpLock lock(_httpMutex);
-  if (!lock.locked() || !initializeSessionCacheLocked()) return false;
+  if (!_sessionCacheActive) {
+    browserLog(F("session page cache miss: cache is inactive"));
+    return false;
+  }
+  if (!_sdCard.isMounted()) {
+    browserLog(F("session page cache miss: SD card is unavailable"));
+    return false;
+  }
+  HttpLock lock(_sessionCacheMutex);
+  if (!lock.locked()) {
+    browserLog(F("session page cache miss: cache lock unavailable"));
+    return false;
+  }
+  if (!initializeSessionCacheLocked()) {
+    browserLog(F("session page cache miss: cache initialization failed"));
+    return false;
+  }
   const int8_t index = sessionPageIndex(url);
-  if (index < 0) return false;
+  if (index < 0) {
+    browserLog(String(F("session page cache miss: no entry for ")) + url);
+    return false;
+  }
   SessionPageCacheEntry &entry = _sessionPages[index];
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   File file = SD.open(entry.path.c_str(), FILE_READ);
   const uint32_t size = file ? (uint32_t)file.size() : 0xffffffffUL;
   SpiBusLock::unlock();
   if (!file || size != entry.bytes || size > MaxBodyBytes || !body.reserve(size)) {
+    browserLog(String(F("session page cache entry invalid: url=")) + url + F(", path=") + entry.path +
+               F(", expectedBytes=") + String(entry.bytes) + F(", actualBytes=") + String(size));
     if (file) {
       SpiBusLock::lock();
       file.close();
@@ -1721,6 +1822,7 @@ bool BrowserScreen::loadSessionPage(const String &url, String &body, String &con
     SpiBusLock::unlock();
   }
   if (!readOk) {
+    browserLog(String(F("session page cache read failed: ")) + entry.path);
     if (removeSessionFileLocked(entry.path)) removeSessionPageLocked((uint8_t)index);
     body = "";
     return false;
@@ -1731,15 +1833,30 @@ bool BrowserScreen::loadSessionPage(const String &url, String &body, String &con
 }
 
 bool BrowserScreen::storeSessionPage(const String &url, const String &contentType, const String &body) {
-  if (body.length() > MaxBodyBytes) return false;
-  HttpLock lock(_httpMutex);
-  if (!lock.locked() || !initializeSessionCacheLocked()) return false;
+  if (body.length() > MaxBodyBytes) {
+    browserLog(String(F("session page cache skip: body too large, bytes=")) + String(body.length()));
+    return false;
+  }
+  HttpLock lock(_sessionCacheMutex);
+  if (!lock.locked()) {
+    browserLog(F("session page cache store failed: cache lock unavailable"));
+    return false;
+  }
+  if (!initializeSessionCacheLocked()) {
+    browserLog(F("session page cache store failed: cache initialization failed"));
+    return false;
+  }
   int8_t existing = sessionPageIndex(url);
   if (existing >= 0) {
     if (!removeSessionFileLocked(_sessionPages[existing].path)) return false;
     removeSessionPageLocked((uint8_t)existing);
   }
-  if (!ensureSessionCacheSpaceLocked(body.length())) return false;
+  // Browser documents are the Back cache; discard preview images before any
+  // retained page body when making room for another document.
+  if (!ensureSessionCacheSpaceLocked(body.length(), true)) {
+    browserLog(F("session page cache store failed: no space after image eviction"));
+    return false;
+  }
   int8_t slot = -1;
   for (uint8_t i = 0; i < MaxSessionPages; i++) {
     if (!_sessionPages[i].used) { slot = i; break; }
@@ -1759,7 +1876,10 @@ bool BrowserScreen::storeSessionPage(const String &url, const String &contentTyp
   SD.remove(temporary.c_str());
   File file = SD.open(temporary.c_str(), FILE_WRITE);
   SpiBusLock::unlock();
-  if (!file) return false;
+  if (!file) {
+    browserLog(String(F("session page cache store failed: cannot create ")) + temporary);
+    return false;
+  }
   uint32_t offset = 0;
   bool written = true;
   while (offset < body.length()) {
@@ -1778,10 +1898,20 @@ bool BrowserScreen::storeSessionPage(const String &url, const String &contentTyp
     written = false;
   }
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
-  bool committed = written && !SD.exists(path.c_str()) && SD.rename(temporary.c_str(), path.c_str());
+  // FAT rename does not replace an existing target. A cache directory can
+  // contain an untracked file after power loss or interrupted cleanup, so
+  // remove that stale target before committing this new atomic write.
+  bool committed = false;
+  if (written) {
+    const bool targetReady = !SD.exists(path.c_str()) || SD.remove(path.c_str());
+    committed = targetReady && SD.rename(temporary.c_str(), path.c_str());
+  }
   if (!committed) SD.remove(temporary.c_str());
   SpiBusLock::unlock();
-  if (!committed) return false;
+  if (!committed) {
+    browserLog(String(F("session page cache store failed: cannot commit ")) + path);
+    return false;
+  }
   _sessionPages[slot] = {url, contentType, path, body.length(), nextSessionCacheUse(), true};
   _sessionCacheBytes += body.length();
   browserLog(String(F("page stored in session cache: ")) + url);
@@ -1789,7 +1919,7 @@ bool BrowserScreen::storeSessionPage(const String &url, const String &contentTyp
 }
 
 String BrowserScreen::sessionImagePath(const String &url) {
-  HttpLock lock(_httpMutex);
+  HttpLock lock(_sessionCacheMutex);
   if (!lock.locked() || !initializeSessionCacheLocked()) return "";
   const int8_t index = sessionImageIndex(url);
   if (index < 0) return "";
@@ -1806,7 +1936,7 @@ String BrowserScreen::sessionImagePath(const String &url) {
 }
 
 void BrowserScreen::discardSessionImage(const String &url) {
-  HttpLock lock(_httpMutex);
+  HttpLock lock(_sessionCacheMutex);
   if (!lock.locked() || !initializeSessionCacheLocked()) return;
   const int8_t index = sessionImageIndex(url);
   if (index < 0) return;
@@ -1818,7 +1948,7 @@ void BrowserScreen::discardSessionImage(const String &url) {
 String BrowserScreen::adoptSessionImage(const String &url, const String &downloadedPath,
                                         FileFormats::Format format) {
   if (!FileFormats::isImage(format)) return "";
-  HttpLock lock(_httpMutex);
+  HttpLock lock(_sessionCacheMutex);
   if (!lock.locked() || !initializeSessionCacheLocked()) return "";
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return "";
   File source = SD.open(downloadedPath.c_str(), FILE_READ);
@@ -1831,7 +1961,7 @@ String BrowserScreen::adoptSessionImage(const String &url, const String &downloa
     if (!removeSessionFileLocked(_sessionImages[existing].path)) return "";
     removeSessionImageLocked((uint8_t)existing);
   }
-  if (!ensureSessionCacheSpaceLocked(bytes)) return "";
+  if (!ensureSessionCacheSpaceLocked(bytes, true)) return "";
   int8_t slot = -1;
   for (uint8_t i = 0; i < MaxSessionImages; i++) {
     if (!_sessionImages[i].used) { slot = i; break; }
@@ -1912,7 +2042,8 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   // A cancelled (or failed) request still leaves that page reachable through
   // Back; delaying this until after fetch() succeeds made the footer Back
   // button disappear after cancelling a navigation.
-  if (addToHistory && hadDocument && previousUrl != url) {
+  const bool addedPreviousPageToHistory = addToHistory && hadDocument && previousUrl != url;
+  if (addedPreviousPageToHistory) {
     browserLog(F("saving current page to back history"));
     addHistory(previousUrl);
   }
@@ -1959,18 +2090,35 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
     draw();
     return false;
   }
+  // Redirect Location headers are allowed to omit a trailing slash or use a
+  // differently-cased host. Back always normalizes its target, so use the
+  // same canonical form for the rendered page and its session-cache key.
+  // Without this, a cached `https://example.com` was looked up as
+  // `https://example.com/` and unnecessarily reloaded from the network.
+  String canonicalFinalUrl;
+  String canonicalFinalUrlError;
+  if (normalizeUrl(finalUrl, canonicalFinalUrl, canonicalFinalUrlError)) {
+    finalUrl = canonicalFinalUrl;
+  } else {
+    browserLog(String(F("final URL could not be normalized: ")) + canonicalFinalUrlError);
+  }
   _currentUrl = finalUrl;
   setLoadingPhase(cacheHit ? F("Rendering cached page")
                             : (downloadedPath.length() ? F("Opening downloaded file") : F("Rendering page")));
   if (downloadedPath.length()) {
     FileFormats::Format format = FileFormats::fromPath(downloadedPath);
     FileFormats::Group group = FileFormats::group(format);
-    renderPlainText(group == FileFormats::Group::Audio
-      ? "Downloaded audio opened in player."
-      : (group == FileFormats::Group::Video ? "Downloaded video opened in player."
-         : "Downloaded image opened in viewer."),
-      group == FileFormats::Group::Audio ? "Audio download"
-      : (group == FileFormats::Group::Video ? "Video download" : "Image download"));
+
+    // The download target is an action, not a new browser document.  Undo
+    // the provisional history entry and restore this source document after
+    // its viewer/player closes.  Rendering a replacement page here used to
+    // leave users at the "Downloaded image opened in viewer" placeholder.
+    const String returnUrl = hadDocument ? previousUrl : String();
+    if (addedPreviousPageToHistory && _historyCount > 0 &&
+        _historyUrls[_historyCount - 1] == previousUrl) {
+      _historyCount--;
+    }
+    _downloadReturnUrl = returnUrl;
     if (addToRecent) addRecent(_currentUrl, _title);
     saveState();
     finishLoading();
@@ -1981,6 +2129,7 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
         _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(downloadedPath))) return true;
     if (group == FileFormats::Group::Video &&
         _navigator.push(ScreenId::VideoPlayer, ScreenData::videoPath(downloadedPath))) return true;
+    _downloadReturnUrl = "";
     _message = "Could not open downloaded file";
     draw();
     return true;
@@ -2007,8 +2156,11 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   }
   if (!cacheHit && (htmlPage || textPage)) {
     browserLog(F("storing session page"));
-    storeSessionPage(_currentUrl, contentType, body);
-    browserLog(F("session page stored"));
+    if (storeSessionPage(_currentUrl, contentType, body)) {
+      browserLog(F("session page stored"));
+    } else {
+      browserLog(F("session page was not cached"));
+    }
   }
   if (htmlPage) {
     renderDocument(body);
@@ -2020,13 +2172,9 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   }
   if (addToRecent) addRecent(_currentUrl, _title);
   saveState();
-  if (cacheHit && _embeddedImageCount > 0 && _imageJobs && _imageResults) {
-    _deferCachedPageDraw = true;
-    _deferCachedPageDrawStartedMs = millis();
-    setLoadingPhase(F("Loading cached images"));
-    browserLog(String(F("waiting for cached images: ")) + String(_embeddedImageCount));
-    return true;
-  }
+  // Draw the cached document immediately.  Image jobs run afterward: their
+  // source is read from the session cache when available, and only a missing
+  // image is fetched on the worker without delaying the restored page.
   finishLoading();
   browserLog(String(F("page ready: title=\"")) + _title + F("\", rows=") + String(_rowCount) +
              F(", pages=") + String(_pageCount) + F(", images=") + String(_embeddedImageCount));
@@ -4810,6 +4958,17 @@ void BrowserScreen::addFavorite(const String &url, const String &title) {
   browserLog(String(F("favorite site saved: entries=")) + String(_favoriteCount));
 }
 
+void BrowserScreen::removeRecent(uint8_t index) {
+  if (index >= _recentCount) return;
+  for (uint8_t next = index + 1; next < _recentCount; next++) {
+    _recentSites[next - 1] = _recentSites[next];
+  }
+  _recentCount--;
+  _recentSites[_recentCount] = {"", ""};
+  clampStartListScroll();
+  browserLog(String(F("recent site removed: entries=")) + String(_recentCount));
+}
+
 void BrowserScreen::removeFavorite(const String &url) {
   for (uint8_t i = 0; i < _favoriteCount; i++) {
     if (_favoriteSites[i].url != url) continue;
@@ -4857,13 +5016,23 @@ void BrowserScreen::loadState() {
     return;
   }
   File file = SD.open(StatePath, FILE_READ);
+  SpiBusLock::unlock();
   if (!file) {
-    SpiBusLock::unlock();
     browserLog(F("no saved browser state found"));
     return;
   }
-  while (file.available()) {
-    String line = file.readStringUntil('\n');
+  while (true) {
+    // The display shares SPI with the SD card.  Keep every read transaction
+    // short so start-page controls remain responsive while this worker parses
+    // saved browser state on the other core.
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      browserLog(F("saved state read stopped: SD card bus busy"));
+      break;
+    }
+    const bool available = file.available();
+    String line = available ? file.readStringUntil('\n') : String();
+    SpiBusLock::unlock();
+    if (!available) break;
     line.trim();
     if (line.length() < 2 || line[1] != '\t') continue;
     String fields[7];
@@ -4900,8 +5069,10 @@ void BrowserScreen::loadState() {
     // Keep a malformed or unexpectedly large file from monopolising CPU 0.
     vTaskDelay(1);
   }
-  file.close();
-  SpiBusLock::unlock();
+  if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    file.close();
+    SpiBusLock::unlock();
+  }
   pruneCookies();
   if (recentsTrimmed || favoritesTrimmed) {
     // Rewrite the state file after releasing the SD lock so obsolete entries

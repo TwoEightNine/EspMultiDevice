@@ -24,6 +24,7 @@ public:
                 SdCardController &sdCard);
 
   void onEnter() override;
+  void onResume() override;
   void onResult(const ScreenResult &result) override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
@@ -336,6 +337,10 @@ private:
   volatile bool _sessionCacheActive;
   volatile bool _sessionCacheInitialized;
   bool _usingSessionPage;
+  // Downloads open in a child viewer/player.  Keep the source page separate
+  // from the downloaded URL so closing that child restores the document
+  // rather than a temporary "download opened" page.
+  String _downloadReturnUrl;
   bool _deferCachedPageDraw;
   uint32_t _deferCachedPageDrawStartedMs;
   uint32_t _sessionCacheBytes;
@@ -357,6 +362,9 @@ private:
   QueueHandle_t _lifecycleJobs;
   TaskHandle_t _lifecycleWorker;
   SemaphoreHandle_t _httpMutex;
+  // Session entries are also accessed by the image worker, but reading a
+  // cached page must never wait behind that worker's HTTP request.
+  SemaphoreHandle_t _sessionCacheMutex;
   uint16_t _rowCount;
   uint16_t _pageStarts[MaxPages];
   uint8_t _pageCount;
@@ -378,6 +386,7 @@ private:
   Rect _previousBounds;
   Rect _nextBounds;
   Rect _startSiteBounds[MaxRecentSites];
+  Rect _startRemoveBounds[MaxRecentSites];
   Rect _menuBounds;
   Rect _menuAgentBounds;
   Rect _menuFavoriteBounds;
@@ -418,6 +427,7 @@ private:
   void toggleFavorite();
   bool isFavorite(const String &url) const;
   void addFavorite(const String &url, const String &title);
+  void removeRecent(uint8_t index);
   void removeFavorite(const String &url);
   uint8_t startSiteCount() const;
   const RecentSite &startSiteAt(uint8_t index) const;
@@ -527,8 +537,9 @@ private:
   void resetSessionCacheEntries();
   bool clearSessionCacheLocked();
   bool removeSessionFileLocked(const String &path);
-  bool ensureSessionCacheSpaceLocked(uint32_t bytes);
+  bool ensureSessionCacheSpaceLocked(uint32_t bytes, bool preservePages = false);
   bool evictOldestSessionEntryLocked();
+  bool evictOldestSessionImageLocked();
   void removeSessionPageLocked(uint8_t index);
   void removeSessionImageLocked(uint8_t index);
   uint32_t nextSessionCacheUse();

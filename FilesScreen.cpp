@@ -640,11 +640,25 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _listing(nullptr),
     _thumbnailWorker(new FileThumbnailWorker(secretStorage)),
     _listingGeneration(1),
+    _scanDirectory(),
+    _scanCache(nullptr),
+    _scanPhase(ScanPhase::Counting),
+    _scanTotal(0),
+    _scanProcessed(0),
+    _scanVisibleCount(0),
+    _showLoading(false),
+    _lastLoadingPercent(0),
+    _lastLoadingDeterminate(false),
+    _loadingProgressDirty(false),
+    _scanCancelPending(false),
+    _listingDirty(false),
+    _lastListingDrawMs(0),
     _rows(nullptr),
     _rowCapacity(0),
     _rowCount(0),
     _rowSlots(1),
     _pageCount(1),
+    _parentBounds{0, 0, 0, 0},
     _previousBounds{0, 0, 0, 0},
     _nextBounds{0, 0, 0, 0},
     _menuBounds{0, 0, 0, 0},
@@ -673,7 +687,7 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _movePromoted(false),
     _moveCachesCleaned(false) {
   for (uint8_t i = 0; i < MaxCachedDirectories; i++) {
-    _cache[i] = {"", nullptr, 0, 0, false};
+    _cache[i] = {"", nullptr, 0, 0, 0, false, false};
   }
   for (uint8_t i = 0; i < MaxCachedThumbnails; i++) {
     _thumbnails[i] = {"", nullptr, 0, 0, false, false, false};
@@ -681,6 +695,8 @@ FilesScreen::FilesScreen(Navigator &navigator,
 }
 
 FilesScreen::~FilesScreen() {
+  cancelDirectoryScan();
+  closeDirectoryScan();
   if (_moveSource) _moveSource.close();
   if (_moveTarget) _moveTarget.close();
   clearTasks();
@@ -764,6 +780,14 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (!_sdMounted) return;
+  // An incremental sorted insert can move rows between display refreshes.
+  // Bring the hit-test map in sync before interpreting this tap.
+  if (_listingDirty) {
+    redrawListingArea();
+    _listingDirty = false;
+    _lastListingDrawMs = millis();
+    if (_menuState != MenuState::None) drawContextMenu();
+  }
   if (_menuState != MenuState::None) {
     if (_renameBounds.contains(point.x, point.y)) {
       startRename();
@@ -782,6 +806,10 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
       _page--;
       redrawListingArea();
     }
+    return;
+  }
+  if (_parentBounds.contains(point.x, point.y)) {
+    if (_currentPath != "/") openParentDirectory();
     return;
   }
   if (_nextBounds.contains(point.x, point.y)) {
@@ -808,6 +836,17 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
 
 void FilesScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
+  updateDirectoryScan();
+  if (_listingDirty && (uint32_t)(nowMs - _lastListingDrawMs) >= 50) {
+    redrawListingArea();
+    _listingDirty = false;
+    _lastListingDrawMs = nowMs;
+    if (_menuState != MenuState::None) drawContextMenu();
+  }
+  if (_loadingProgressDirty && !_listingDirty && _display.isReady()) {
+    drawLoading(false);
+    _loadingProgressDirty = false;
+  }
   collectThumbnailResults();
   if (_operationState != OperationState::None) updateOperation();
   if (_menuState == MenuState::DeleteHolding) updateDeleteHold(nowMs);
@@ -837,7 +876,7 @@ void FilesScreen::draw() {
 }
 
 void FilesScreen::drawTopBar() {
-  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Files"));
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Files"), UiKit::NavigationIcon::Close);
 }
 
 void FilesScreen::drawPathHeader() {
@@ -853,21 +892,20 @@ void FilesScreen::layoutPaging() {
   _rowSlots = (uint8_t)(height / UiKit::ListCellHeight);
   if (_rowSlots == 0) _rowSlots = 1;
   ensureRowCapacity(_rowSlots);
-  const int16_t third = _display.width() / 3;
+  const int16_t quarter = _display.width() / 4;
   const int16_t footerTop = _display.height() - FooterHeight;
-  _previousBounds = {0, footerTop, third, FooterHeight};
-  _nextBounds = {(int16_t)(third * 2), footerTop, (int16_t)(_display.width() - third * 2), FooterHeight};
+  _parentBounds = {0, footerTop, quarter, FooterHeight};
+  _previousBounds = {(int16_t)(quarter * 2), footerTop, quarter, FooterHeight};
+  _nextBounds = {(int16_t)(quarter * 3), footerTop, (int16_t)(_display.width() - quarter * 3), FooterHeight};
   updatePageCount();
 }
 
 uint16_t FilesScreen::firstEntryForPage(uint16_t page) const {
-  if (page == 0 || !_listing) return 0;
-  const uint16_t firstCapacity = entryCapacityForPage(0);
-  return firstCapacity + (uint32_t)(page - 1) * entryCapacityForPage(1);
+  return (uint32_t)page * entryCapacityForPage(page);
 }
 
 uint16_t FilesScreen::entryCapacityForPage(uint16_t page) const {
-  if (_currentPath != "/" && page == 0) return _rowSlots > 1 ? _rowSlots - 1 : 0;
+  (void)page;
   return _rowSlots;
 }
 
@@ -885,17 +923,25 @@ void FilesScreen::updatePageCount() {
 
 void FilesScreen::drawListing() {
   _rowCount = 0;
+  if (_listing && !_listing->complete) {
+    if (_showLoading) drawLoading(true);
+    return;
+  }
+
+  if (!_listing || _listing->count == 0) {
+    const int16_t contentBottom = _display.height() - FooterHeight;
+    UiText::draw(_display.tft(), F("Empty"), _display.width() / 2,
+                 RowTop + (contentBottom - RowTop) / 2, TFT_LIGHTGREY, TFT_BLACK,
+                 UiText::Size::Title, MC_DATUM);
+    return;
+  }
+
   auto addRow = [&](int16_t y, uint16_t index, bool parent) -> Row * {
     if (_rowCount >= _rowCapacity) return nullptr;
     Row &row = _rows[_rowCount++];
     row = {{0, y, _display.width(), UiKit::ListCellHeight}, index, parent};
     return &row;
   };
-
-  if (_currentPath != "/" && _page == 0) {
-    Row *row = addRow(RowTop, InvalidEntryIndex, true);
-    if (row) drawRow(*row);
-  }
 
   const uint16_t first = firstEntryForPage(_page);
   const uint16_t capacity = entryCapacityForPage(_page);
@@ -909,6 +955,38 @@ void FilesScreen::drawListing() {
     drawRow(*row);
   }
   queueVisibleThumbnails();
+}
+
+void FilesScreen::drawLoading(bool initial) {
+  TFT_eSPI &tft = _display.tft();
+  const int16_t width = _display.width() - 48;
+  const int16_t x = 24;
+  const int16_t y = RowTop + 62;
+  const bool determinate = _scanPhase == ScanPhase::Listing && _scanTotal;
+  const uint8_t percent = determinate
+    ? (uint8_t)((uint32_t)_scanProcessed * 100 / _scanTotal) : 0;
+  const String detail = determinate ? String(F("Indexing files ")) + String(percent) + F("%")
+                                    : String(F("Counting files..."));
+
+  if (initial) {
+    UiText::draw(tft, F("Loading files"), _display.width() / 2, y - 42,
+                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Title, MC_DATUM);
+  }
+  // Keep the static title and bar frame intact. Only this detail line and the
+  // fill are repainted as indexing advances, matching Browser's no-flicker UI.
+  tft.fillRect(0, y - 30, _display.width(), 20, TFT_BLACK);
+  UiText::draw(tft, detail, _display.width() / 2, y - 20, TFT_LIGHTGREY, TFT_BLACK,
+               UiText::Size::Compact, MC_DATUM);
+  if (determinate && _lastLoadingDeterminate && !initial) {
+    UiKit::updateProgressBar(tft, x, y, width, 12, _lastLoadingPercent, percent,
+                             TFT_BLUE, TFT_BLACK);
+  } else {
+    UiKit::drawProgressBar(tft, x, y, width, 12, percent, !determinate,
+                           TFT_BLUE, TFT_DARKGREY, TFT_BLACK, true, millis());
+  }
+  _lastLoadingPercent = percent;
+  _lastLoadingDeterminate = determinate;
+  if (initial) _loadingProgressDirty = false;
 }
 
 void FilesScreen::redrawListingArea() {
@@ -960,19 +1038,46 @@ void FilesScreen::redrawRowsIntersecting(const Rect &bounds) {
 void FilesScreen::drawFooter() {
   TFT_eSPI &tft = _display.tft();
   const int16_t footerTop = _display.height() - FooterHeight;
-  const bool previous = _page > 0;
-  const bool next = _page + 1 < _pageCount;
-  tft.fillRect(0, footerTop, _display.width(), FooterHeight, MenuColor);
-  tft.drawFastVLine(_previousBounds.w, footerTop, FooterHeight, TFT_DARKGREY);
-  tft.drawFastVLine(_nextBounds.x, footerTop, FooterHeight, TFT_DARKGREY);
-  tft.setTextDatum(MC_DATUM);
+  const int16_t quarter = _display.width() / 4;
+  const Rect emptyBounds = {quarter, footerTop, quarter, FooterHeight};
+  const Rect buttons[] = {_parentBounds, emptyBounds, _previousBounds, _nextBounds};
+  const bool active[] = {_currentPath != "/", false, _page > 0, _page + 1 < _pageCount};
+  for (uint8_t i = 0; i < 4; i++) {
+    const Rect &button = buttons[i];
+    tft.fillRect(button.x, button.y, button.w - 1, button.h, active[i] ? 0x2965 : TFT_DARKGREY);
+  }
+  tft.fillRect(_display.width() - 1, footerTop, 1, FooterHeight, TFT_DARKGREY);
+  UiText::draw(tft, F("Page"), emptyBounds.x + emptyBounds.w / 2, footerTop + 12,
+               TFT_LIGHTGREY, TFT_DARKGREY, UiText::Size::Compact, MC_DATUM);
+  UiText::draw(tft, String(_page + 1) + F(" / ") + String(_pageCount),
+               emptyBounds.x + emptyBounds.w / 2, footerTop + 29,
+               TFT_WHITE, TFT_DARKGREY, UiText::Size::Compact, MC_DATUM);
+  drawPagingArrow(_parentBounds.x + _parentBounds.w / 2, footerTop + FooterHeight / 2,
+                  false, false, active[0] ? TFT_WHITE : 0x8410);
   drawPagingArrow(_previousBounds.x + _previousBounds.w / 2, footerTop + FooterHeight / 2,
-                  false, previous ? TFT_WHITE : 0x8410);
-  UiText::draw(tft, String(F("Page ")) + String(_page + 1) + F(" / ") + String(_pageCount),
-               _display.width() / 2, footerTop + FooterHeight / 2, TFT_LIGHTGREY, MenuColor,
-               UiText::Size::Compact, MC_DATUM);
+                  true, false, active[2] ? TFT_WHITE : 0x8410);
   drawPagingArrow(_nextBounds.x + _nextBounds.w / 2, footerTop + FooterHeight / 2,
-                  true, next ? TFT_WHITE : 0x8410);
+                  true, true, active[3] ? TFT_WHITE : 0x8410);
+}
+
+void FilesScreen::drawPagingArrow(int16_t centerX, int16_t centerY, bool vertical, bool forward, uint16_t color) const {
+  if (vertical) {
+    const int16_t tipY = centerY + (forward ? 7 : -7);
+    const int16_t tailY = centerY + (forward ? -8 : 8);
+    for (int8_t offset = -1; offset <= 1; offset++) {
+      _display.tft().drawLine(centerX + offset, tailY, centerX + offset, tipY, color);
+      _display.tft().drawLine(centerX + offset, tipY, centerX - 7 + offset, centerY + (forward ? 1 : -1), color);
+      _display.tft().drawLine(centerX + offset, tipY, centerX + 7 + offset, centerY + (forward ? 1 : -1), color);
+    }
+    return;
+  }
+  const int16_t tipX = centerX + (forward ? 7 : -7);
+  const int16_t tailX = centerX + (forward ? -8 : 8);
+  for (int8_t offset = -1; offset <= 1; offset++) {
+    _display.tft().drawLine(tailX, centerY + offset, tipX, centerY + offset, color);
+    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY - 7 + offset, color);
+    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY + 7 + offset, color);
+  }
 }
 
 void FilesScreen::drawContextMenu() {
@@ -1039,15 +1144,6 @@ void FilesScreen::drawVerticalEllipsis(int16_t centerX, int16_t centerY, uint16_
   tft.fillCircle(centerX, centerY + 6, 2, color);
 }
 
-void FilesScreen::drawPagingArrow(int16_t centerX, int16_t centerY, bool forward, uint16_t color) const {
-  const int16_t tipX = centerX + (forward ? 7 : -7);
-  const int16_t tailX = centerX + (forward ? -8 : 8);
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    _display.tft().drawLine(tailX, centerY + offset, tipX, centerY + offset, color);
-    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY - 7 + offset, color);
-    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY + 7 + offset, color);
-  }
-}
 
 FilesScreen::Rect FilesScreen::statusBounds() const {
   return {16, (int16_t)(_display.height() - FooterHeight - 30), (int16_t)(_display.width() - 32), 24};
@@ -1167,14 +1263,190 @@ void FilesScreen::ensureRowCapacity(uint8_t capacity) {
 
 bool FilesScreen::ensureListing(const String &path) {
   DirectoryCache *cached = findCached(path);
+  // A scan only keeps an open directory handle for the currently visible
+  // folder. Restart abandoned partial caches rather than risking duplicates.
+  if (cached && !cached->complete && cached != _scanCache) {
+    releaseCache(*cached);
+    cached = nullptr;
+  }
   if (!cached) {
     cached = allocateCacheSlot();
-    if (!cached || !loadDirectory(*cached, path)) return false;
+    if (!cached) return false;
+    *cached = {path, nullptr, 0, 0, millis(), true, false};
+    _listingGeneration++;
+    _lastListingDrawMs = 0;
   }
   cached->lastUsed = millis();
   _listing = cached;
-  sortListing();
   updatePageCount();
+  return true;
+}
+
+void FilesScreen::updateDirectoryScan() {
+  // Directory enumeration is deliberately one entry at a time. The SD card
+  // shares SPI with touch input, so a full blocking scan makes taps appear to
+  // freeze the UI on folders with many files.
+  if (_scanCancelPending) {
+    closeDirectoryScan();
+    return;
+  }
+
+  // Entry insertion shifts list indexes. Keep a selected context-menu entry
+  // stable until its action is dismissed or completed.
+  if (_menuState != MenuState::None) return;
+
+  if (_scanCache && _scanCache != _listing) {
+    cancelDirectoryScan();
+    return;
+  }
+  if (!_scanCache && _listing && !_listing->complete) {
+    _scanCache = _listing;
+    _scanPhase = ScanPhase::Counting;
+    _scanTotal = 0;
+    _scanProcessed = 0;
+    _scanVisibleCount = 0;
+    _showLoading = false;
+    _lastLoadingPercent = 0;
+    _lastLoadingDeterminate = false;
+    _loadingProgressDirty = false;
+  }
+  if (!_scanCache || _scanCache->complete) return;
+
+  if (!_scanDirectory) {
+    if (!SpiBusLock::lock(0)) return;
+    _scanDirectory = SD.open(_scanCache->path.c_str());
+    const bool valid = _scanDirectory && _scanDirectory.isDirectory();
+    if (!valid && _scanDirectory) _scanDirectory.close();
+    SpiBusLock::unlock();
+    if (!valid) {
+      _scanDirectory = File();
+      _scanCache->complete = true;
+      _scanCache = nullptr;
+      showMessage(F("Unable to list folder"));
+      _listingDirty = true;
+    }
+    return;
+  }
+
+  String path;
+  bool directory = false;
+  bool finished = false;
+  if (!SpiBusLock::lock(0)) return;
+  File entry = _scanDirectory.openNextFile();
+  if (entry) {
+    path = entry.name();
+    directory = entry.isDirectory();
+    entry.close();
+  } else {
+    _scanDirectory.close();
+    _scanDirectory = File();
+    finished = true;
+  }
+  SpiBusLock::unlock();
+
+  if (finished) {
+    if (_scanPhase == ScanPhase::Counting) {
+      // A count gives the second pass an honest percentage without keeping
+      // entries on screen while the folder is still changing underneath it.
+      _scanPhase = ScanPhase::Listing;
+      _scanProcessed = 0;
+      if (_showLoading) _loadingProgressDirty = true;
+    } else {
+      _scanCache->complete = true;
+      updatePageCount();
+      _scanCache = nullptr;
+      _showLoading = false;
+      _loadingProgressDirty = false;
+      _listingDirty = true;
+    }
+    return;
+  }
+  if (_scanPhase == ScanPhase::Counting) {
+    if (_scanTotal < 0xfffe) _scanTotal++;
+    if (!isHiddenEntry(path, _scanCache->path) && _scanVisibleCount < 0xfffe) {
+      _scanVisibleCount++;
+      // Avoid a distracting loading state for directories that are small
+      // enough to finish before the user needs progress feedback.
+      if (_scanVisibleCount == 10) {
+        _showLoading = true;
+        _listingDirty = true;
+      }
+    }
+  } else {
+    if (_scanProcessed < _scanTotal) _scanProcessed++;
+    if (!isHiddenEntry(path, _scanCache->path) && appendDirectoryEntry(*_scanCache, path, directory)) {
+      _scanCache->lastUsed = millis();
+    }
+    const uint8_t percent = _scanTotal
+      ? (uint8_t)((uint32_t)_scanProcessed * 100 / _scanTotal) : 0;
+    if (_showLoading && (!_lastLoadingDeterminate || percent != _lastLoadingPercent)) {
+      _loadingProgressDirty = true;
+    }
+  }
+}
+
+void FilesScreen::cancelDirectoryScan() {
+  _scanCache = nullptr;
+  if (_scanDirectory) {
+    _scanCancelPending = true;
+    closeDirectoryScan();
+  }
+}
+
+void FilesScreen::closeDirectoryScan() {
+  if (!_scanDirectory) {
+    _scanCancelPending = false;
+    return;
+  }
+  if (!SpiBusLock::lock(0)) return;
+  _scanDirectory.close();
+  _scanDirectory = File();
+  SpiBusLock::unlock();
+  _scanCancelPending = false;
+}
+
+bool FilesScreen::appendDirectoryEntry(DirectoryCache &cache, const String &storagePath, bool directory) {
+  if (cache.count >= 0xfffe) return false;
+  if (cache.count == cache.capacity) {
+    uint16_t capacity = cache.capacity ? (uint16_t)(cache.capacity * 2) : 8;
+    if (capacity < cache.capacity || capacity > 0xfffe) capacity = 0xfffe;
+    Entry *entries = new Entry[capacity];
+    if (!entries) {
+      showMessage(F("Folder list is out of memory"));
+      cache.complete = true;
+      cancelDirectoryScan();
+      return false;
+    }
+    for (uint16_t i = 0; i < cache.count; i++) entries[i] = cache.entries[i];
+    delete[] cache.entries;
+    cache.entries = entries;
+    cache.capacity = capacity;
+  }
+
+  const String stored = displayName(storagePath);
+  String decrypted = stored;
+  if (_secretMode && _secretStorage.isSecretPath(cache.path) && !_secretStorage.decryptName(stored, decrypted)) {
+    decrypted = "?";
+  }
+  Entry next;
+  next.name = _secretMode && _secretStorage.isSecretPath(cache.path)
+    ? _secretStorage.displayName(decrypted) : decrypted;
+  next.storageName = stored;
+  if (_secretMode && cache.path == "/" && stored == String(SecretStorage::Directory).substring(1)) {
+    next.name = F("secret");
+  }
+  next.directory = directory;
+  next.format = directory ? FileFormats::Format::Unknown : FileFormats::fromPath(decrypted);
+
+  // Inserting each discovered entry keeps partial results in the same natural
+  // order as a completed directory, without a final long sort pause.
+  uint16_t index = cache.count;
+  while (index > 0 && compareEntries(next, cache.entries[index - 1]) < 0) {
+    cache.entries[index] = cache.entries[index - 1];
+    index--;
+  }
+  cache.entries[index] = next;
+  cache.count++;
   return true;
 }
 
@@ -1198,85 +1470,16 @@ FilesScreen::DirectoryCache *FilesScreen::allocateCacheSlot() {
 }
 
 void FilesScreen::releaseCache(DirectoryCache &cache) {
+  if (&cache == _scanCache) cancelDirectoryScan();
   delete[] cache.entries;
-  cache = {"", nullptr, 0, 0, false};
+  cache = {"", nullptr, 0, 0, 0, false, false};
   if (&cache == _listing) _listing = nullptr;
 }
 
 void FilesScreen::clearCache() {
+  cancelDirectoryScan();
   for (uint8_t i = 0; i < MaxCachedDirectories; i++) releaseCache(_cache[i]);
   _listing = nullptr;
-}
-
-bool FilesScreen::loadDirectory(DirectoryCache &cache, const String &path) {
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
-  File directory = SD.open(path.c_str());
-  if (!directory || !directory.isDirectory()) {
-    if (directory) directory.close();
-    SpiBusLock::unlock();
-    return false;
-  }
-  uint16_t count = 0;
-  File entry = directory.openNextFile();
-  while (entry) {
-    if (!isHiddenEntry(entry.name(), path) && count < 0xfffe) count++;
-    entry.close();
-    entry = directory.openNextFile();
-  }
-  directory.close();
-  SpiBusLock::unlock();
-
-  Entry *entries = count ? new Entry[count] : nullptr;
-  if (count && !entries) return false;
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    delete[] entries;
-    return false;
-  }
-  directory = SD.open(path.c_str());
-  if (!directory || !directory.isDirectory()) {
-    if (directory) directory.close();
-    SpiBusLock::unlock();
-    delete[] entries;
-    return false;
-  }
-  uint16_t index = 0;
-  entry = directory.openNextFile();
-  while (entry) {
-    String name = entry.name();
-    if (!isHiddenEntry(name, path) && index < count) {
-      const String stored = displayName(name);
-      String decrypted = stored;
-      if (_secretMode && _secretStorage.isSecretPath(path)) {
-        if (!_secretStorage.decryptName(stored, decrypted)) decrypted = "?";
-      }
-      entries[index].name = _secretMode && _secretStorage.isSecretPath(path)
-        ? _secretStorage.displayName(decrypted) : decrypted;
-      entries[index].storageName = stored;
-      if (_secretMode && path == "/" && stored == String(SecretStorage::Directory).substring(1)) {
-        entries[index].name = F("secret");
-      }
-      entries[index].directory = entry.isDirectory();
-      entries[index].format = entries[index].directory ? FileFormats::Format::Unknown : FileFormats::fromPath(decrypted);
-      index++;
-    }
-    entry.close();
-    entry = directory.openNextFile();
-  }
-  directory.close();
-  SpiBusLock::unlock();
-  if (index != count) {
-    delete[] entries;
-    return false;
-  }
-  cache = {path, entries, count, millis(), true};
-  _listingGeneration++;
-  return true;
-}
-
-void FilesScreen::sortListing() {
-  if (_listing && _listing->entries && _listing->count > 1) {
-    quickSort(_listing->entries, 0, _listing->count - 1);
-  }
 }
 
 char FilesScreen::folded(char value) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 
 #include "FileFormats.h"
 #include "Screen.h"
@@ -62,8 +63,10 @@ private:
     String path;
     Entry *entries;
     uint16_t count;
+    uint16_t capacity;
     uint32_t lastUsed;
     bool used;
+    bool complete;
   };
 
   struct Row {
@@ -86,6 +89,11 @@ private:
     None,
     Actions,
     DeleteHolding
+  };
+
+  enum class ScanPhase : uint8_t {
+    Counting,
+    Listing
   };
 
   enum class OperationState : uint8_t {
@@ -121,11 +129,25 @@ private:
   FileThumbnailWorker *_thumbnailWorker;
   uint32_t _listingGeneration;
   DirectoryCache *_listing;
+  fs::File _scanDirectory;
+  DirectoryCache *_scanCache;
+  ScanPhase _scanPhase;
+  uint16_t _scanTotal;
+  uint16_t _scanProcessed;
+  uint16_t _scanVisibleCount;
+  bool _showLoading;
+  uint8_t _lastLoadingPercent;
+  bool _lastLoadingDeterminate;
+  bool _loadingProgressDirty;
+  bool _scanCancelPending;
+  bool _listingDirty;
+  uint32_t _lastListingDrawMs;
   Row *_rows;
   uint8_t _rowCapacity;
   uint8_t _rowCount;
   uint8_t _rowSlots;
   uint16_t _pageCount;
+  Rect _parentBounds;
   Rect _previousBounds;
   Rect _nextBounds;
   Rect _menuBounds;
@@ -159,6 +181,7 @@ private:
   void drawTopBar();
   void drawPathHeader();
   void drawListing();
+  void drawLoading(bool initial);
   void redrawListingArea();
   void drawRow(const Row &row);
   void redrawRowsIntersecting(const Rect &bounds);
@@ -167,7 +190,7 @@ private:
   void drawStatus();
   void drawUnavailable();
   void drawVerticalEllipsis(int16_t centerX, int16_t centerY, uint16_t color) const;
-  void drawPagingArrow(int16_t centerX, int16_t centerY, bool forward, uint16_t color) const;
+  void drawPagingArrow(int16_t centerX, int16_t centerY, bool vertical, bool forward, uint16_t color) const;
   Rect statusBounds() const;
   void queueVisibleThumbnails();
   Thumbnail *thumbnailFor(const String &path);
@@ -181,12 +204,14 @@ private:
   uint16_t entryCapacityForPage(uint16_t page) const;
   void updatePageCount();
   bool ensureListing(const String &path);
+  void updateDirectoryScan();
+  void cancelDirectoryScan();
+  void closeDirectoryScan();
+  bool appendDirectoryEntry(DirectoryCache &cache, const String &storagePath, bool directory);
   DirectoryCache *findCached(const String &path);
   DirectoryCache *allocateCacheSlot();
   void releaseCache(DirectoryCache &cache);
   void clearCache();
-  bool loadDirectory(DirectoryCache &cache, const String &path);
-  void sortListing();
   static int compareEntries(const Entry &left, const Entry &right);
   static int naturalCompare(const String &left, const String &right);
   static char folded(char value);
