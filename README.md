@@ -321,6 +321,19 @@ static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 
 Touch pressure is learned by the Touch screen calibration flow and stored in `/.system/touch` on the SD card. Before calibration, the controller uses its conservative built-in noise floor.
 
+## Battery Voltage Wiring
+
+The Home status bar measures one 3.7 V nominal 18650 cell through a 100 kΩ / 100 kΩ voltage divider. Connect the cell positive terminal to the top resistor, connect the resistor midpoint to `GPIO 3`, and connect the bottom resistor to the shared battery/ESP32 ground. The equal-value divider limits a fully charged 4.2 V cell to 2.1 V at the ADC input.
+
+Place a 100 nF capacitor from the divider midpoint (`GPIO 3`) to ground. The divider's 50 kΩ source impedance is high for the ESP32 ADC; this capacitor stabilizes the sampled voltage.
+
+| Battery Divider Node | ESP32-S3 GPIO / Supply |
+| --- | --- |
+| 100 kΩ / 100 kΩ midpoint | `GPIO 3` |
+| Divider ground / cell negative | `GND` |
+
+The indicator uses a resting-cell Li-ion voltage curve, so heavy display, Wi-Fi, or speaker loads can temporarily report a lower percentage than the charge level at rest.
+
 ## Default INMP441 Microphone Wiring
 
 The INMP441 uses I2S input on pins that avoid the TFT, SD, touch, and the ESP32-S3 high GPIOs that are commonly tied to flash, PSRAM, or board features. The microphone power should go through a real physical switch. Power-switch sensing is supported by `MicController`, but it is disabled in the default wiring to avoid touching extra board-dependent pins during startup.

@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "../../core/BatteryController.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../core/Screen.h"
 #include "../../services/network/TimeController.h"
@@ -14,7 +15,8 @@ public:
              DisplayController &display,
              SdCardController &sdCard,
              WiFiController &wifi,
-             TimeController &time);
+             TimeController &time,
+             BatteryController &battery);
 
   void onEnter() override;
   void onResult(const ScreenResult &result) override;
@@ -27,7 +29,7 @@ private:
   static const int16_t StatusBarHeight = 24;
   static const int16_t IconDiameter = 80;
   static const int16_t IconBitmapSize = 64;
-  static const uint8_t BatteryStubPercent = 78;
+  static const uint32_t BatteryRefreshIntervalMs = 5000UL;
 
   enum class AppAction : uint8_t {
     Files,
@@ -53,6 +55,7 @@ private:
   SdCardController &_sdCard;
   WiFiController &_wifi;
   TimeController &_time;
+  BatteryController &_battery;
   bool _sdMounted;
   bool _wifiConnected;
   uint8_t _batteryPercent;
@@ -61,6 +64,7 @@ private:
   bool _filesHoldTriggered;
   uint32_t _filesPressedMs;
   uint32_t _lastClockCheckMs;
+  uint32_t _lastBatteryCheckMs;
   String _lastClockText;
   AppTile _apps[AppCount];
 
@@ -77,6 +81,7 @@ private:
   String truncateLabel(const String &label, int16_t maxWidth);
   void setSdState(bool mounted);
   void setWifiState(bool connected);
+  void setBatteryPercent(uint8_t percentage);
   void refreshSdState();
   void handleSdCardEvent(SdCardEvent event);
 };

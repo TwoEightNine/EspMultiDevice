@@ -19,19 +19,22 @@ HomeScreen::HomeScreen(Navigator &navigator,
                        DisplayController &display,
                        SdCardController &sdCard,
                        WiFiController &wifi,
-                       TimeController &time)
+                       TimeController &time,
+                       BatteryController &battery)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _wifi(wifi),
     _time(time),
+    _battery(battery),
     _sdMounted(false),
     _wifiConnected(false),
-    _batteryPercent(BatteryStubPercent),
+    _batteryPercent(0),
     _lastTouchDown(false),
     _filesPressPending(false),
     _filesHoldTriggered(false),
     _filesPressedMs(0),
     _lastClockCheckMs(0xffffffffUL),
+    _lastBatteryCheckMs(0),
     _lastClockText("") {
   _apps[0] = { "Files", AppAction::Files, TFT_BLUE, nullptr, 0, 0, 0, 0 };
   _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
@@ -43,6 +46,8 @@ HomeScreen::HomeScreen(Navigator &navigator,
 void HomeScreen::onEnter() {
   refreshSdState();
   _wifiConnected = _wifi.isConnected();
+  _batteryPercent = _battery.percentage();
+  _lastBatteryCheckMs = millis();
   _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
   _filesPressPending = false;
@@ -111,6 +116,11 @@ void HomeScreen::tick(uint32_t nowMs) {
   if (_lastClockCheckMs == 0xffffffffUL || nowMs - _lastClockCheckMs >= 1000UL) {
     drawClock(false);
     _lastClockCheckMs = nowMs;
+  }
+
+  if (nowMs - _lastBatteryCheckMs >= BatteryRefreshIntervalMs) {
+    setBatteryPercent(_battery.percentage());
+    _lastBatteryCheckMs = nowMs;
   }
 
   handleSdCardEvent(_sdCard.takeEvent());
@@ -253,6 +263,14 @@ void HomeScreen::setWifiState(bool connected) {
   }
   _wifiConnected = connected;
   drawWifiIcon();
+}
+
+void HomeScreen::setBatteryPercent(uint8_t percentage) {
+  if (_batteryPercent == percentage) {
+    return;
+  }
+  _batteryPercent = percentage;
+  drawBattery();
 }
 
 void HomeScreen::refreshSdState() {

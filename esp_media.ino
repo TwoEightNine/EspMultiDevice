@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <esp_system.h>
 
+#include "src/core/BatteryController.h"
 #include "src/core/DisplayController.h"
 #include "src/services/audio/AudioSettings.h"
 #include "src/features/settings/AudioSettingsScreen.h"
@@ -29,6 +30,9 @@
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
+
+// Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
+static const int BATTERY_ADC_PIN = 3;
 
 // SD uses the higher allowed GPIO range so the TFT parallel bus stays on fast low GPIOs.
 static const int SD_SCK_PIN = 40;
@@ -67,6 +71,7 @@ SecretStorage *secretStorage = nullptr;
 AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
+BatteryController *batteryController = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
@@ -164,6 +169,10 @@ void setup() {
     Serial.println(F("Shared SPI lock unavailable."));
   }
 
+  batteryController = new BatteryController(BATTERY_ADC_PIN);
+  batteryController->begin();
+  Serial.println(F("Battery controller ready."));
+
   display = new DisplayController();
   display->begin(DISPLAY_ROTATION);
   Serial.print(F("TFT size: "));
@@ -231,7 +240,7 @@ void setup() {
   Serial.println(F("Time controller ready."));
 
   navigator = new Navigator();
-  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController);
+  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController, *batteryController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
