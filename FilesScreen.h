@@ -37,7 +37,7 @@ private:
   static const uint8_t MaxCachedThumbnails = 12;
   static const int16_t RowTop = 88;
   static const int16_t FooterHeight = 42;
-  static const int16_t ActionWidth = 48;
+  static const int16_t ActionWidth = UiKit::ListCellHeight;
   static const uint16_t InvalidEntryIndex = 0xffff;
   static const uint32_t DeleteHoldMs = 1000;
 
@@ -189,8 +189,6 @@ private:
   void drawContextMenu();
   void drawStatus();
   void drawUnavailable();
-  void drawVerticalEllipsis(int16_t centerX, int16_t centerY, uint16_t color) const;
-  void drawPagingArrow(int16_t centerX, int16_t centerY, bool vertical, bool forward, uint16_t color) const;
   Rect statusBounds() const;
   void queueVisibleThumbnails();
   Thumbnail *thumbnailFor(const String &path);

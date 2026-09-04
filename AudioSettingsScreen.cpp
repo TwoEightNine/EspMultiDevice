@@ -64,10 +64,9 @@ void AudioSettingsScreen::drawLevels() {
     bool isSelected = level == selected;
     uint16_t fill = isSelected ? TFT_CYAN : TFT_DARKGREY;
     uint16_t text = isSelected ? TFT_BLACK : TFT_WHITE;
-    tft.fillRoundRect(x, y, cellWidth, GridHeight, 6, fill);
-    tft.drawRoundRect(x, y, cellWidth, GridHeight, 6, TFT_WHITE);
+    tft.fillSmoothRoundRect(x, y, cellWidth, GridHeight, 6, fill, TFT_BLACK);
     UiText::draw(tft, String(level), x + cellWidth / 2, y + GridHeight / 2,
-                 text, fill, UiText::Size::Compact, MC_DATUM);
+                 text, fill, UiText::Size::Content, MC_DATUM);
   }
 
   tft.fillRect(0, 252, _display.width(), 28, TFT_BLACK);

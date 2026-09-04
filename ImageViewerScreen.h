@@ -65,7 +65,7 @@ private:
   static const uint8_t GifPresentBandRows = 16;
   static const uint16_t GifLoaderReadChunkBytes = 2048;
   static const int16_t EdgeTapWidth = 48;
-  static const int16_t CloseTapSize = 64;
+  static const int16_t CloseTapSize = 48;
 
   enum class Compression : uint32_t {
     Rgb = 0,

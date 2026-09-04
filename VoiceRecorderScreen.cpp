@@ -189,10 +189,9 @@ void VoiceRecorderScreen::drawButton(const Button &button,
   uint16_t fill = enabled ? color : TFT_DARKGREY;
   uint16_t text = enabled ? TFT_BLACK : TFT_LIGHTGREY;
 
-  tft.fillRoundRect(button.x, button.y, button.w, button.h, 6, fill);
-  tft.drawRoundRect(button.x, button.y, button.w, button.h, 6, TFT_WHITE);
+  tft.fillSmoothRoundRect(button.x, button.y, button.w, button.h, 6, fill, TFT_BLACK);
   UiText::draw(tft, label, button.x + button.w / 2, button.y + button.h / 2,
-               text, fill, UiText::Size::Compact, MC_DATUM);
+               text, fill, UiText::Size::Content, MC_DATUM);
 }
 
 String VoiceRecorderScreen::storageText() {

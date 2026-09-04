@@ -2,40 +2,19 @@
 
 namespace UiKit {
 namespace {
-constexpr int16_t NavigationIconTop = (AppBarHeight - NavigationIconSize) / 2;
-constexpr int16_t TitleX = NavigationIconSize + ContentPadding;
+constexpr int16_t NavigationIconLeft = AppBarIconPadding;
+constexpr int16_t NavigationIconTop = AppBarIconPadding;
+constexpr int16_t TitleX = NavigationIconLeft + NavigationIconSize + AppBarIconPadding;
 // Font 4's visible glyphs sit slightly high within its 26 px cell.
-constexpr int16_t TitleCenterY = AppBarHeight / 2 + 3;
+constexpr int16_t TitleCenterY = AppBarHeight / 2 + 1;
 constexpr int16_t ListIconX = 8;
 constexpr int16_t ListIconY = (ListCellHeight - ListIconSize) / 2;
 constexpr int16_t ListTextWithIconX = ListIconX + ListIconSize + ContentPadding;
 
-void drawBackIcon(TFT_eSPI &tft) {
-  const int16_t centerY = AppBarHeight / 2;
-  const int16_t left = 11;
-  const int16_t point = 27;
-  const int16_t right = 33;
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(point, centerY - 10 + offset, left, centerY + offset, TFT_WHITE);
-    tft.drawLine(left, centerY + offset, point, centerY + 10 + offset, TFT_WHITE);
-    tft.drawLine(left, centerY + offset, right, centerY + offset, TFT_WHITE);
-  }
-}
-
-void drawCloseIcon(TFT_eSPI &tft) {
-  const int16_t inset = 12;
-  const int16_t end = NavigationIconSize - inset;
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(inset + offset, inset, end + offset, end, TFT_WHITE);
-    tft.drawLine(end + offset, inset, inset + offset, end, TFT_WHITE);
-  }
-}
 }  // namespace
 
 bool navigationIconContains(int16_t x, int16_t y) {
-  // Treat the entire leading app-bar corner as navigation: the 40 px icon,
-  // its surrounding space, and the margin before the title.
-  return x >= 0 && x < TitleX && y >= 0 && y < AppBarHeight;
+  return x >= 0 && x < AppBarHeight && y >= 0 && y < AppBarHeight;
 }
 
 String ellipsize(const String &text, int16_t maxWidth, UiText::Size size) {
@@ -47,14 +26,189 @@ void drawTopAppBar(TFT_eSPI &tft,
                    const String &title,
                    NavigationIcon icon) {
   tft.fillRect(0, 0, width, AppBarHeight, AppBarColor);
-  if (icon == NavigationIcon::Back) drawBackIcon(tft);
-  else drawCloseIcon(tft);
+  const int16_t iconCenterX = NavigationIconLeft + NavigationIconSize / 2;
+  const int16_t iconCenterY = NavigationIconTop + NavigationIconSize / 2;
+  if (icon == NavigationIcon::Back) {
+    drawBackIcon(tft, iconCenterX, iconCenterY, TFT_WHITE, AppBarColor);
+  } else {
+    drawCloseIcon(tft, iconCenterX, iconCenterY, TFT_WHITE, AppBarColor);
+  }
 
   const int16_t titleWidth = width - TitleX - ContentPadding;
   if (titleWidth > 0 && title.length() > 0) {
     UiText::draw(tft, UiKit::ellipsize(title, titleWidth, UiText::Size::Title),
                  TitleX, TitleCenterY, TFT_WHITE, AppBarColor,
                  UiText::Size::Title, ML_DATUM);
+  }
+}
+
+void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                   uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 3.0f;
+  constexpr float strokeRadius = strokeWidth / 2.0f;
+  constexpr float halfSize = NavigationIconSize / 2.0f;
+  const float first = halfSize - strokeRadius;
+  tft.drawWideLine(centerX - first, centerY - first,
+                   centerX + first, centerY + first,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + first, centerY - first,
+                   centerX - first, centerY + first,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 3.0f;
+  constexpr float wing = 8.0f;
+  tft.drawWideLine(centerX + 10, centerY, centerX - 10, centerY,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - 10, centerY, centerX, centerY - wing,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - 10, centerY, centerX, centerY + wing,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawPageArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                   bool vertical, bool forward, uint16_t color,
+                   uint16_t backgroundColor) {
+  constexpr float strokeWidth = 3.0f;
+  constexpr float tipOffset = 9.0f;
+  constexpr float tailOffset = 10.0f;
+  constexpr float wing = 8.0f;
+  if (vertical) {
+    const float tipY = centerY + (forward ? tipOffset : -tipOffset);
+    const float tailY = centerY - (forward ? tailOffset : -tailOffset);
+    const float wingY = centerY + (forward ? 1.0f : -1.0f);
+    tft.drawWideLine(centerX, tailY, centerX, tipY, strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX, tipY, centerX - wing, wingY, strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX, tipY, centerX + wing, wingY, strokeWidth, color, backgroundColor);
+    return;
+  }
+
+  const float tipX = centerX + (forward ? tipOffset : -tipOffset);
+  const float tailX = centerX - (forward ? tailOffset : -tailOffset);
+  const float wingX = centerX + (forward ? 1.0f : -1.0f);
+  tft.drawWideLine(tailX, centerY, tipX, centerY, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(tipX, centerY, wingX, centerY - wing, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(tipX, centerY, wingX, centerY + wing, strokeWidth, color, backgroundColor);
+}
+
+void drawPlusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 3.0f;
+  constexpr float halfLength = 9.0f;
+  tft.drawWideLine(centerX - halfLength, centerY, centerX + halfLength, centerY,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY - halfLength, centerX, centerY + halfLength,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawHomeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 3.0f;
+  const int16_t left = centerX - 10;
+  const int16_t right = centerX + 10;
+  const int16_t roof = centerY - 10;
+  const int16_t wallTop = centerY - 1;
+  const int16_t base = centerY + 10;
+  tft.drawWideLine(left, wallTop, centerX, roof, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX, roof, right, wallTop, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(left, wallTop, left, base, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(right, wallTop, right, base, strokeWidth, color, backgroundColor);
+  tft.drawWideLine(left, base, right, base, strokeWidth, color, backgroundColor);
+  tft.fillSmoothRoundRect(centerX - 3, centerY + 2, 6, 8, 1, color, backgroundColor);
+}
+
+void drawRecentIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    uint16_t color, uint16_t backgroundColor) {
+  tft.drawSmoothCircle(centerX, centerY, 9, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY, centerX, centerY - 6,
+                   2.5f, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY, centerX + 5, centerY + 3,
+                   2.5f, color, backgroundColor);
+}
+
+void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      uint16_t color, uint16_t backgroundColor) {
+  constexpr int16_t points[][2] = {{0, -10}, {3, -3}, {10, -3}, {5, 2}, {7, 9},
+                                    {0, 5}, {-7, 9}, {-5, 2}, {-10, -3}, {-3, -3}};
+  constexpr float strokeWidth = 2.5f;
+  for (uint8_t i = 0; i < 10; i++) {
+    const uint8_t next = (i + 1) % 10;
+    tft.drawWideLine(centerX + points[i][0], centerY + points[i][1],
+                     centerX + points[next][0], centerY + points[next][1],
+                     strokeWidth, color, backgroundColor);
+  }
+}
+
+void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor) {
+  tft.fillSmoothCircle(centerX, centerY - 7, 2, color, backgroundColor);
+  tft.fillSmoothCircle(centerX, centerY, 2, color, backgroundColor);
+  tft.fillSmoothCircle(centerX, centerY + 7, 2, color, backgroundColor);
+}
+
+void drawListCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.0f;
+  constexpr float strokeRadius = strokeWidth / 2.0f;
+  constexpr float halfSize = ListActionIconSize / 2.0f;
+  const float extent = halfSize - strokeRadius;
+  tft.drawWideLine(centerX - extent, centerY - extent,
+                   centerX + extent, centerY + extent,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + extent, centerY - extent,
+                   centerX - extent, centerY + extent,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawListMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      uint16_t color, uint16_t backgroundColor) {
+  constexpr int16_t dotRadius = 2;
+  constexpr int16_t dotOffset = ListActionIconSize / 2 - dotRadius;
+  tft.fillSmoothCircle(centerX, centerY - dotOffset, dotRadius, color, backgroundColor);
+  tft.fillSmoothCircle(centerX, centerY, dotRadius, color, backgroundColor);
+  tft.fillSmoothCircle(centerX, centerY + dotOffset, dotRadius, color, backgroundColor);
+}
+
+void drawKeyboardBackspaceIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                               uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.0f;
+  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
+  tft.drawWideLine(centerX - extent, centerY, centerX + extent, centerY,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - extent, centerY, centerX - 3, centerY - 4,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - extent, centerY, centerX - 3, centerY + 4,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawKeyboardEnterIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                           uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.0f;
+  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
+  tft.drawWideLine(centerX + 4, centerY - extent, centerX + 4, centerY + 3,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + 4, centerY + 3, centerX - extent, centerY + 3,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - extent, centerY + 3, centerX - 3, centerY - 1,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - extent, centerY + 3, centerX - 3, centerY + extent,
+                   strokeWidth, color, backgroundColor);
+}
+
+void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                           bool capsLock, uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.0f;
+  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
+  tft.drawWideLine(centerX, centerY + extent, centerX, centerY - 3,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY - extent, centerX - 6, centerY - 1,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY - extent, centerX + 6, centerY - 1,
+                   strokeWidth, color, backgroundColor);
+  if (capsLock) {
+    tft.fillSmoothCircle(centerX, centerY + 5, 1, color, backgroundColor);
   }
 }
 

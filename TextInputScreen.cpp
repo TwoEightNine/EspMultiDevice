@@ -17,6 +17,10 @@ const int16_t OuterPadding = 6;
 const int16_t KeyGap = 2;
 const int16_t KeyboardGap = 6;
 const int16_t TextPadding = 6;
+const int16_t InputTopPadding = 6;
+const int16_t PinMaskDiameter = 10;
+const int16_t PinMaskRadius = PinMaskDiameter / 2;
+const int16_t PinMaskGap = 8;
 const int16_t GridColumns = 10;
 const int16_t KeyboardRowCount = 5;
 // Adjust this value to change the height of every keyboard row.
@@ -94,7 +98,7 @@ void TextInputScreen::onEnter(const ScreenData &data) {
              ? data.text : "Text input";
   _maskText = data.kind == ScreenDataKind::TextInput && data.maskInput;
   _pinInput = data.kind == ScreenDataKind::TextInput && data.inputMode == TextInputMode::Pin4;
-  if (_pinInput) _title = "enter pin";
+  if (_pinInput) _title = "Enter PIN";
   _text = data.kind == ScreenDataKind::TextInput ? data.initialText : "";
   _cursor = _text.length();
   _shift = false;
@@ -214,10 +218,11 @@ void TextInputScreen::layout() {
   if (_pinInput) {
     const int16_t keyboardHeight = height * PinKeyboardPercent / 100;
     const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
+    const int16_t inputTop = UiKit::AppBarHeight + InputTopPadding;
     _inputBounds = {(int16_t)(width / 4),
-                    (int16_t)(UiKit::AppBarHeight + (keyboardTop - UiKit::AppBarHeight - PinInputHeight) / 2),
+                    (int16_t)(inputTop + (keyboardTop - inputTop - PinInputHeight) / 2),
                     (int16_t)(width / 2), PinInputHeight};
-    _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
+    _closeBounds = {0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight};
     _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
     _keyCount = 0;
     const int16_t columnWidth = (_keyboardBounds.w - PinKeyGap * 2) / 3;
@@ -246,9 +251,10 @@ void TextInputScreen::layout() {
   const int16_t keyboardHeight = KeyboardRowCount * KeyboardRowHeight +
                                  KeyGap * (KeyboardRowCount - 1);
   const int16_t keyboardTop = height - OuterPadding - keyboardHeight;
-  const int16_t inputHeight = keyboardTop - KeyboardGap - UiKit::AppBarHeight;
-  _inputBounds = {OuterPadding, UiKit::AppBarHeight, usableWidth, inputHeight};
-  _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
+  const int16_t inputTop = UiKit::AppBarHeight + InputTopPadding;
+  const int16_t inputHeight = keyboardTop - KeyboardGap - inputTop;
+  _inputBounds = {OuterPadding, inputTop, usableWidth, inputHeight};
+  _closeBounds = {0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight};
   _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
   _keyCount = 0;
 
@@ -335,26 +341,31 @@ void TextInputScreen::drawAppBar() {
 
 void TextInputScreen::drawInputFrame() {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRoundRect(_inputBounds.x, _inputBounds.y,
-                    _inputBounds.w, _inputBounds.h, 6, TFT_BLACK);
-  tft.drawRoundRect(_inputBounds.x, _inputBounds.y,
-                    _inputBounds.w, _inputBounds.h, 6, InputBorderColor);
+  tft.fillSmoothRoundRect(_inputBounds.x, _inputBounds.y,
+                          _inputBounds.w, _inputBounds.h, 6, TFT_BLACK, TFT_BLACK);
+  tft.drawSmoothRoundRect(_inputBounds.x, _inputBounds.y, 6, 6,
+                          _inputBounds.w, _inputBounds.h,
+                          InputBorderColor, TFT_BLACK);
 }
 
 void TextInputScreen::drawInput() {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(_inputBounds.x + 1, _inputBounds.y + 1,
-               _inputBounds.w - 2, _inputBounds.h - 2, TFT_BLACK);
+  tft.fillRect(_inputBounds.x + 2, _inputBounds.y + 2,
+               _inputBounds.w - 4, _inputBounds.h - 4, TFT_BLACK);
 
   if (_pinInput) {
-    const String value = displayText(_text);
-    const int16_t textWidthPixels = textWidth(value);
     const int16_t centerX = _inputBounds.x + _inputBounds.w / 2;
     const int16_t centerY = _inputBounds.y + _inputBounds.h / 2;
-    UiText::draw(tft, value, centerX, centerY, TFT_WHITE, TFT_BLACK,
-                 UiText::Size::Content, MC_DATUM);
+    const int16_t count = _text.length();
+    const int16_t maskWidth = count == 0 ? 0 :
+      count * PinMaskDiameter + (count - 1) * PinMaskGap;
+    const int16_t firstCenterX = centerX - maskWidth / 2 + PinMaskDiameter / 2;
+    for (int16_t index = 0; index < count; index++) {
+      tft.fillSmoothCircle(firstCenterX + index * (PinMaskDiameter + PinMaskGap),
+                           centerY, PinMaskRadius, TFT_WHITE, TFT_BLACK);
+    }
     if (_cursorVisible) {
-      const int16_t caretX = centerX - textWidthPixels / 2 + textWidthPixels;
+      const int16_t caretX = centerX - maskWidth / 2 + maskWidth + 4;
       tft.drawFastVLine(caretX, centerY - LineHeight / 2 + 1, LineHeight - 3, CursorColor);
     }
     return;
@@ -420,7 +431,7 @@ void TextInputScreen::drawInputCaretLine() {
   const int16_t textX = _inputBounds.x + TextPadding;
   const int16_t textY = _inputBounds.y + TextPadding +
                         (caretLine - _scrollLine) * LineHeight;
-  tft.fillRect(_inputBounds.x + 1, textY, _inputBounds.w - 2, LineHeight, TFT_BLACK);
+  tft.fillRect(_inputBounds.x + 2, textY, _inputBounds.w - 4, LineHeight, TFT_BLACK);
   String line = displayText(_text.substring(_lines[caretLine].start,
                                             _lines[caretLine].end));
   UiText::draw(tft, line, textX, textY, TFT_WHITE, TFT_BLACK, UiText::Size::Content);
@@ -465,59 +476,34 @@ void TextInputScreen::drawKey(uint8_t index) {
   uint16_t textColor = (active || _pressedKey == (int8_t)index) ? TFT_BLACK : TFT_WHITE;
 
   TFT_eSPI &tft = _display.tft();
-  tft.fillRoundRect(key.bounds.x, key.bounds.y, key.bounds.w, key.bounds.h, 5, fill);
-  tft.drawRoundRect(key.bounds.x, key.bounds.y, key.bounds.w, key.bounds.h, 5, TFT_WHITE);
+  tft.fillSmoothRoundRect(key.bounds.x, key.bounds.y, key.bounds.w, key.bounds.h, 5, fill, TFT_BLACK);
   if (key.action == KeyAction::Backspace ||
       key.action == KeyAction::Enter ||
       key.action == KeyAction::Shift) {
-    drawKeyIcon(key, textColor);
+    drawKeyIcon(key, textColor, fill);
   } else {
     UiText::draw(tft, key.label, key.bounds.x + key.bounds.w / 2,
                  key.bounds.y + key.bounds.h / 2, textColor, fill,
-                 UiText::Size::Compact, MC_DATUM);
+                 _pinInput ? UiText::Size::Title : UiText::Size::Content, MC_DATUM);
   }
 }
 
-void TextInputScreen::drawKeyIcon(const Key &key, uint16_t color) {
+void TextInputScreen::drawKeyIcon(const Key &key, uint16_t color, uint16_t backgroundColor) {
   TFT_eSPI &tft = _display.tft();
   const int16_t centerX = key.bounds.x + key.bounds.w / 2;
   const int16_t centerY = key.bounds.y + key.bounds.h / 2;
 
   if (key.action == KeyAction::Backspace) {
-    const int16_t left = centerX - 13;
-    const int16_t right = centerX + 12;
-    for (int8_t offset = -1; offset <= 1; offset++) {
-      tft.drawLine(left + 6, centerY + offset, right, centerY + offset, color);
-    }
-    tft.drawLine(left + 6, centerY - 1, left, centerY, color);
-    tft.drawLine(left, centerY, left + 6, centerY + 1, color);
+    UiKit::drawKeyboardBackspaceIcon(tft, centerX, centerY, color, backgroundColor);
     return;
   }
 
   if (key.action == KeyAction::Enter) {
-    const int16_t top = centerY - 11;
-    const int16_t bottom = centerY + 6;
-    const int16_t left = centerX - 12;
-    for (int8_t offset = -1; offset <= 1; offset++) {
-      tft.drawLine(centerX + offset, top, centerX + offset, bottom, color);
-      tft.drawLine(centerX + offset, bottom, left + offset, bottom, color);
-    }
-    tft.drawLine(left, bottom, left + 6, bottom - 5, color);
-    tft.drawLine(left, bottom, left + 6, bottom + 5, color);
+    UiKit::drawKeyboardEnterIcon(tft, centerX, centerY, color, backgroundColor);
     return;
   }
 
-  // Shift is a bold upward arrow. A dot below it marks Caps Lock.
-  const int16_t top = centerY - 11;
-  const int16_t bottom = centerY + 8;
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(centerX + offset, bottom, centerX + offset, top + 6, color);
-  }
-  tft.drawLine(centerX, top, centerX - 7, top + 7, color);
-  tft.drawLine(centerX, top, centerX + 7, top + 7, color);
-  if (_capsLock) {
-    tft.fillCircle(centerX, key.bounds.y + key.bounds.h - 6, 2, color);
-  }
+  UiKit::drawKeyboardShiftIcon(tft, centerX, centerY, _capsLock, color, backgroundColor);
 }
 
 void TextInputScreen::handleKey(uint8_t index) {

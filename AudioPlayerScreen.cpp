@@ -889,13 +889,12 @@ void AudioPlayerScreen::drawVolumeButton() {
   const int16_t y = 142;
   const int16_t width = _display.width() - 40;
   const int16_t height = 28;
-  tft.fillRoundRect(x, y, width, height, 5, TFT_DARKGREY);
-  tft.drawRoundRect(x, y, width, height, 5, TFT_WHITE);
+  tft.fillSmoothRoundRect(x, y, width, height, 5, TFT_DARKGREY, TFT_BLACK);
   String label = F("Volume: ");
   label += _audioSettings.volume();
   label += F(" / 10");
   UiText::draw(tft, label, _display.width() / 2, y + height / 2, TFT_WHITE, TFT_DARKGREY,
-               UiText::Size::Compact, MC_DATUM);
+               UiText::Size::Content, MC_DATUM);
 }
 
 void AudioPlayerScreen::drawVolumePicker() {
@@ -928,10 +927,9 @@ void AudioPlayerScreen::drawVolumePicker() {
     int16_t y = gridTop + row * (cellHeight + gap);
     bool isSelected = level == selected;
     uint16_t fill = isSelected ? TFT_CYAN : TFT_DARKGREY;
-    tft.fillRoundRect(x, y, cellWidth, cellHeight, 5, fill);
-    tft.drawRoundRect(x, y, cellWidth, cellHeight, 5, TFT_WHITE);
+    tft.fillSmoothRoundRect(x, y, cellWidth, cellHeight, 5, fill, TFT_BLACK);
     UiText::draw(tft, String(level), x + cellWidth / 2, y + cellHeight / 2,
-                 isSelected ? TFT_BLACK : TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
+                 isSelected ? TFT_BLACK : TFT_WHITE, fill, UiText::Size::Content, MC_DATUM);
   }
 }
 

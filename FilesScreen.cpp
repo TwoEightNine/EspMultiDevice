@@ -31,6 +31,7 @@ const uint16_t AudioFileColor = TFT_BLUE;
 const uint16_t VideoFileColor = TFT_ORANGE;
 const uint16_t MenuColor = 0x2104;
 const uint16_t DangerColor = TFT_RED;
+const uint16_t FooterButtonColor = 0x2965;
 }
 
 void thumbnailLog(const String &message) {
@@ -1023,7 +1024,9 @@ void FilesScreen::drawRow(const Row &row) {
                                                                   FileThumbnailWorker::Size, thumbnail->pixels);
   }
   if (canActOnEntry(*entry)) {
-    drawVerticalEllipsis(_display.width() - ActionWidth / 2, row.bounds.y + UiKit::ListCellHeight / 2, TFT_LIGHTGREY);
+    UiKit::drawListMoreIcon(_display.tft(), _display.width() - ActionWidth / 2,
+                            row.bounds.y + UiKit::ListCellHeight / 2,
+                            TFT_LIGHTGREY, TFT_BLACK);
   }
 }
 
@@ -1044,40 +1047,25 @@ void FilesScreen::drawFooter() {
   const bool active[] = {_currentPath != "/", false, _page > 0, _page + 1 < _pageCount};
   for (uint8_t i = 0; i < 4; i++) {
     const Rect &button = buttons[i];
-    tft.fillRect(button.x, button.y, button.w - 1, button.h, active[i] ? 0x2965 : TFT_DARKGREY);
+    tft.fillRect(button.x, button.y, button.w - 1, button.h, FooterButtonColor);
   }
   tft.fillRect(_display.width() - 1, footerTop, 1, FooterHeight, TFT_DARKGREY);
   UiText::draw(tft, F("Page"), emptyBounds.x + emptyBounds.w / 2, footerTop + 12,
-               TFT_LIGHTGREY, TFT_DARKGREY, UiText::Size::Compact, MC_DATUM);
+               TFT_LIGHTGREY, FooterButtonColor, UiText::Size::Compact, MC_DATUM);
   UiText::draw(tft, String(_page + 1) + F(" / ") + String(_pageCount),
                emptyBounds.x + emptyBounds.w / 2, footerTop + 29,
-               TFT_WHITE, TFT_DARKGREY, UiText::Size::Compact, MC_DATUM);
-  drawPagingArrow(_parentBounds.x + _parentBounds.w / 2, footerTop + FooterHeight / 2,
-                  false, false, active[0] ? TFT_WHITE : 0x8410);
-  drawPagingArrow(_previousBounds.x + _previousBounds.w / 2, footerTop + FooterHeight / 2,
-                  true, false, active[2] ? TFT_WHITE : 0x8410);
-  drawPagingArrow(_nextBounds.x + _nextBounds.w / 2, footerTop + FooterHeight / 2,
-                  true, true, active[3] ? TFT_WHITE : 0x8410);
-}
-
-void FilesScreen::drawPagingArrow(int16_t centerX, int16_t centerY, bool vertical, bool forward, uint16_t color) const {
-  if (vertical) {
-    const int16_t tipY = centerY + (forward ? 7 : -7);
-    const int16_t tailY = centerY + (forward ? -8 : 8);
-    for (int8_t offset = -1; offset <= 1; offset++) {
-      _display.tft().drawLine(centerX + offset, tailY, centerX + offset, tipY, color);
-      _display.tft().drawLine(centerX + offset, tipY, centerX - 7 + offset, centerY + (forward ? 1 : -1), color);
-      _display.tft().drawLine(centerX + offset, tipY, centerX + 7 + offset, centerY + (forward ? 1 : -1), color);
-    }
-    return;
-  }
-  const int16_t tipX = centerX + (forward ? 7 : -7);
-  const int16_t tailX = centerX + (forward ? -8 : 8);
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    _display.tft().drawLine(tailX, centerY + offset, tipX, centerY + offset, color);
-    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY - 7 + offset, color);
-    _display.tft().drawLine(tipX, centerY + offset, centerX + (forward ? 1 : -1), centerY + 7 + offset, color);
-  }
+               TFT_WHITE, FooterButtonColor, UiText::Size::Compact, MC_DATUM);
+  UiKit::drawBackIcon(tft, _parentBounds.x + _parentBounds.w / 2,
+                      footerTop + FooterHeight / 2, active[0] ? TFT_WHITE : 0x8410,
+                      FooterButtonColor);
+  UiKit::drawPageArrow(tft, _previousBounds.x + _previousBounds.w / 2,
+                       footerTop + FooterHeight / 2, true, false,
+                       active[2] ? TFT_WHITE : 0x8410,
+                       FooterButtonColor);
+  UiKit::drawPageArrow(tft, _nextBounds.x + _nextBounds.w / 2,
+                       footerTop + FooterHeight / 2, true, true,
+                       active[3] ? TFT_WHITE : 0x8410,
+                       FooterButtonColor);
 }
 
 void FilesScreen::drawContextMenu() {
@@ -1136,14 +1124,6 @@ void FilesScreen::drawUnavailable() {
   UiText::draw(tft, F("Insert or mount an SD card"), centerX, 218, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
 }
-
-void FilesScreen::drawVerticalEllipsis(int16_t centerX, int16_t centerY, uint16_t color) const {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillCircle(centerX, centerY - 6, 2, color);
-  tft.fillCircle(centerX, centerY, 2, color);
-  tft.fillCircle(centerX, centerY + 6, 2, color);
-}
-
 
 FilesScreen::Rect FilesScreen::statusBounds() const {
   return {16, (int16_t)(_display.height() - FooterHeight - 30), (int16_t)(_display.width() - 32), 24};

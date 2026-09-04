@@ -175,10 +175,8 @@ void WiFiScreen::drawEnabledRow() {
 void WiFiScreen::drawSwitch() {
   TFT_eSPI &tft = _display.tft();
   uint16_t fill = _wifi.isEnabled() ? ActiveColor : TFT_DARKGREY;
-  tft.fillRoundRect(_switchBounds.x, _switchBounds.y,
-                    _switchBounds.w, _switchBounds.h, 16, fill);
-  tft.drawRoundRect(_switchBounds.x, _switchBounds.y,
-                    _switchBounds.w, _switchBounds.h, 16, TFT_WHITE);
+  tft.fillSmoothRoundRect(_switchBounds.x, _switchBounds.y,
+                          _switchBounds.w, _switchBounds.h, 16, fill, TFT_BLACK);
   int16_t knobX = _wifi.isEnabled() ? _switchBounds.x + _switchBounds.w - 17
                                     : _switchBounds.x + 17;
   tft.fillCircle(knobX, _switchBounds.y + _switchBounds.h / 2, 11, TFT_WHITE);
@@ -238,10 +236,9 @@ void WiFiScreen::drawNetworkList() {
 
 void WiFiScreen::drawButton(const Rect &bounds, const char *label, uint16_t fill) {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, fill);
-  tft.drawRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, TFT_WHITE);
+  tft.fillSmoothRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, 6, fill, TFT_BLACK);
   UiText::draw(tft, label, bounds.x + bounds.w / 2, bounds.y + bounds.h / 2,
-               TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
+               TFT_WHITE, fill, UiText::Size::Content, MC_DATUM);
 }
 
 void WiFiScreen::drawLoader(const char *message, uint32_t nowMs) {

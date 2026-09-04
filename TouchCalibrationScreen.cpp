@@ -171,10 +171,9 @@ void TouchCalibrationScreen::drawButton(const char *label,
                                         bool selected) {
   TFT_eSPI &tft = _display.tft();
   uint16_t fill = selected ? TFT_DARKGREEN : TFT_DARKGREY;
-  tft.fillRoundRect(x, y, ButtonWidth, ButtonHeight, 7, fill);
-  tft.drawRoundRect(x, y, ButtonWidth, ButtonHeight, 7, TFT_WHITE);
+  tft.fillSmoothRoundRect(x, y, ButtonWidth, ButtonHeight, 7, fill, TFT_BLACK);
   UiText::draw(tft, label, x + ButtonWidth / 2, y + ButtonHeight / 2,
-               TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
+               TFT_WHITE, fill, UiText::Size::Content, MC_DATUM);
 }
 
 void TouchCalibrationScreen::drawCalibrationTarget() {

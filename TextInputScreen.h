@@ -85,7 +85,7 @@ private:
   void drawKeyboard();
   void drawKeyboardArea();
   void drawKey(uint8_t index);
-  void drawKeyIcon(const Key &key, uint16_t color);
+  void drawKeyIcon(const Key &key, uint16_t color, uint16_t backgroundColor);
   void layout();
   void layoutCharacterRow(const char *characters, uint8_t row);
   void layoutCharacterKey(char value, uint8_t row, uint8_t column);

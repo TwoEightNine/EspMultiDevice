@@ -38,6 +38,7 @@ const uint8_t ThumbnailMaxWidth = 200;
 const uint8_t ThumbnailMaxHeight = 200;
 const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
 const int16_t RecentListTop = HeaderHeight + 24;
+const uint16_t FooterButtonColor = 0x2965;
 const uint16_t DefaultTextColor = TFT_BLACK;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
@@ -113,79 +114,6 @@ String clientState(WiFiClient &client) {
 bool startsWithIgnoreCase(const String &value, const char *prefix) {
   size_t length = strlen(prefix);
   return value.length() >= length && value.substring(0, length).equalsIgnoreCase(prefix);
-}
-
-void drawFooterArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                     bool vertical, bool forward, uint16_t color) {
-  const int16_t shaft = 10;
-  const int16_t wing = 7;
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    if (vertical) {
-      int16_t pointY = centerY + (forward ? wing : -wing);
-      int16_t tailY = centerY - (forward ? wing : -wing);
-      tft.drawLine(centerX + offset, tailY, centerX + offset, pointY, color);
-      tft.drawLine(centerX + offset, pointY, centerX - wing + offset, pointY - (forward ? wing : -wing), color);
-      tft.drawLine(centerX + offset, pointY, centerX + wing + offset, pointY - (forward ? wing : -wing), color);
-    } else {
-      int16_t pointX = centerX + (forward ? wing : -wing);
-      int16_t tailX = centerX - shaft;
-      if (!forward) tailX = centerX + shaft;
-      tft.drawLine(tailX, centerY + offset, pointX, centerY + offset, color);
-      tft.drawLine(pointX, centerY + offset, pointX - (forward ? wing : -wing), centerY - wing + offset, color);
-      tft.drawLine(pointX, centerY + offset, pointX - (forward ? wing : -wing), centerY + wing + offset, color);
-    }
-  }
-}
-
-void drawFooterHome(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  const int16_t left = centerX - 10;
-  const int16_t right = centerX + 10;
-  const int16_t roof = centerY - 9;
-  const int16_t base = centerY + 10;
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(left + offset, centerY - 1, centerX + offset, roof, color);
-    tft.drawLine(centerX + offset, roof, right + offset, centerY - 1, color);
-    tft.drawLine(left + offset, centerY - 1, left + offset, base, color);
-    tft.drawLine(right + offset, centerY - 1, right + offset, base, color);
-    tft.drawLine(left + offset, base, right + offset, base, color);
-  }
-  tft.fillRect(centerX - 2, centerY + 3, 5, 8, color);
-}
-
-void drawFooterClose(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(centerX - 7, centerY - 7 + offset, centerX + 7, centerY + 7 + offset, color);
-    tft.drawLine(centerX - 7, centerY + 7 + offset, centerX + 7, centerY - 7 + offset, color);
-  }
-}
-
-void drawFooterPlus(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  for (int8_t offset = -1; offset <= 1; offset++) {
-    tft.drawLine(centerX - 8, centerY + offset, centerX + 8, centerY + offset, color);
-    tft.drawLine(centerX + offset, centerY - 8, centerX + offset, centerY + 8, color);
-  }
-}
-
-void drawFooterRecent(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  tft.drawCircle(centerX, centerY, 9, color);
-  tft.drawCircle(centerX, centerY, 10, color);
-  tft.drawLine(centerX, centerY, centerX, centerY - 6, color);
-  tft.drawLine(centerX, centerY, centerX + 5, centerY + 3, color);
-}
-
-void drawFooterFavorite(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  const int16_t points[][2] = {{0, -10}, {3, -3}, {10, -3}, {5, 2}, {7, 9}, {0, 5}, {-7, 9}, {-5, 2}, {-10, -3}, {-3, -3}};
-  for (uint8_t i = 0; i < 10; i++) {
-    const uint8_t next = (i + 1) % 10;
-    tft.drawLine(centerX + points[i][0], centerY + points[i][1],
-                 centerX + points[next][0], centerY + points[next][1], color);
-  }
-}
-
-void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY, uint16_t color) {
-  tft.fillCircle(centerX, centerY - 7, 2, color);
-  tft.fillCircle(centerX, centerY, 2, color);
-  tft.fillCircle(centerX, centerY + 7, 2, color);
 }
 
 void drawCheckbox(TFT_eSPI &tft, int16_t x, int16_t y, bool checked, uint16_t color) {
@@ -605,7 +533,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _cssSourceOrder(0),
     _pendingSpace(false),
     _renderedCharacters(0),
-    _closeBounds{0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize},
+    _closeBounds{0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight},
     _backBounds{0, 0, 0, 0},
     _homeBounds{0, 0, 0, 0},
     _startAddBounds{0, 0, 0, 0},
@@ -937,7 +865,7 @@ void BrowserScreen::layout() {
   const int16_t width = _display.width();
   const int16_t height = _display.height();
   const int16_t buttonWidth = width / 4;
-  _closeBounds = {0, 4, UiKit::NavigationIconSize, UiKit::NavigationIconSize};
+  _closeBounds = {0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight};
   _backBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _homeBounds = {buttonWidth, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
   _startAddBounds = {0, (int16_t)(height - ControlsHeight), buttonWidth, ControlsHeight};
@@ -964,7 +892,8 @@ void BrowserScreen::layout() {
                                  (int16_t)(RecentListTop + row * UiKit::ListCellHeight),
                                  UiKit::ListCellHeight, UiKit::ListCellHeight};
   }
-  _menuBounds = {(int16_t)(width - UiKit::NavigationIconSize - 4), 4,
+  _menuBounds = {(int16_t)(width - UiKit::NavigationIconSize - UiKit::AppBarIconPadding),
+                 UiKit::AppBarIconPadding,
                  UiKit::NavigationIconSize, UiKit::NavigationIconSize};
   const int16_t menuWidth = width > 240 ? 224 : width - 16;
   const int16_t menuX = width - menuWidth - 8;
@@ -999,11 +928,12 @@ void BrowserScreen::drawHeader() {
   const int16_t titleWidth = _display.width() - (_showStart ? 72 : 120);
   BrowserText::draw(tft, BrowserText::ellipsize(tft, heading, titleWidth,
                                                  BrowserText::Size::Title),
-                    UiKit::NavigationIconSize + UiKit::ContentPadding, 11, TFT_WHITE,
+                    UiKit::AppBarHeight, 9, TFT_WHITE,
                     UiKit::AppBarColor, BrowserText::Size::Title);
   if (!_showStart) {
-    drawMoreIcon(tft, _menuBounds.x + _menuBounds.w / 2, _menuBounds.y + _menuBounds.h / 2,
-                 TFT_WHITE);
+    UiKit::drawMoreIcon(tft, _menuBounds.x + _menuBounds.w / 2,
+                        _menuBounds.y + _menuBounds.h / 2,
+                        TFT_WHITE, UiKit::AppBarColor);
   }
 }
 
@@ -1035,8 +965,9 @@ void BrowserScreen::drawStartPage() {
     BrowserText::draw(tft, BrowserText::ellipsize(tft, label, bounds.w - UiKit::ContentPadding - removeBounds.w - 6),
                       UiKit::ContentPadding, bounds.y + 10, TFT_WHITE, TFT_BLACK,
                       BrowserText::Size::Content);
-    drawFooterClose(tft, removeBounds.x + removeBounds.w / 2,
-                    removeBounds.y + removeBounds.h / 2, TFT_LIGHTGREY);
+    UiKit::drawListCloseIcon(tft, removeBounds.x + removeBounds.w / 2,
+                             removeBounds.y + removeBounds.h / 2,
+                             TFT_LIGHTGREY, TFT_BLACK);
     tft.drawFastHLine(UiKit::ContentPadding, bounds.y + UiKit::ListCellHeight - 1,
                       bounds.w - UiKit::ContentPadding * 2, UiKit::DividerColor);
   }
@@ -1225,17 +1156,17 @@ void BrowserScreen::drawControls() {
                            !_lifecycleLoading && _startListScroll + StartListVisibleRows < count};
     for (uint8_t i = 0; i < 4; i++) {
       const Rect &button = buttons[i];
-      const uint16_t color = active[i] ? 0x2965 : TFT_DARKGREY;
+      const uint16_t color = FooterButtonColor;
       const uint16_t iconColor = active[i] ? TFT_WHITE : 0x8410;
       tft.fillRect(button.x, button.y, button.w - 1, button.h, color);
       const int16_t centerX = button.x + button.w / 2;
       const int16_t centerY = button.y + button.h / 2;
-      if (i == 0) drawFooterPlus(tft, centerX, centerY, iconColor);
+      if (i == 0) UiKit::drawPlusIcon(tft, centerX, centerY, iconColor, color);
       else if (i == 1) {
-        if (_showFavorites) drawFooterRecent(tft, centerX, centerY, iconColor);
-        else drawFooterFavorite(tft, centerX, centerY, iconColor);
+        if (_showFavorites) UiKit::drawRecentIcon(tft, centerX, centerY, iconColor, color);
+        else UiKit::drawFavoriteIcon(tft, centerX, centerY, iconColor, color);
       } else {
-        drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
+        UiKit::drawPageArrow(tft, centerX, centerY, true, i == 3, iconColor, color);
       }
     }
     tft.setTextDatum(TL_DATUM);
@@ -1247,16 +1178,16 @@ void BrowserScreen::drawControls() {
     bool active = (i == 0 && (loading || !_showStart)) || (i == 1 && !_showStart) ||
       (!_showStart && ((i == 2 && _page > 0) ||
       (i == 3 && hasNextPage())));
-    uint16_t color = active ? 0x2965 : TFT_DARKGREY;
+    const uint16_t color = FooterButtonColor;
     const Rect &button = buttons[i];
     tft.fillRect(button.x, button.y, button.w - 1, button.h, color);
     uint16_t iconColor = active ? TFT_WHITE : 0x8410;
     const int16_t centerX = button.x + button.w / 2;
     const int16_t centerY = button.y + button.h / 2;
-    if (i == 0 && loading) drawFooterClose(tft, centerX, centerY, iconColor);
-    else if (i == 0) drawFooterArrow(tft, centerX, centerY, false, false, iconColor);
-    else if (i == 1) drawFooterHome(tft, centerX, centerY, iconColor);
-    else drawFooterArrow(tft, centerX, centerY, true, i == 3, iconColor);
+    if (i == 0 && loading) UiKit::drawCloseIcon(tft, centerX, centerY, iconColor, color);
+    else if (i == 0) UiKit::drawBackIcon(tft, centerX, centerY, iconColor, color);
+    else if (i == 1) UiKit::drawHomeIcon(tft, centerX, centerY, iconColor, color);
+    else UiKit::drawPageArrow(tft, centerX, centerY, true, i == 3, iconColor, color);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -1269,10 +1200,10 @@ void BrowserScreen::drawPageControls() {
   for (uint8_t index = 0; index < 2; index++) {
     const bool active = index == 0 ? _page > 0 : hasNextPage();
     const Rect &button = buttons[index];
-    tft.fillRect(button.x, button.y, button.w - 1, button.h,
-                 active ? 0x2965 : TFT_DARKGREY);
-    drawFooterArrow(tft, button.x + button.w / 2, button.y + button.h / 2,
-                    true, index == 1, active ? TFT_WHITE : 0x8410);
+    tft.fillRect(button.x, button.y, button.w - 1, button.h, FooterButtonColor);
+    UiKit::drawPageArrow(tft, button.x + button.w / 2, button.y + button.h / 2,
+                         true, index == 1, active ? TFT_WHITE : 0x8410,
+                         FooterButtonColor);
   }
   tft.setTextDatum(TL_DATUM);
 }
@@ -3898,6 +3829,8 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
   const uint16_t border = control.disabled ? TFT_DARKGREY : TFT_DARKCYAN;
   const uint16_t fill = control.disabled ? TFT_LIGHTGREY : TFT_WHITE;
   const uint16_t textColor = TFT_DARKGREY;
+  const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor
+    : (row.style.hasBackground ? row.style.backgroundColor : _documentBackgroundColor);
   const UiText::Size labelSize = control.labelIsPlaceholder
     ? UiText::Size::Compact : row.style.size;
   const String label = UiText::ellipsize(formControlLabel(control), width - 14, labelSize);
@@ -3905,10 +3838,10 @@ void BrowserScreen::drawFormControl(const VisualRow &row, int16_t y) {
   if (control.kind == FormControlKind::Submit || control.kind == FormControlKind::Reset) {
     const uint16_t buttonColor = control.disabled ? TFT_DARKGREY :
       (control.kind == FormControlKind::Submit ? TFT_BLUE : TFT_DARKCYAN);
-    tft.fillRoundRect(x, y + 4, width, height - 8, 5, buttonColor);
-    const String centered = UiText::ellipsize(label, width - 14, UiText::Size::Compact);
-    UiText::draw(tft, centered, x + (width - UiText::width(tft, centered, UiText::Size::Compact)) / 2,
-                 y + 13, TFT_WHITE, buttonColor, UiText::Size::Compact);
+    tft.fillSmoothRoundRect(x, y + 4, width, height - 8, 5, buttonColor, rowBackground);
+    const String centered = UiText::ellipsize(label, width - 14, UiText::Size::Content);
+    UiText::draw(tft, centered, x + width / 2, y + height / 2,
+                 TFT_WHITE, buttonColor, UiText::Size::Content, MC_DATUM);
     return;
   }
   if (control.kind == FormControlKind::Checkbox || control.kind == FormControlKind::Radio) {

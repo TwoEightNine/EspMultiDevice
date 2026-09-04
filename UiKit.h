@@ -7,8 +7,13 @@
 
 namespace UiKit {
 
+// App-bar geometry. The 24px glyph is centered inside a 48px hit target.
 constexpr int16_t AppBarHeight = 48;
-constexpr int16_t NavigationIconSize = 40;
+constexpr int16_t NavigationIconSize = 24;
+constexpr int16_t AppBarIconPadding = (AppBarHeight - NavigationIconSize) / 2;
+// Action and keyboard glyph canvases; their owning cells supply the padding.
+constexpr int16_t ListActionIconSize = 16;
+constexpr int16_t KeyboardIconSize = 16;
 constexpr int16_t ContentPadding = 16;
 constexpr int16_t ListCellHeight = 40;
 constexpr int16_t ListIconSize = 32;
@@ -29,7 +34,39 @@ String ellipsize(const String &text,
 void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,
                    const String &title,
-                   NavigationIcon icon = NavigationIcon::Back);
+                   NavigationIcon icon = NavigationIcon::Close);
+
+// Anti-aliased 24px navigation/control icons. Pass the colour immediately
+// behind an icon so edge pixels blend correctly without display readback.
+void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                   uint16_t color, uint16_t backgroundColor);
+void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor);
+void drawPageArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                   bool vertical, bool forward, uint16_t color,
+                   uint16_t backgroundColor);
+void drawPlusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor);
+void drawHomeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor);
+void drawRecentIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    uint16_t color, uint16_t backgroundColor);
+void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      uint16_t color, uint16_t backgroundColor);
+void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor);
+void drawListCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       uint16_t color, uint16_t backgroundColor);
+void drawListMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      uint16_t color, uint16_t backgroundColor);
+// Anti-aliased 16px keyboard icons. Caps Lock is indicated only when
+// `capsLock` is true; Shift state colouring remains the caller's choice.
+void drawKeyboardBackspaceIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                               uint16_t color, uint16_t backgroundColor);
+void drawKeyboardEnterIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                           uint16_t color, uint16_t backgroundColor);
+void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                           bool capsLock, uint16_t color, uint16_t backgroundColor);
 
 void drawScaledXBitmap(TFT_eSPI &tft,
                        int16_t x,

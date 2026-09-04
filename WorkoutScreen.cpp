@@ -281,8 +281,7 @@ void WorkoutScreen::drawStageSeconds(uint16_t seconds) {
 
 void WorkoutScreen::drawButton(const Button &button, const String &label, uint16_t fill) {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRoundRect(button.x, button.y, button.w, button.h, 7, fill);
-  tft.drawRoundRect(button.x, button.y, button.w, button.h, 7, TFT_WHITE);
+  tft.fillSmoothRoundRect(button.x, button.y, button.w, button.h, 7, fill, TFT_BLACK);
   UiText::draw(tft, label, button.x + button.w / 2, button.y + button.h / 2,
                TFT_WHITE, fill, UiText::Size::Content, MC_DATUM);
 }

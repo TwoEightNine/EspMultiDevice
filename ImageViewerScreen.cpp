@@ -312,8 +312,8 @@ void ImageViewerScreen::handleTouch(const TouchPoint &point) {
   }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
-  // The visible X is deliberately compact, but its touch target stays large
-  // enough to be reliable while a playing animation is sharing the SPI bus.
+  // The full 48 px app-bar navigation target remains responsive while an
+  // animation is sharing the SPI bus.
   if (point.x < CloseTapSize && point.y < CloseTapSize) {
     _navigator.pop();
     return;
@@ -424,9 +424,9 @@ void ImageViewerScreen::draw() {
 void ImageViewerScreen::drawCloseIcon() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(0, 0, UiKit::NavigationIconSize, UiKit::AppBarHeight, TFT_BLACK);
+  tft.fillRect(0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight, TFT_BLACK);
   // The image viewer deliberately remains full-screen; draw only the kit's close affordance.
-  UiKit::drawTopAppBar(tft, UiKit::NavigationIconSize, String(), UiKit::NavigationIcon::Close);
+  UiKit::drawTopAppBar(tft, UiKit::AppBarHeight, String(), UiKit::NavigationIcon::Close);
 }
 
 void ImageViewerScreen::drawError() {

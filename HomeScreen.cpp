@@ -208,7 +208,8 @@ void HomeScreen::drawApps() {
     const AppTile &app = _apps[i];
     int16_t centerX = app.x + app.w / 2;
     int16_t centerY = app.y + 48;
-    tft.fillCircle(centerX, centerY, IconDiameter / 2, app.circleColor);
+    tft.fillSmoothCircle(centerX, centerY, IconDiameter / 2,
+                         app.circleColor, TFT_BLACK);
     drawAppIcon(app, centerX, centerY);
 
     String label = truncateLabel(String(app.label), app.w - 12);

@@ -85,7 +85,7 @@ Interactive forms are bounded to 8 forms, 32 controls, and 80 select options per
 
 ## UI Kit
 
-`UiKit.h/.cpp` is the shared drawing contract for navigable application screens. Use it instead of duplicating header, list-row, ellipsis, icon-scaling, or navigation-hit-test code. Home, Splash, and the full-screen Image Viewer are intentional exceptions; the viewer uses only the kit's close affordance.
+`UiKit.h/.cpp` is the required shared drawing contract for application screens. A new screen must use this kit for its app bar, navigation hit target, standard icons, list action icons, text sizing, and smooth drawing. Do not copy an existing screen's primitive icon, button, or app-bar drawing code. Home, Splash, and the full-screen Image Viewer are intentional layout exceptions; the viewer still uses the kit's close affordance.
 
 ### App bars
 
@@ -97,9 +97,9 @@ Draw an app bar after clearing the screen and before drawing content:
 UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
 ```
 
-The helper draws a 48 px `#111` bar, a white 40×40 back icon, and a left-aligned font-4 title. The title begins at x=56, is visually centered vertically (including the font-4 baseline correction), and ellipsizes before the 16 px trailing margin. Pass `UiKit::NavigationIcon::Close` as the fourth argument for a dismiss action such as text entry.
+The helper draws a 48px `#111` bar, with a 24×24 antialiased close icon positioned inside a 48×48 navigation target. The icon has 12px padding on every side; the title starts at x=48 (12px after the icon), is lifted 2px for visual centering, and ellipsizes before the 16px trailing margin. Close is the default icon on all screens. Use `UiKit::NavigationIcon::Back` only when the action moves backward in in-screen history rather than dismissing the screen.
 
-Reserve y=0–47 for the bar. The navigation target is deliberately the entire leading corner before the title (x=0–55, y=0–47), not just the icon:
+Reserve y=0–47 for the bar. The navigation target is exactly the entire 48×48 leading app-bar cell, not just the visible glyph:
 
 ```cpp
 if (UiKit::navigationIconContains(point.x, point.y)) {
@@ -124,6 +124,27 @@ Each cell is 40 px high. Labels use font 2; optional icons are scaled to 32×32 
 The drawing helper does not install click handlers. The owning screen must make the **entire cell** tappable—x=0 through the display width and y through `rowY + UiKit::ListCellHeight`—rather than limiting hits to the label or icon. Recalculate pagination and lower content layout from `UiKit::ListCellHeight`; do not copy an old row-height constant.
 
 `drawTopAppBar()` and `drawListCell()` restore TFT_eSPI's default free-font and top-left text datum. Set any specialized font, datum, or color after calling a helper.
+
+### Icons and antialiasing
+
+Use the antialiased `UiKit` icon functions instead of drawing icon primitives in a screen. Every icon function accepts its foreground and the immediate background color; pass the actual fill behind the icon so its antialiased edge blends correctly without a display readback.
+
+- `drawCloseIcon()` and `drawBackIcon()` are 24px navigation icons.
+- `drawPlusIcon()`, `drawFavoriteIcon()`, `drawRecentIcon()`, `drawHomeIcon()`, `drawPageArrow()`, and `drawMoreIcon()` are the 24px Browser/Files control icons.
+- `drawListCloseIcon()` and `drawListMoreIcon()` are exactly 16×16px. Place them in a 40×40px action cell with 12px padding on every side, and make the whole cell tappable.
+- `drawKeyboardBackspaceIcon()`, `drawKeyboardEnterIcon()`, and `drawKeyboardShiftIcon()` are exactly 16×16px. Pass `true` for the shift function's `capsLock` argument to render the Caps Lock state.
+
+For a new shape that belongs in more than one screen, add one documented `UiKit` function first, then call it from each screen. Build it from TFT_eSPI smooth primitives (`drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`); do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
+
+### Buttons, inputs, and text
+
+Rounded-rectangle buttons are fill-only antialiased controls: use `fillSmoothRoundRect()` with the button fill as the edge background and no border. Button labels use `UiText::Size::Content` by default. The PIN keyboard is the sole current exception: its numeric-key labels use `UiText::Size::Title`.
+
+An input field is an antialiased rounded rectangle with its content cleared inside the outline rather than over its antialiased edge. Leave at least 6px between the bottom of the app bar and the input field. PIN input titles are capitalized as `Enter PIN`; entered digits are represented by 10px antialiased circles, never `*` glyphs.
+
+For icon-only footer controls, the interactive target is the whole visual button cell. Active controls use their active fill and foreground icon; inactive controls keep the usual footer background and use a gray icon. Do not introduce a separate inactive fill.
+
+Use `UiText` for all application text. The hierarchy is `Compact` for metadata, `Content` for normal text and button labels, and `Title` for app-bar titles and deliberate emphasis. When clearing/redrawing text or an antialiased icon, use the same immediate background color supplied to the original draw call.
 
 ## Screen Architecture
 
