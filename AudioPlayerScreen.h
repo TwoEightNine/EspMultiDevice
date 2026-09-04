@@ -5,7 +5,7 @@
 
 #include "third_party/minimp3/minimp3.h"
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "AudioSettings.h"
 #include "SdCardController.h"
 #include "SecretStorage.h"

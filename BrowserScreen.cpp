@@ -17,10 +17,10 @@ using File = fs::File;
 #include <PNGdec.h>
 #include "third_party/AnimatedGIF/AnimatedGIF.h"
 
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "BrowserText.h"
 #include "SdCardController.h"
-#include "SpiBusLock.h"
+#include "src/core/SpiBusLock.h"
 #include "UiKit.h"
 #include "WiFiController.h"
 #include "icons.h"

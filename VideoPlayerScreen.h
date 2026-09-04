@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <FS.h>
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "SdCardController.h"
 #include "SpeakerController.h"
 #include "SecretStorage.h"

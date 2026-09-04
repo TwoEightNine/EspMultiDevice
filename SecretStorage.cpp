@@ -4,7 +4,7 @@
 #include <esp_system.h>
 #include <string.h>
 
-#include "SpiBusLock.h"
+#include "src/core/SpiBusLock.h"
 
 const char *SecretStorage::Directory = "/.configs";
 const char *SecretStorage::IndexPath = "/.configs/index";

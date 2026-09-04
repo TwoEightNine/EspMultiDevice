@@ -4,7 +4,7 @@
 #include <FS.h>
 
 #include "MicController.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "SdCardController.h"
 #include "SpeakerController.h"
 

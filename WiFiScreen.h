@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "WiFiController.h"
 
 class WiFiScreen : public Screen {

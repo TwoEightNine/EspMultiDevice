@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "UiKit.h"
 
 class SettingsScreen : public Screen {

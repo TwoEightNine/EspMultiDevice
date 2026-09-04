@@ -1,6 +1,6 @@
 #include "Navigator.h"
 
-#include "Screen.h"
+#include "../core/Screen.h"
 
 Navigator::Navigator()
   : _registeredCount(0),

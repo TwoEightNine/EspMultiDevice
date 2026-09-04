@@ -12,8 +12,8 @@ extern "C" {
 #include "VideoPlayerScreen.h"
 
 #include "AnimationCache.h"
-#include "Navigator.h"
-#include "SpiBusLock.h"
+#include "src/app/Navigator.h"
+#include "src/core/SpiBusLock.h"
 #include "UiKit.h"
 
 #include <SD.h>

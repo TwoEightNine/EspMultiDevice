@@ -8,13 +8,13 @@
 // include the pinned, header-based decoder implementation exactly once.
 #include "third_party/AnimatedGIF/AnimatedGIF.cpp"
 
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "UiKit.h"
 
 #include <SD.h>
 #include <esp32-hal-psram.h>
 #include <esp_heap_caps.h>
-#include "SpiBusLock.h"
+#include "src/core/SpiBusLock.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

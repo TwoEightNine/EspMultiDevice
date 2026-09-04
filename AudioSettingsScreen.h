@@ -1,7 +1,7 @@
 #pragma once
 
 #include "AudioSettings.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 
 class AudioSettingsScreen : public Screen {
 public:

@@ -1,6 +1,6 @@
 #include "HomeScreen.h"
 
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "UiText.h"
 #include "icons.h"
 

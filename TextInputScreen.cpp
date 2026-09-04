@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "UiKit.h"
 
 namespace {

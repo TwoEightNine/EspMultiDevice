@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 
 class TextInputScreen : public Screen {
 public:

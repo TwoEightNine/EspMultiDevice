@@ -1,7 +1,7 @@
 #include "FilesScreen.h"
 
-#include "Navigator.h"
-#include "SpiBusLock.h"
+#include "src/app/Navigator.h"
+#include "src/core/SpiBusLock.h"
 #include "icons.h"
 
 #include <FS.h>

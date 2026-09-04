@@ -1,6 +1,6 @@
 #include "SettingsScreen.h"
 
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "UiKit.h"
 
 SettingsScreen::SettingsScreen(Navigator &navigator,

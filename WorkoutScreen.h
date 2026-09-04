@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 #include "AudioSettings.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "SpeakerController.h"
 
 class WorkoutScreen : public Screen {

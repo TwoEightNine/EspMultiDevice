@@ -24,7 +24,7 @@ using File = fs::File;
 #include "third_party/libwebp/src/webp/decode.h"
 #include "third_party/libwebp/src/webp/demux.h"
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "SdCardController.h"
 #include "SecretStorage.h"
 

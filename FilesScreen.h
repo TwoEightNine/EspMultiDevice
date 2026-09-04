@@ -4,7 +4,7 @@
 #include <FS.h>
 
 #include "FileFormats.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "SdCardController.h"
 #include "SecretStorage.h"
 #include "UiKit.h"

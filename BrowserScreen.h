@@ -10,7 +10,7 @@
 
 #include "FileFormats.h"
 #include "BrowserText.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 
 class SdCardController;
 class WiFiController;

@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 #include "SdCardController.h"
-#include "Screen.h"
+#include "src/core/Screen.h"
 #include "TimeController.h"
 #include "WiFiController.h"
 

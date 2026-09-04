@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <esp_system.h>
 
-#include "DisplayController.h"
+#include "src/core/DisplayController.h"
 #include "AudioSettings.h"
 #include "AudioSettingsScreen.h"
 #include "AudioPlayerScreen.h"
@@ -12,14 +12,14 @@
 #include "ImageViewerScreen.h"
 #include "MicController.h"
 #include "SplashScreen.h"
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "SdCardController.h"
 #include "SettingsScreen.h"
 #include "SpeakerController.h"
 #include "SecretStorage.h"
-#include "SpiBusLock.h"
+#include "src/core/SpiBusLock.h"
 #include "TimeController.h"
-#include "TouchController.h"
+#include "src/core/TouchController.h"
 #include "TouchCalibrationScreen.h"
 #include "TextInputScreen.h"
 #include "VoiceRecorderScreen.h"

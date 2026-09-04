@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-#include "Screen.h"
+#include "src/core/Screen.h"
 
 class WiFiController;
 

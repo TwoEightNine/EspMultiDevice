@@ -1,5 +1,5 @@
 #include "SplashScreen.h"
-#include "Navigator.h"
+#include "src/app/Navigator.h"
 #include "WiFiController.h"
 #include "logo.h"
 

@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 
-#include "Navigation.h"
+#include "../core/Navigation.h"
 
 class Screen;
 
