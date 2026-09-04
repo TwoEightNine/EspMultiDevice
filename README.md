@@ -44,8 +44,7 @@ Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding ru
 - `esp_media.ino`: application entry point.
 - `src/core/Screen.h`: base class for application screens.
 - `src/app/Navigator.h` / `src/app/Navigator.cpp`: screen ID, navigation stack interface, and transitions.
-- `HomeScreen.h`: default screen interface.
-- `HomeScreen.cpp`: SD status display and touch-log screen behavior.
+- `src/features/home/HomeScreen.h` / `src/features/home/HomeScreen.cpp`: SD status display and touch-log screen behavior.
 - `src/core/DisplayController.h` / `src/core/DisplayController.cpp`: TFT_eSPI setup and simple status screens.
 - `src/core/TouchController.h` / `src/core/TouchController.cpp`: XPT2046 SPI polling, pressure detection, and coordinate mapping.
 - `src/services/storage/SdCardController.h` / `src/services/storage/SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
@@ -55,17 +54,16 @@ Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding ru
 - `src/services/audio/MicController.h` / `src/services/audio/MicController.cpp`: INMP441 I2S setup, power-switch sensing, and PCM reads.
 - `src/services/audio/SpeakerController.h` / `src/services/audio/SpeakerController.cpp`: MAX98357A I2S setup and PCM writes.
 - `src/services/audio/AudioSettings.h` / `src/services/audio/AudioSettings.cpp`: persisted audio settings and volume control.
-- `VoiceRecorderScreen.h`: voice recorder screen interface.
-- `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
-- `WorkoutScreen.h` / `WorkoutScreen.cpp`: configurable interval workout timer with audible stage cues.
-- `FilesScreen.h` / `FilesScreen.cpp`: SD-card file browser UI and navigation.
-- `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, WebP, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
-- `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
-- `VideoPlayerScreen.h` / `VideoPlayerScreen.cpp`: MP4/3GP H.264, H.263, and MPEG-4 Part 2 converter and cached video player with optional AAC-LC/MP3/AMR-NB audio.
+- `src/features/recording/VoiceRecorderScreen.h` / `src/features/recording/VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
+- `src/features/workout/WorkoutScreen.h` / `src/features/workout/WorkoutScreen.cpp`: configurable interval workout timer with audible stage cues.
+- `src/features/files/FilesScreen.h` / `src/features/files/FilesScreen.cpp`: SD-card file browser UI and navigation.
+- `src/features/image_viewer/ImageViewerScreen.h` / `src/features/image_viewer/ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, WebP, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
+- `src/features/audio_player/AudioPlayerScreen.h` / `src/features/audio_player/AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
+- `src/features/video_player/VideoPlayerScreen.h` / `src/features/video_player/VideoPlayerScreen.cpp`: MP4/3GP H.264, H.263, and MPEG-4 Part 2 converter and cached video player with optional AAC-LC/MP3/AMR-NB audio.
 - `src/core/Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
 - `src/media/FileFormats.h`: shared registry for image, audio, and video media plus explicit internal-only cache formats.
-- `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
-- `BrowserScreen.h` / `BrowserScreen.cpp`: lightweight HTTP/HTTPS browser, HTML-to-text renderer, bounded cookie jar, recent-site persistence, and browser UI.
+- `src/features/settings/WiFiScreen.h` / `src/features/settings/WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
+- `src/features/browser/BrowserScreen.h` / `src/features/browser/BrowserScreen.cpp`: lightweight HTTP/HTTPS browser, HTML-to-text renderer, bounded cookie jar, recent-site persistence, and browser UI.
 
 ## Browser
 
