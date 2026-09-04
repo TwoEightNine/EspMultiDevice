@@ -31,6 +31,23 @@ The recommended wiring below avoids `GPIO 0`, `GPIO 19/20`, and `GPIO 45/46` for
 - Uses a lightweight screen/navigation layer so UI screens handle their own drawing, touch, and animation ticks.
 - Image Viewer supports BMP, PNG, JPG, JPEG, WebP, and animated GIF/WebP files with PSRAM-backed rendering and SD-backed frame caches. From Files, tap the left or right 48-pixel screen edge to move to the previous or next supported image in the naturally sorted folder listing; navigation wraps at either end and has no on-screen arrows. Animated images are downscaled only when needed to fit a 320x240 photo viewport; they are never upscaled. `.emga` v4 stores packed 4,096-color RGB444 pixels per frame, which the second-core loader expands into a PSRAM RGB565 ring. Playback clamps source delays to 100 ms (10 fps) so the SD/touch shared SPI bus has deterministic time to refill. GIF/WebP frames transfer only their centered photo rectangle in short loop-sized batches, so the close X does not flicker and touch presses are polled between display transfers.
 
+## Source Layout
+
+`esp_media.ino` and `build_opt.h` remain in the sketch root because Arduino requires the primary sketch there and PNGdec consumes the build option header from that location. Application sources are recursively compiled from `src/`:
+
+```text
+src/
+  app/             navigation registration and stack management
+  core/            shared screen, display, touch, and SPI primitives
+  features/        user-visible application screens, grouped by feature
+  media/           shared media formats, caches, and decoders
+  services/        audio, network, and storage controllers
+  ui/              shared drawing, text, icons, logo, and generated fonts
+  vendor_shims/    controlled Arduino compilation wrappers for third_party/
+```
+
+`third_party/` remains outside `src/` so its upstream sources are compiled only through `src/vendor_shims/`. Development generators live in `tools/`.
+
 ## Files
 
 Files keeps a bounded in-memory LRU of the directories visited during one Files-screen visit. A folder is enumerated and sorted once (directories first, then case-insensitive natural A–Z); returning to a cached folder does not re-read its entries. The cache survives opening a player or the rename keyboard and is discarded when Files is closed or the SD card changes.

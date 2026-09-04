@@ -1,4 +1,0 @@
-// libwebp v1.6.0 source wrapper; compiled as its own C translation unit.
-#define HAVE_CONFIG_H 1
-#define WEBP_DISABLE_THREADING 1
-#include "third_party/libwebp/src/utils/quant_levels_dec_utils.c"
