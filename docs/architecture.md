@@ -69,6 +69,17 @@ Browser callback for cache cleanup and persistent-state loading; the callback
 never draws, while `BrowserScreen::tick()` consumes the completion signal and
 redraws on the UI task.
 
+`BrowserDocument` owns the Browser's bounded parsed-document storage: rows,
+links, forms, styles, page boundaries, document background, and embedded-image
+descriptors. It also owns display-independent pagination, thumbnail reflow,
+document hit testing, and form value/reset/toggle/payload behavior. The screen
+supplies a layout snapshot and normalized-URL callback, then consumes the
+document through read-only records and explicit mutation methods; it neither
+declares nor reaches into a duplicate document model. `BrowserScreen` still
+owns image-worker queues, network/cache access, decoding, and thumbnail pixel
+allocation/freeing. Moving that work to a separate Browser image-worker
+component is intentionally outside the document boundary.
+
 ## File and source boundaries
 
 ```text
