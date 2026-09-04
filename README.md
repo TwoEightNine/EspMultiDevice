@@ -332,11 +332,11 @@ Place a 100 nF capacitor from the divider midpoint (`GPIO 3`) to ground. The div
 | 100 kΩ / 100 kΩ midpoint | `GPIO 3` |
 | Divider ground / cell negative | `GND` |
 
-The indicator uses a resting-cell Li-ion voltage curve, so heavy display, Wi-Fi, or speaker loads can temporarily report a lower percentage than the charge level at rest.
+The indicator uses a resting-cell Li-ion voltage curve, so heavy display, Wi-Fi, or speaker loads can temporarily report a lower percentage than the charge level at rest. Firmware takes the median of nine calibrated ADC readings at each five-second refresh, smooths that voltage over roughly 15 seconds, and ignores one-percent display changes. This suppresses brief ADC and load transients without hiding sustained low-voltage conditions.
 
 ## Default INMP441 Microphone Wiring
 
-The INMP441 uses I2S input on pins that avoid the TFT, SD, touch, and the ESP32-S3 high GPIOs that are commonly tied to flash, PSRAM, or board features. The microphone power should go through a real physical switch. Power-switch sensing is supported by `MicController`, but it is disabled in the default wiring to avoid touching extra board-dependent pins during startup.
+The INMP441 uses I2S input on pins that avoid the TFT, SD, touch, and the ESP32-S3 high GPIOs that are commonly tied to flash, PSRAM, or board features. The microphone power should go through a real physical switch. The default wiring enables power-switch sensing on `GPIO 48`, so the recorder disables recording while the switch is off and stops safely if it is turned off during a recording.
 
 | INMP441 Pin / Switch Node | ESP32-S3 GPIO / Supply |
 | --- | --- |

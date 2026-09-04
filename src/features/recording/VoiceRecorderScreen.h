@@ -56,6 +56,7 @@ private:
   uint8_t _lastButtonMask;
   bool _sdMounted;
   bool _hasRecording;
+  bool _lastMicPowered;
   bool _lastTouchDown;
   String _status;
   String _lastStorageText;

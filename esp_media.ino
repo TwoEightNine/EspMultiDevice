@@ -213,7 +213,12 @@ void setup() {
     MIC_DATA_PIN,
     MIC_POWER_SENSE_PIN
   );
-  Serial.println(F("INMP441 microphone configured for lazy startup."));
+  if (mic->begin()) {
+    Serial.println(F("INMP441 microphone ready; power-switch sensing enabled."));
+  } else {
+    Serial.print(F("INMP441 microphone failed: "));
+    Serial.println(mic->lastError());
+  }
 
   speaker = new SpeakerController(
     SPEAKER_BCLK_PIN,

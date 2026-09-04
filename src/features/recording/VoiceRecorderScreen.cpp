@@ -51,11 +51,14 @@ VoiceRecorderScreen::VoiceRecorderScreen(Navigator &navigator,
     _lastButtonMask(0xff),
     _sdMounted(false),
     _hasRecording(false),
+    _lastMicPowered(true),
     _lastTouchDown(false),
     _status(F("Ready")) {
 }
 
 void VoiceRecorderScreen::onEnter() {
+  _lastMicPowered = _mic.isPowered();
+
   // Paint the recorder controls before probing the card so navigation never
   // waits on an SD response just to show this screen.
   draw();
@@ -86,6 +89,14 @@ void VoiceRecorderScreen::handleTouch(const TouchPoint &point) {
 
 void VoiceRecorderScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
+
+  bool micPowered = _mic.isPowered();
+  if (micPowered != _lastMicPowered) {
+    _lastMicPowered = micPowered;
+    if (_state == State::Idle) {
+      setStatus(micPowered ? F("Mic switch turned on") : F("Mic switch turned off"));
+    }
+  }
 
   if (_state == State::Recording) {
     recordChunk();

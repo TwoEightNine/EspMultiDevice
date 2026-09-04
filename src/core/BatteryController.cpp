@@ -21,11 +21,17 @@ const ChargePoint RestingChargeCurve[] = {
 
 const uint8_t ChargePointCount = sizeof(RestingChargeCurve) / sizeof(RestingChargeCurve[0]);
 const float DividerMultiplier = 2.0f;
+const float VoltageSmoothingFactor = 0.25f;
+const uint8_t PercentageHysteresis = 1;
 
 }  // namespace
 
 BatteryController::BatteryController(int adcPin)
-  : _adcPin(adcPin) {
+  : _adcPin(adcPin),
+    _hasFilteredVoltage(false),
+    _filteredVoltage(0.0f),
+    _hasReportedPercentage(false),
+    _reportedPercentage(0) {
 }
 
 void BatteryController::begin() {
@@ -36,20 +42,54 @@ void BatteryController::begin() {
 }
 
 float BatteryController::voltage() {
+  float measuredVoltage = readMedianVoltage();
+  if (!_hasFilteredVoltage) {
+    _filteredVoltage = measuredVoltage;
+    _hasFilteredVoltage = true;
+  } else {
+    // Home refreshes every five seconds, so this gives a roughly 15-second
+    // response while smoothing short ADC and load transients.
+    _filteredVoltage += VoltageSmoothingFactor * (measuredVoltage - _filteredVoltage);
+  }
+
+  return _filteredVoltage;
+}
+
+float BatteryController::readMedianVoltage() {
   // The first conversion after selecting an ADC channel is commonly noisy.
   (void)analogReadMilliVolts(_adcPin);
 
-  uint32_t totalMillivolts = 0;
+  uint32_t millivolts[SampleCount];
   for (uint8_t i = 0; i < SampleCount; ++i) {
-    totalMillivolts += analogReadMilliVolts(_adcPin);
+    millivolts[i] = analogReadMilliVolts(_adcPin);
   }
 
-  const float dividerMillivolts = (float)totalMillivolts / SampleCount;
-  return dividerMillivolts * DividerMultiplier / 1000.0f;
+  for (uint8_t i = 1; i < SampleCount; ++i) {
+    uint32_t value = millivolts[i];
+    uint8_t position = i;
+    while (position > 0 && millivolts[position - 1] > value) {
+      millivolts[position] = millivolts[position - 1];
+      --position;
+    }
+    millivolts[position] = value;
+  }
+
+  return millivolts[SampleCount / 2] * DividerMultiplier / 1000.0f;
 }
 
 uint8_t BatteryController::percentage() {
-  return percentageForVoltage(voltage());
+  uint8_t measuredPercentage = percentageForVoltage(voltage());
+  if (!_hasReportedPercentage) {
+    _reportedPercentage = measuredPercentage;
+    _hasReportedPercentage = true;
+  } else {
+    int16_t difference = (int16_t)measuredPercentage - _reportedPercentage;
+    if (difference > PercentageHysteresis || difference < -PercentageHysteresis) {
+      _reportedPercentage = measuredPercentage;
+    }
+  }
+
+  return _reportedPercentage;
 }
 
 uint8_t BatteryController::percentageForVoltage(float measuredVoltage) const {

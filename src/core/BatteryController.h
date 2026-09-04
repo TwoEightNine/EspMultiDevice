@@ -13,9 +13,14 @@ public:
   uint8_t percentage();
 
 private:
-  static const uint8_t SampleCount = 8;
+  static const uint8_t SampleCount = 9;
 
   int _adcPin;
+  bool _hasFilteredVoltage;
+  float _filteredVoltage;
+  bool _hasReportedPercentage;
+  uint8_t _reportedPercentage;
 
+  float readMedianVoltage();
   uint8_t percentageForVoltage(float voltage) const;
 };
