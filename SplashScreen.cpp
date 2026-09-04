@@ -1,7 +1,7 @@
 #include "SplashScreen.h"
 #include "src/app/Navigator.h"
-#include "WiFiController.h"
-#include "logo.h"
+#include "src/services/network/WiFiController.h"
+#include "src/ui/logo.h"
 
 #define SPLASH_DURATION_MS 3000
 

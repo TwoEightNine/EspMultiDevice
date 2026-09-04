@@ -6,10 +6,10 @@
 #include "third_party/minimp3/minimp3.h"
 
 #include "src/core/Screen.h"
-#include "AudioSettings.h"
-#include "SdCardController.h"
-#include "SecretStorage.h"
-#include "SpeakerController.h"
+#include "src/services/audio/AudioSettings.h"
+#include "src/services/storage/SdCardController.h"
+#include "src/services/storage/SecretStorage.h"
+#include "src/services/audio/SpeakerController.h"
 
 class AudioPlayerScreen : public Screen {
 public:

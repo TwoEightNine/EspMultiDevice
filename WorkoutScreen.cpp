@@ -1,7 +1,7 @@
 #include "WorkoutScreen.h"
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 namespace {
 const int16_t ButtonHeight = 48;

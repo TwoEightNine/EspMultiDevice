@@ -1,7 +1,7 @@
 #include "AudioSettingsScreen.h"
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 AudioSettingsScreen::AudioSettingsScreen(Navigator &navigator,
                                          TouchController &touch,

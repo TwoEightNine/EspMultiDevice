@@ -4,9 +4,9 @@
 
 #include "AudioPlayerScreen.h"
 
-#include "FileFormats.h"
+#include "src/media/FileFormats.h"
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 #include <SD.h>
 #include <string.h>

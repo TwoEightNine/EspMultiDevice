@@ -4,11 +4,11 @@
 #include <FS.h>
 
 #include "src/core/Screen.h"
-#include "SdCardController.h"
-#include "SpeakerController.h"
-#include "SecretStorage.h"
-#include "VideoH264.h"
-#include "VideoLegacy.h"
+#include "src/services/storage/SdCardController.h"
+#include "src/services/audio/SpeakerController.h"
+#include "src/services/storage/SecretStorage.h"
+#include "src/media/VideoH264.h"
+#include "src/media/VideoLegacy.h"
 
 struct MP4D_demux_tag;
 typedef struct MP4D_demux_tag MP4D_demux_t;

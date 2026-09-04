@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AudioSettings.h"
+#include "src/services/audio/AudioSettings.h"
 #include "src/core/Screen.h"
 
 class AudioSettingsScreen : public Screen {

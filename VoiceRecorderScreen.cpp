@@ -1,7 +1,7 @@
 #include "VoiceRecorderScreen.h"
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 #include <SD.h>
 #include <string.h>

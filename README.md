@@ -42,23 +42,19 @@ Hold the Files tile on Home for one second to enter a four-digit secret PIN. The
 Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding runs on the other core and takes the shared SD/touch SPI lock only for individual reads, so list drawing and touch handling remain responsive. Previews are retained in memory for the Files visit and in a validated `.cache/*.eth1` sidecar across visits; the source size and timestamp must match before a sidecar is used. Invalid, unsupported decoder variants, oversized WebP sources, and memory-constrained images retain the normal file icon.
 
 - `esp_media.ino`: application entry point.
-- `Screen.h`: base class for application screens.
-- `Navigator.h`: screen ID and navigation stack interface.
-- `Navigator.cpp`: registered screen lookup and stack transitions.
+- `src/core/Screen.h`: base class for application screens.
+- `src/app/Navigator.h` / `src/app/Navigator.cpp`: screen ID, navigation stack interface, and transitions.
 - `HomeScreen.h`: default screen interface.
 - `HomeScreen.cpp`: SD status display and touch-log screen behavior.
-- `DisplayController.h`: TFT display controller interface.
-- `DisplayController.cpp`: TFT_eSPI setup and simple status screens.
-- `TouchController.h`: XPT2046 touch controller interface.
-- `TouchController.cpp`: SPI polling, pressure detection, and coordinate mapping.
-- `SdCardController.h`: SD card controller interface.
-- `SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
-- `WiFiController.h` / `WiFiController.cpp`: asynchronous Wi-Fi scan, connection, reconnect, and credential lifecycle.
-- `TimeController.h` / `TimeController.cpp`: Wi-Fi-gated asynchronous SNTP synchronization with a fixed UTC+4 local clock.
-- `MicController.h`: INMP441 I2S microphone controller interface.
-- `MicController.cpp`: microphone I2S setup, power-switch sensing, and PCM reads.
-- `SpeakerController.h`: MAX98357A I2S speaker controller interface.
-- `SpeakerController.cpp`: speaker I2S setup and PCM writes.
+- `src/core/DisplayController.h` / `src/core/DisplayController.cpp`: TFT_eSPI setup and simple status screens.
+- `src/core/TouchController.h` / `src/core/TouchController.cpp`: XPT2046 SPI polling, pressure detection, and coordinate mapping.
+- `src/services/storage/SdCardController.h` / `src/services/storage/SdCardController.cpp`: SD mount, unmount, health check, and file helpers.
+- `src/services/storage/SecretStorage.h` / `src/services/storage/SecretStorage.cpp`: protected SD-card storage helpers.
+- `src/services/network/WiFiController.h` / `src/services/network/WiFiController.cpp`: asynchronous Wi-Fi scan, connection, reconnect, and credential lifecycle.
+- `src/services/network/TimeController.h` / `src/services/network/TimeController.cpp`: Wi-Fi-gated asynchronous SNTP synchronization with a fixed UTC+4 local clock.
+- `src/services/audio/MicController.h` / `src/services/audio/MicController.cpp`: INMP441 I2S setup, power-switch sensing, and PCM reads.
+- `src/services/audio/SpeakerController.h` / `src/services/audio/SpeakerController.cpp`: MAX98357A I2S setup and PCM writes.
+- `src/services/audio/AudioSettings.h` / `src/services/audio/AudioSettings.cpp`: persisted audio settings and volume control.
 - `VoiceRecorderScreen.h`: voice recorder screen interface.
 - `VoiceRecorderScreen.cpp`: record, stop, save-to-SD, and playback UI.
 - `WorkoutScreen.h` / `WorkoutScreen.cpp`: configurable interval workout timer with audible stage cues.
@@ -66,8 +62,8 @@ Visible BMP, PNG, JPEG, GIF, and WebP files receive 32×32 previews. Decoding ru
 - `ImageViewerScreen.h` / `ImageViewerScreen.cpp`: full-screen, aspect-fit viewer for BMP, PNG, baseline JPEG, WebP, and GIF images, with reusable `.em16` static canvases and `.emga` animated frame caches.
 - `AudioPlayerScreen.h` / `AudioPlayerScreen.cpp`: streamed WAV and MP3 player with play/pause controls and read-only progress.
 - `VideoPlayerScreen.h` / `VideoPlayerScreen.cpp`: MP4/3GP H.264, H.263, and MPEG-4 Part 2 converter and cached video player with optional AAC-LC/MP3/AMR-NB audio.
-- `Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
-- `FileFormats.h`: shared registry for image, audio, and video media plus explicit internal-only cache formats.
+- `src/core/Navigation.h`: reusable payload and result envelopes for screen-to-screen data exchange.
+- `src/media/FileFormats.h`: shared registry for image, audio, and video media plus explicit internal-only cache formats.
 - `WiFiScreen.h` / `WiFiScreen.cpp`: Wi-Fi enable switch, connection details, scan list, and password flow.
 - `BrowserScreen.h` / `BrowserScreen.cpp`: lightweight HTTP/HTTPS browser, HTML-to-text renderer, bounded cookie jar, recent-site persistence, and browser UI.
 
@@ -92,7 +88,7 @@ Interactive forms are bounded to 8 forms, 32 controls, and 80 select options per
 Draw an app bar after clearing the screen and before drawing content:
 
 ```cpp
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
 ```

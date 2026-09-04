@@ -1,10 +1,10 @@
 #include "VideoLegacy.h"
 
 extern "C" {
-#include "third_party/ffmpeg/libavcodec/avcodec.h"
-#include "third_party/ffmpeg/libavutil/error.h"
-#include "third_party/ffmpeg/libavutil/mem.h"
-#include "third_party/ffmpeg/libavutil/pixfmt.h"
+#include "../../third_party/ffmpeg/libavcodec/avcodec.h"
+#include "../../third_party/ffmpeg/libavutil/error.h"
+#include "../../third_party/ffmpeg/libavutil/mem.h"
+#include "../../third_party/ffmpeg/libavutil/pixfmt.h"
 }
 
 #include <esp32-hal-psram.h>

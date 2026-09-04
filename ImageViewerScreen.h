@@ -25,8 +25,8 @@ using File = fs::File;
 #include "third_party/libwebp/src/webp/demux.h"
 
 #include "src/core/Screen.h"
-#include "SdCardController.h"
-#include "SecretStorage.h"
+#include "src/services/storage/SdCardController.h"
+#include "src/services/storage/SecretStorage.h"
 
 class ImageViewerScreen : public Screen {
 public:

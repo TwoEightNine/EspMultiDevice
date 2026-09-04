@@ -3,10 +3,10 @@
 #include <Arduino.h>
 #include <FS.h>
 
-#include "MicController.h"
+#include "src/services/audio/MicController.h"
 #include "src/core/Screen.h"
-#include "SdCardController.h"
-#include "SpeakerController.h"
+#include "src/services/storage/SdCardController.h"
+#include "src/services/audio/SpeakerController.h"
 
 class VoiceRecorderScreen : public Screen {
 public:

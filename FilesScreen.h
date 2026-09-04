@@ -3,11 +3,11 @@
 #include <Arduino.h>
 #include <FS.h>
 
-#include "FileFormats.h"
+#include "src/media/FileFormats.h"
 #include "src/core/Screen.h"
-#include "SdCardController.h"
-#include "SecretStorage.h"
-#include "UiKit.h"
+#include "src/services/storage/SdCardController.h"
+#include "src/services/storage/SecretStorage.h"
+#include "src/ui/UiKit.h"
 
 class FileThumbnailWorker;
 

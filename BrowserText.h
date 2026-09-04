@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
-#include "UiText.h"
+#include "src/ui/UiText.h"
 
 // Browser-specific text decoding plus compatibility wrappers around the shared
 // UI renderer used for document text.

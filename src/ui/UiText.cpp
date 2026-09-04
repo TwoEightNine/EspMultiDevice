@@ -1,8 +1,8 @@
 #include "UiText.h"
 
-#include "BrowserFreeSans14.h"
-#include "BrowserFreeSans.h"
-#include "BrowserFreeSans24.h"
+#include "fonts/BrowserFreeSans14.h"
+#include "fonts/BrowserFreeSans.h"
+#include "fonts/BrowserFreeSans24.h"
 
 namespace UiText {
 namespace {

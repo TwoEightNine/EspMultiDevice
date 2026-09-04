@@ -5,7 +5,7 @@
 #include <SPI.h>
 #include <string.h>
 
-#include "src/core/SpiBusLock.h"
+#include "../../core/SpiBusLock.h"
 
 SdCardController::SdCardController(int sckPin,
                                    int misoPin,

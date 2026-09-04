@@ -1,7 +1,7 @@
 #include "ImageViewerScreen.h"
 
-#include "AnimationCache.h"
-#include "FileFormats.h"
+#include "src/media/AnimationCache.h"
+#include "src/media/FileFormats.h"
 #include "FilesScreen.h"
 
 // Arduino's sketch builder does not compile sources below the sketch root;
@@ -9,7 +9,7 @@
 #include "third_party/AnimatedGIF/AnimatedGIF.cpp"
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 #include <SD.h>
 #include <esp32-hal-psram.h>

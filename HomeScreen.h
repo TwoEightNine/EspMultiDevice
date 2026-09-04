@@ -2,10 +2,10 @@
 
 #include <Arduino.h>
 
-#include "SdCardController.h"
+#include "src/services/storage/SdCardController.h"
 #include "src/core/Screen.h"
-#include "TimeController.h"
-#include "WiFiController.h"
+#include "src/services/network/TimeController.h"
+#include "src/services/network/WiFiController.h"
 
 class HomeScreen : public Screen {
 public:

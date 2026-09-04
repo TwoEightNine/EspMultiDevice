@@ -2,9 +2,9 @@
 
 #include <Arduino.h>
 
-#include "AudioSettings.h"
+#include "src/services/audio/AudioSettings.h"
 #include "src/core/Screen.h"
-#include "SpeakerController.h"
+#include "src/services/audio/SpeakerController.h"
 
 class WorkoutScreen : public Screen {
 public:

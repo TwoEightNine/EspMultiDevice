@@ -19,11 +19,11 @@ using File = fs::File;
 
 #include "src/app/Navigator.h"
 #include "BrowserText.h"
-#include "SdCardController.h"
+#include "src/services/storage/SdCardController.h"
 #include "src/core/SpiBusLock.h"
-#include "UiKit.h"
-#include "WiFiController.h"
-#include "icons.h"
+#include "src/ui/UiKit.h"
+#include "src/services/network/WiFiController.h"
+#include "src/ui/icons.h"
 
 namespace {
 const int16_t HeaderHeight = UiKit::AppBarHeight;

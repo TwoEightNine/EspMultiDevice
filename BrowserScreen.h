@@ -8,7 +8,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-#include "FileFormats.h"
+#include "src/media/FileFormats.h"
 #include "BrowserText.h"
 #include "src/core/Screen.h"
 

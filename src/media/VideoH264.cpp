@@ -1,8 +1,8 @@
 #include "VideoH264.h"
 
 extern "C" {
-#include "third_party/lib264/decoder/ih264_typedefs.h"
-#include "third_party/lib264/decoder/ih264d.h"
+#include "../../third_party/lib264/decoder/ih264_typedefs.h"
+#include "../../third_party/lib264/decoder/ih264d.h"
 }
 
 #include <esp32-hal-psram.h>

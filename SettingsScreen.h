@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 #include "src/core/Screen.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 class SettingsScreen : public Screen {
 public:

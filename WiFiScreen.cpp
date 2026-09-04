@@ -1,7 +1,7 @@
 #include "WiFiScreen.h"
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 namespace {
 const int16_t ContentPadding = UiKit::ContentPadding;

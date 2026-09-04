@@ -2,7 +2,7 @@
 
 #include "src/app/Navigator.h"
 #include "src/core/SpiBusLock.h"
-#include "icons.h"
+#include "src/ui/icons.h"
 
 #include <FS.h>
 #include <SD.h>

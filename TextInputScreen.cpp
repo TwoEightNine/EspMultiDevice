@@ -3,7 +3,7 @@
 #include <string.h>
 
 #include "src/app/Navigator.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 namespace {
 const uint16_t InputBorderColor = TFT_DARKGREY;

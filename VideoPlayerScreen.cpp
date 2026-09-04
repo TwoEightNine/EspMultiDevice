@@ -11,10 +11,10 @@ extern "C" {
 
 #include "VideoPlayerScreen.h"
 
-#include "AnimationCache.h"
+#include "src/media/AnimationCache.h"
 #include "src/app/Navigator.h"
 #include "src/core/SpiBusLock.h"
-#include "UiKit.h"
+#include "src/ui/UiKit.h"
 
 #include <SD.h>
 #include <esp32-hal-psram.h>

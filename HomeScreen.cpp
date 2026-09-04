@@ -1,8 +1,8 @@
 #include "HomeScreen.h"
 
 #include "src/app/Navigator.h"
-#include "UiText.h"
-#include "icons.h"
+#include "src/ui/UiText.h"
+#include "src/ui/icons.h"
 
 #define COLOR_BATTERY_GREEN 0x2c89
 #define COLOR_BATTERY_YELLOW 0xa54a

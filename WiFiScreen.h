@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 #include "src/core/Screen.h"
-#include "WiFiController.h"
+#include "src/services/network/WiFiController.h"
 
 class WiFiScreen : public Screen {
 public:
