@@ -8,7 +8,7 @@ The Home Browser app holds up to 16 recents and 16 favorites, each with URL and 
 
 Open pages have back, home, page-up, and page-down controls. The three-dot menu toggles the favorite state and swaps between `ESP-Media-Browser/1.0` and an Android mobile user agent; the choice reloads the current page and resets on Browser exit. While a page or previews load, Back becomes an X that cancels work. The Home control is disabled at the start page.
 
-History is limited to the current session. Cached pages restore immediately when available; fresh URL opens, recents, links, and redirects remain network-first. Session storage is `/.system/browser_session/`, capped at 16 MiB across pages and inline images, and evicts image sources before page bodies. It is cleared on Browser close and cleaned at next startup after an interrupted session. Recents, favorites, and cookies are plaintext in `/.system/browser_state.txt`.
+History is limited to the current session. Cached pages restore immediately when available; fresh URL opens, recents, links, and redirects remain network-first. Session storage is `/.system/browser_session/`, capped at 16 MiB across pages and inline images, and evicts image sources before page bodies. It is cleared on Browser close and cleaned at next startup after an interrupted session. Recents, favorites, and cookies are plaintext in `/.system/browser_state.txt`. The internal `BrowserPersistentState` component owns this bounded model and its atomic temporary-file commit; it does not make the file secure or change its format.
 
 ## HTTP(S), redirects, and downloads
 
@@ -19,6 +19,10 @@ Text response retention is capped at 512 KiB; longer responses render the retain
 Direct BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4, and 3GP responses stream to `/Downloads/` and open in the appropriate player. Downloads are capped at 16 MiB, use a temporary file, verify the final signature, and are discarded when malformed, compressed, interrupted, or too large. MP4/3GP downloads additionally validate their ISO-BMFF identity. Downloaded files persist until removed outside the browser.
 
 TLS certificate validation is deliberately disabled for compatibility. Do not use the browser for private information or sensitive accounts.
+
+The internal `BrowserTransport` component owns the shared HTTP and HTTPS
+clients and serializes foreground navigation with preview transfers. UI code
+continues to own progress display and cancellation affordances.
 
 ## Text, HTML, and CSS scope
 

@@ -36,15 +36,13 @@ const int16_t DocumentSidePadding = 8;
 const uint8_t StartListVisibleRows = 8;
 const uint8_t ThumbnailMaxWidth = 200;
 const uint8_t ThumbnailMaxHeight = 200;
-const uint32_t MaxEmbeddedImageBytes = 384UL * 1024UL;
+constexpr uint32_t MaxEmbeddedImageBytes = BrowserLimits::MaxEmbeddedImageBytes;
 const int16_t RecentListTop = HeaderHeight + 24;
 const uint16_t FooterButtonColor = 0x2965;
 const uint16_t DefaultTextColor = TFT_BLACK;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
 const char *ImagePlaceholderLabel = "image";
-const char *StatePath = "/.system/browser_state.txt";
-const char *StateTempPath = "/.system/browser_state.tmp";
 const char *DownloadDirectory = "/Downloads";
 const char *SessionCacheDirectory = "/.system/browser_session";
 // Some file hosts route unknown clients to an informational page instead of
@@ -467,21 +465,16 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
   : Screen(navigator, touch, display),
     _wifi(wifi),
     _sdCard(sdCard),
-    _plainClient(),
-    _secureClient(),
+    _transport(wifi),
+    _persistentState(sdCard),
     _formCount(0),
     _formControlCount(0),
     _formOptionCount(0),
     _editingFormControl(-1),
     _linkCount(0),
     _historyCount(0),
-    _recentCount(0),
-    _favoriteCount(0),
-    _cookieCount(0),
     _loaded(false),
-    _lifecycleLoading(false),
-    _lifecycleDrawPending(false),
-    _lifecycleGeneration(0),
+    _lifecycle(*this),
     _showStart(true),
     _showFavorites(false),
     _startListScroll(0),
@@ -503,15 +496,10 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _lastLoadingDrawBytes(0),
     _lastLoadingPercent(0),
     _lastLoadingKnownSize(false),
-    _sessionCacheActive(false),
-    _sessionCacheInitialized(false),
     _usingSessionPage(false),
     _downloadReturnUrl(),
     _deferCachedPageDraw(false),
     _deferCachedPageDrawStartedMs(0),
-    _sessionCacheBytes(0),
-    _sessionCacheClock(0),
-    _sessionCacheSequence(0),
     _documentBackgroundColor(TFT_WHITE),
     _titleBuffer(),
     _rowCount(0),
@@ -522,10 +510,6 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _imageJobs(xQueueCreate(ImageJobQueueLength, sizeof(ImageJob))),
     _imageResults(xQueueCreate(ImageJobQueueLength, sizeof(ImageResult))),
     _imageWorker(nullptr),
-    _lifecycleJobs(xQueueCreate(LifecycleJobQueueLength, sizeof(LifecycleJob))),
-    _lifecycleWorker(nullptr),
-    _httpMutex(xSemaphoreCreateMutex()),
-    _sessionCacheMutex(xSemaphoreCreateMutex()),
     _pageCount(0),
     _currentStyle{DefaultTextColor, TFT_WHITE, false, TFT_WHITE, false, false, false, false, false, 0, false},
     _styleDepth(0),
@@ -566,7 +550,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
   } else {
     browserLog(F("image worker unavailable: queue allocation failed"));
   }
-  if (_lifecycleJobs) {
+  {
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
     const BaseType_t workerCore = 0;
 #else
@@ -575,10 +559,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     // This worker only prepares disposable cache data and saved state.  It
     // must never outrun the core's idle task: on the usual Arduino dual-core
     // setup it is pinned to CPU 0, whose idle task feeds the task watchdog.
-    xTaskCreatePinnedToCore(lifecycleWorkerTask, "browser-startup", 6144, this,
-                            tskIDLE_PRIORITY, &_lifecycleWorker, workerCore);
-  } else {
-    browserLog(F("browser startup worker unavailable"));
+    if (!_lifecycle.begin(workerCore)) browserLog(F("browser startup worker unavailable"));
   }
 }
 
@@ -588,7 +569,7 @@ void BrowserScreen::onEnter() {
   // Draw the interactive shell before any SD work.  The lifecycle worker
   // loads persistent state and clears the previous session cache on the
   // other core; this avoids holding the Home screen during Browser entry.
-  if ((!_sessionCacheActive || !_loaded) && !_lifecycleLoading) startLifecycleLoad();
+  if ((!_sessionCacheActive || !_loaded) && !_lifecycle.loading()) startLifecycleLoad();
   draw();
 }
 
@@ -627,8 +608,7 @@ void BrowserScreen::onResult(const ScreenResult &result) {
 
 void BrowserScreen::tick(uint32_t nowMs) {
   (void)nowMs;
-  if (_lifecycleDrawPending) {
-    _lifecycleDrawPending = false;
+  if (_lifecycle.takeDrawPending()) {
     draw();
   }
   collectImageResults();
@@ -653,50 +633,27 @@ void BrowserScreen::startLifecycleLoad() {
   _showFavorites = false;
   _startListScroll = 0;
   _menuOpen = false;
-  _lifecycleGeneration++;
-  if (_lifecycleGeneration == 0) _lifecycleGeneration = 1;
-  _lifecycleLoading = true;
-  _lifecycleDrawPending = false;
   // Do not touch the SD card here.  A failed queue allocation still leaves a
   // useful Browser shell; state can be loaded on a later entry.
-  LifecycleJob job{_lifecycleGeneration};
-  if (!_lifecycleJobs || xQueueSend(_lifecycleJobs, &job, 0) != pdTRUE) {
-    _lifecycleLoading = false;
-    browserLog(F("browser startup job could not be queued"));
-  }
+  if (!_lifecycle.schedule()) browserLog(F("browser startup job could not be queued"));
 }
 
-void BrowserScreen::lifecycleWorkerTask(void *context) {
-  BrowserScreen *screen = static_cast<BrowserScreen *>(context);
-  LifecycleJob job{};
-  while (true) {
-    if (xQueueReceive(screen->_lifecycleJobs, &job, portMAX_DELAY) != pdTRUE) continue;
-    if (job.generation != screen->_lifecycleGeneration) continue;
-
-    // A browser session never needs its old temporary pages after it has
-    // been closed.  Performing this potentially long recursive SD cleanup
-    // here keeps both opening and closing Browser responsive.
-    screen->_sessionCacheActive = true;
-    screen->_sessionCacheInitialized = false;
-    {
-      HttpLock lock(screen->_sessionCacheMutex);
-      if (lock.locked() && job.generation == screen->_lifecycleGeneration) {
-        screen->_sessionCacheInitialized = screen->clearSessionCacheLocked();
-      }
-    }
-    if (job.generation == screen->_lifecycleGeneration) {
-      if (!screen->_loaded) {
-        // Let IDLE0 run between the cache walk and potentially long state
-        // parse, even when this task shares its priority with the idle task.
-        vTaskDelay(1);
-        screen->loadState();
-        screen->_loaded = true;
-      }
-      screen->_lifecycleLoading = false;
-      screen->_lifecycleDrawPending = true;
-      browserLog(F("browser startup work complete"));
-    }
+void BrowserScreen::runBrowserLifecycle(uint32_t generation) {
+  // A browser session never needs its old temporary pages after it has been
+  // closed. This method runs only on BrowserLifecycleWorker's other-core task.
+  startSession();
+  {
+    HttpLock lock(_sessionCacheMutex);
+    if (lock.locked() && _lifecycle.isCurrent(generation))
+      _sessionCacheInitialized = clearSessionCacheLocked();
   }
+  if (_lifecycle.isCurrent(generation) && !_loaded) {
+    // Let IDLE0 run between cleanup and state parsing on the Arduino core.
+    vTaskDelay(1);
+    loadState();
+    _loaded = true;
+  }
+  if (_lifecycle.isCurrent(generation)) browserLog(F("browser startup work complete"));
 }
 
 void BrowserScreen::handleTouch(const TouchPoint &point) {
@@ -783,14 +740,14 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     draw();
     return;
   }
-  if (_showStart && !_lifecycleLoading && contains(_startPreviousBounds, point.x, point.y)) {
+  if (_showStart && !_lifecycle.loading() && contains(_startPreviousBounds, point.x, point.y)) {
     if (_startListScroll > 0) {
       _startListScroll -= StartListVisibleRows;
       draw();
     }
     return;
   }
-  if (_showStart && !_lifecycleLoading && contains(_startNextBounds, point.x, point.y)) {
+  if (_showStart && !_lifecycle.loading() && contains(_startNextBounds, point.x, point.y)) {
     const uint8_t count = startSiteCount();
     if (_startListScroll + StartListVisibleRows < count) {
       _startListScroll += StartListVisibleRows;
@@ -881,7 +838,7 @@ void BrowserScreen::layout() {
     _startRemoveBounds[i] = {0, 0, 0, 0};
   }
   clampStartListScroll();
-  const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
+  const uint8_t count = _lifecycle.loading() ? 0 : startSiteCount();
   const uint8_t visible = count - _startListScroll < StartListVisibleRows
     ? count - _startListScroll : StartListVisibleRows;
   for (uint8_t row = 0; row < visible; row++) {
@@ -944,7 +901,7 @@ void BrowserScreen::drawStartPage() {
   // Recent-site records are populated by the lifecycle worker.  The footer
   // remains usable while it works, but the list itself is read only after its
   // hand-off frame in tick().
-  if (_lifecycleLoading) {
+  if (_lifecycle.loading()) {
     UiText::draw(tft, "Loading saved browser data...", 10, RecentListTop + 10,
                  TFT_DARKGREY, TFT_BLACK, UiText::Size::Compact);
     return;
@@ -1148,12 +1105,12 @@ void BrowserScreen::drawControls() {
   TFT_eSPI &tft = _display.tft();
   if (_showStart) {
     const Rect buttons[] = {_startAddBounds, _startToggleBounds, _startPreviousBounds, _startNextBounds};
-    const uint8_t count = _lifecycleLoading ? 0 : startSiteCount();
+    const uint8_t count = _lifecycle.loading() ? 0 : startSiteCount();
     // Opening a URL and switching between the two lists do not inspect the
     // records being loaded on the other core, so keep those controls live.
     // Paging waits for the completed, consistent list hand-off.
-    const bool active[] = {true, true, !_lifecycleLoading && _startListScroll > 0,
-                           !_lifecycleLoading && _startListScroll + StartListVisibleRows < count};
+    const bool active[] = {true, true, !_lifecycle.loading() && _startListScroll > 0,
+                           !_lifecycle.loading() && _startListScroll + StartListVisibleRows < count};
     for (uint8_t i = 0; i < 4; i++) {
       const Rect &button = buttons[i];
       const uint16_t color = FooterButtonColor;
@@ -1296,13 +1253,12 @@ void BrowserScreen::cancelLoading() {
 }
 
 void BrowserScreen::stopNetworkClientsIfIdle() {
-  HttpLock lock(_httpMutex, 0);
+  HttpLock lock(_transport.mutex(), 0);
   if (!lock.locked()) {
     browserLog(F("network client stop deferred to active request"));
     return;
   }
-  _plainClient.stop();
-  _secureClient.stop();
+  _transport.stopClients();
 }
 
 bool BrowserScreen::pollLoadingCancel() {
@@ -1508,27 +1464,15 @@ void BrowserScreen::openUrlInput() {
 }
 
 void BrowserScreen::resetSessionCacheEntries() {
-  _sessionCacheBytes = 0;
-  _sessionCacheClock = 0;
-  _sessionCacheSequence = 0;
-  for (uint8_t i = 0; i < MaxSessionPages; i++) {
-    _sessionPages[i] = {"", "", "", 0, 0, false};
-  }
-  for (uint8_t i = 0; i < MaxSessionImages; i++) {
-    _sessionImages[i] = {"", "", 0, 0, false};
-  }
+  resetCacheState();
 }
 
 void BrowserScreen::endSessionCache() {
   // This is called from the close button.  Cache cleanup can include many
   // FAT deletes, and an image worker can still own one of those files, so
   // leave cleanup for startLifecycleLoad() instead of blocking the UI task.
-  _lifecycleGeneration++;
-  if (_lifecycleGeneration == 0) _lifecycleGeneration = 1;
-  _lifecycleLoading = false;
-  _lifecycleDrawPending = false;
-  _sessionCacheInitialized = false;
-  _sessionCacheActive = false;
+  _lifecycle.cancel();
+  endSession();
   _usingSessionPage = false;
   browserLog(F("session cache cleanup deferred"));
 }
@@ -1539,7 +1483,7 @@ bool BrowserScreen::initializeSessionCacheLocked() {
   // A navigation made during the first displayed Browser frame should still
   // work, but it must not steal the cache's potentially long setup from the
   // UI task.  It simply proceeds without a session-cache write this time.
-  if (_lifecycleLoading) return false;
+  if (_lifecycle.loading()) return false;
   _sessionCacheInitialized = clearSessionCacheLocked();
   return _sessionCacheInitialized;
 }
@@ -2132,55 +2076,11 @@ void BrowserScreen::goBack() {
 }
 
 bool BrowserScreen::normalizeUrl(const String &value, String &normalized, String &error) const {
-  normalized = trimCopy(value);
-  error = "";
-  if (normalized.length() == 0) {
-    error = "Enter a URL";
-    return false;
-  }
-  if (normalized.indexOf("://") < 0) normalized = "https://" + normalized;
-  Url url;
-  if (!parseUrl(normalized, url)) {
-    error = "Only valid HTTP/HTTPS URLs work";
-    return false;
-  }
-  normalized = url.scheme + "://" + url.host;
-  bool defaultPort = (url.scheme == "http" && url.port == 80) || (url.scheme == "https" && url.port == 443);
-  if (!defaultPort) normalized += ":" + String(url.port);
-  normalized += url.path;
-  return true;
+  return BrowserTransport::normalizeUrl(value, normalized, error);
 }
 
 bool BrowserScreen::parseUrl(const String &value, Url &url) const {
-  int schemeEnd = value.indexOf("://");
-  if (schemeEnd <= 0) return false;
-  url.scheme = lower(value.substring(0, schemeEnd));
-  if (url.scheme != "http" && url.scheme != "https") return false;
-  int authorityStart = schemeEnd + 3;
-  int pathStart = value.indexOf('/', authorityStart);
-  int queryStart = value.indexOf('?', authorityStart);
-  if (pathStart < 0 || (queryStart >= 0 && queryStart < pathStart)) pathStart = queryStart;
-  String authority = pathStart < 0 ? value.substring(authorityStart) : value.substring(authorityStart, pathStart);
-  if (authority.length() == 0 || authority.indexOf('@') >= 0) return false;
-  int colon = authority.lastIndexOf(':');
-  url.port = url.scheme == "https" ? 443 : 80;
-  url.host = authority;
-  if (colon >= 0) {
-    String portText = authority.substring(colon + 1);
-    long port = portText.toInt();
-    if (port <= 0 || port > 65535 || String(port) != portText) return false;
-    url.port = (uint16_t)port;
-    url.host = authority.substring(0, colon);
-  }
-  url.host.trim();
-  if (url.host.length() == 0 || url.host.indexOf(' ') >= 0 || url.host.indexOf('[') >= 0) return false;
-  url.host = lower(url.host);
-  url.path = pathStart < 0 ? "/" : value.substring(pathStart);
-  if (url.path.startsWith("?")) url.path = "/" + url.path;
-  int fragment = url.path.indexOf('#');
-  if (fragment >= 0) url.path.remove(fragment);
-  if (url.path.length() == 0) url.path = "/";
-  return true;
+  return BrowserTransport::parseUrl(value, url);
 }
 
 bool BrowserScreen::fetch(const HttpRequest &initialRequest, String &finalUrl, String &body,
@@ -2215,7 +2115,7 @@ bool BrowserScreen::fetch(const HttpRequest &initialRequest, String &finalUrl, S
   // instances with foreground navigation.  Do not block the Arduino/UI task
   // indefinitely if a remote image server has stalled.  Poll in short slices
   // so the footer cancel button remains functional while it waits.
-  HttpLock lock(_httpMutex, 0);
+  HttpLock lock(_transport.mutex(), 0);
   while (!lock.acquire(pdMS_TO_TICKS(50))) {
     if (pollLoadingCancel()) {
       error = "Loading cancelled";
@@ -2340,13 +2240,12 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
     browserLog(String(F("request cancelled before connect: url=")) + url.scheme + F("://") + url.host + url.path);
     return false;
   }
-  _plainClient.stop();
-  _secureClient.stop();
-  client = &_plainClient;
+  _transport.stopClients();
+  client = &_transport.plainClient();
   if (url.scheme == "https") {
-    _secureClient.setInsecure();
-    _secureClient.setHandshakeTimeout(ConnectTimeoutMs / 1000);
-    client = &_secureClient;
+    _transport.secureClient().setInsecure();
+    _transport.secureClient().setHandshakeTimeout(ConnectTimeoutMs / 1000);
+    client = &_transport.secureClient();
   }
   setLoadingPhase(String(F("Connecting to ")) + url.host);
   browserLog(String(F("connecting: ")) + url.scheme + F("://") + url.host + F(":") + String(url.port));
@@ -2378,17 +2277,17 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
     // or a handshake timeout. Test TCP once first; retry TLS only when the
     // server is demonstrably reachable, avoiding a second long wait for an
     // unreachable address.
-    _plainClient.stop();
-    rawTcpState = _plainClient.connect(resolvedAddress, url.port, 1000) ? "connected" : "failed";
-    _plainClient.stop();
+    _transport.plainClient().stop();
+    rawTcpState = _transport.plainClient().connect(resolvedAddress, url.port, 1000) ? "connected" : "failed";
+    _transport.plainClient().stop();
     if (rawTcpState == "connected") {
-      _secureClient.stop();
-      _secureClient.setHandshakeTimeout(TlsRetryHandshakeTimeoutSeconds);
+      _transport.secureClient().stop();
+      _transport.secureClient().setHandshakeTimeout(TlsRetryHandshakeTimeoutSeconds);
       browserLog(String(F("HTTPS retrying resolved address: host=")) + url.host + F(", address=") +
                  resolvedAddress.toString() + F(", handshakeTimeoutSeconds=") +
                  String(TlsRetryHandshakeTimeoutSeconds));
       const uint32_t retryConnectStartedMs = millis();
-      connected = _secureClient.connect(resolvedAddress, url.port, url.host.c_str(), nullptr, nullptr, nullptr);
+      connected = _transport.secureClient().connect(resolvedAddress, url.port, url.host.c_str(), nullptr, nullptr, nullptr);
       retryConnectElapsedMs = millis() - retryConnectStartedMs;
       if (connected) browserLog(String(F("HTTPS retry via resolved address succeeded: elapsedMs=")) +
                                 String(retryConnectElapsedMs));
@@ -2397,7 +2296,7 @@ bool BrowserScreen::requestOne(const Url &url, HttpMethod method, const String &
   if (!connected) {
     char tlsErrorText[96] = {};
     const int tlsError = url.scheme == "https"
-      ? _secureClient.lastError(tlsErrorText, sizeof(tlsErrorText)) : 0;
+      ? _transport.secureClient().lastError(tlsErrorText, sizeof(tlsErrorText)) : 0;
     browserLog(String(F("connection failed: host=")) + url.host + F(", port=") + String(url.port) +
                F(", initialConnectMs=") + String(initialConnectElapsedMs) + F(", timeoutMs=") +
                String(ConnectTimeoutMs) + F(", wifiStatus=") +
@@ -2998,118 +2897,19 @@ bool BrowserScreen::readDownloadBody(WiFiClient &client, bool chunked, int32_t c
 }
 
 String BrowserScreen::resolveUrl(const Url &base, const String &reference) const {
-  String target = trimCopy(reference);
-  String root = base.scheme + "://" + base.host;
-  bool defaultPort = (base.scheme == "http" && base.port == 80) || (base.scheme == "https" && base.port == 443);
-  if (!defaultPort) root += ":" + String(base.port);
-
-  int fragment = target.indexOf('#');
-  if (fragment >= 0) target.remove(fragment);
-  if (target.length() == 0) return root + base.path;
-
-  if (target.startsWith("//")) return base.scheme + ":" + target;
-  if (target.indexOf("://") >= 0) return target;
-
-  int colon = target.indexOf(':');
-  int separator = target.length();
-  int slash = target.indexOf('/');
-  int query = target.indexOf('?');
-  if (slash >= 0 && slash < separator) separator = slash;
-  if (query >= 0 && query < separator) separator = query;
-  if (colon >= 0 && colon < separator) return target;
-
-  if (target.startsWith("/")) return root + target;
-  String path = base.path;
-  int queryStart = path.indexOf('?');
-  if (queryStart >= 0) path.remove(queryStart);
-  if (target.startsWith("?")) return root + path + target;
-  String directory = path;
-  slash = directory.lastIndexOf('/');
-  directory = slash >= 0 ? directory.substring(0, slash + 1) : "/";
-  return root + directory + target;
+  return BrowserTransport::resolveUrl(base, reference);
 }
 
 String BrowserScreen::cookieHeaderFor(const Url &url) const {
-  String result;
-  for (uint8_t i = 0; i < _cookieCount; i++) {
-    const Cookie &cookie = _cookies[i];
-    bool hostMatches = url.host == cookie.domain ||
-      (url.host.endsWith("." + cookie.domain) && cookie.domain.length() > 0);
-    String cookiePath = cookie.path.length() ? cookie.path : "/";
-    bool pathMatches = url.path.startsWith(cookiePath) &&
-      (cookiePath.endsWith("/") || url.path.length() == cookiePath.length() ||
-       url.path[cookiePath.length()] == '/');
-    if (!hostMatches || !pathMatches || (cookie.secure && url.scheme != "https")) continue;
-    if (result.length()) result += "; ";
-    result += cookie.name + "=" + cookie.value;
-  }
-  return result;
+  return _persistentState.cookieHeaderFor(url, nowEpoch());
 }
 
 void BrowserScreen::acceptCookie(const String &header, const Url &url) {
-  int separator = header.indexOf(';');
-  String first = trimCopy(separator < 0 ? header : header.substring(0, separator));
-  int equals = first.indexOf('=');
-  if (equals <= 0) return;
-  Cookie incoming;
-  incoming.name = trimCopy(first.substring(0, equals));
-  incoming.value = first.substring(equals + 1);
-  incoming.domain = url.host;
-  incoming.path = "/";
-  incoming.secure = false;
-  incoming.expiresAt = 0;
-  int position = separator < 0 ? header.length() : separator + 1;
-  while (position < (int)header.length()) {
-    int end = header.indexOf(';', position);
-    String attribute = trimCopy(header.substring(position, end < 0 ? header.length() : end));
-    int attributeEquals = attribute.indexOf('=');
-    String name = lower(trimCopy(attributeEquals < 0 ? attribute : attribute.substring(0, attributeEquals)));
-    String value = attributeEquals < 0 ? "" : trimCopy(attribute.substring(attributeEquals + 1));
-    if (name == "domain" && value.length()) {
-      if (value.startsWith(".")) value.remove(0, 1);
-      incoming.domain = lower(value);
-    } else if (name == "path" && value.startsWith("/")) {
-      incoming.path = value;
-    } else if (name == "secure") {
-      incoming.secure = true;
-    } else if (name == "max-age") {
-      long seconds = value.toInt();
-      if (seconds <= 0) incoming.expiresAt = 1;
-      else if (nowEpoch()) incoming.expiresAt = nowEpoch() + (uint64_t)seconds;
-    } else if (name == "expires" && !incoming.expiresAt) {
-      incoming.expiresAt = parseHttpDate(value);
-    }
-    if (end < 0) break;
-    position = end + 1;
-  }
-  if (incoming.name.length() == 0) return;
-  bool domainMatches = url.host == incoming.domain || url.host.endsWith("." + incoming.domain);
-  if (!domainMatches) return;
-  for (uint8_t i = 0; i < _cookieCount; i++) {
-    if (_cookies[i].name == incoming.name && _cookies[i].domain == incoming.domain && _cookies[i].path == incoming.path) {
-      _cookies[i] = incoming;
-      pruneCookies();
-      return;
-    }
-  }
-  if (_cookieCount < MaxCookies) _cookies[_cookieCount++] = incoming;
-  else {
-    for (uint8_t i = 1; i < MaxCookies; i++) _cookies[i - 1] = _cookies[i];
-    _cookies[MaxCookies - 1] = incoming;
-  }
-  pruneCookies();
+  _persistentState.acceptCookie(header, url, nowEpoch());
 }
 
 void BrowserScreen::pruneCookies() {
-  uint64_t now = nowEpoch();
-  for (uint8_t i = 0; i < _cookieCount;) {
-    if (_cookies[i].expiresAt == 1 || (now && _cookies[i].expiresAt && _cookies[i].expiresAt <= now)) {
-      for (uint8_t j = i + 1; j < _cookieCount; j++) _cookies[j - 1] = _cookies[j];
-      _cookieCount--;
-    } else {
-      i++;
-    }
-  }
+  _persistentState.pruneCookies(nowEpoch());
 }
 
 uint64_t BrowserScreen::nowEpoch() const {
@@ -4837,29 +4637,16 @@ void BrowserScreen::addHistory(const String &url) {
 }
 
 void BrowserScreen::addRecent(const String &url, const String &title) {
-  uint8_t found = _recentCount;
-  for (uint8_t i = 0; i < _recentCount; i++) {
-    if (_recentSites[i].url == url) {
-      found = i;
-      break;
-    }
-  }
-  if (found < _recentCount) {
-    for (uint8_t i = found; i > 0; i--) _recentSites[i] = _recentSites[i - 1];
-  } else {
-    if (_recentCount < MaxRecentSites) _recentCount++;
-    for (uint8_t i = _recentCount - 1; i > 0; i--) _recentSites[i] = _recentSites[i - 1];
-  }
-  _recentSites[0] = {url, title};
-  browserLog(String(F("recent site saved: entries=")) + String(_recentCount));
+  _persistentState.addRecent(url, title);
+  browserLog(String(F("recent site saved: entries=")) + String(_persistentState.recentCount()));
 }
 
 uint8_t BrowserScreen::startSiteCount() const {
-  return _showFavorites ? _favoriteCount : _recentCount;
+  return _showFavorites ? _persistentState.favoriteCount() : _persistentState.recentCount();
 }
 
 const BrowserScreen::RecentSite &BrowserScreen::startSiteAt(uint8_t index) const {
-  return _showFavorites ? _favoriteSites[index] : _recentSites[index];
+  return _showFavorites ? _persistentState.favoriteAt(index) : _persistentState.recentAt(index);
 }
 
 void BrowserScreen::clampStartListScroll() {
@@ -4874,46 +4661,31 @@ void BrowserScreen::clampStartListScroll() {
 }
 
 bool BrowserScreen::isFavorite(const String &url) const {
-  if (url.length() == 0) return false;
-  for (uint8_t i = 0; i < _favoriteCount; i++) {
-    if (_favoriteSites[i].url == url) return true;
-  }
-  return false;
+  return url.length() && _persistentState.isFavorite(url);
 }
 
 void BrowserScreen::addFavorite(const String &url, const String &title) {
   if (url.length() == 0 || isFavorite(url)) return;
-  if (_favoriteCount >= MaxRecentSites) {
+  if (_persistentState.favoriteCount() >= MaxRecentSites) {
     browserLog(F("favorite site ignored: list is full"));
     return;
   }
-  _favoriteSites[_favoriteCount++] = {url, title};
-  browserLog(String(F("favorite site saved: entries=")) + String(_favoriteCount));
+  _persistentState.addFavorite(url, title);
+  browserLog(String(F("favorite site saved: entries=")) + String(_persistentState.favoriteCount()));
 }
 
 void BrowserScreen::removeRecent(uint8_t index) {
-  if (index >= _recentCount) return;
-  for (uint8_t next = index + 1; next < _recentCount; next++) {
-    _recentSites[next - 1] = _recentSites[next];
-  }
-  _recentCount--;
-  _recentSites[_recentCount] = {"", ""};
+  if (index >= _persistentState.recentCount()) return;
+  _persistentState.removeRecent(index);
   clampStartListScroll();
-  browserLog(String(F("recent site removed: entries=")) + String(_recentCount));
+  browserLog(String(F("recent site removed: entries=")) + String(_persistentState.recentCount()));
 }
 
 void BrowserScreen::removeFavorite(const String &url) {
-  for (uint8_t i = 0; i < _favoriteCount; i++) {
-    if (_favoriteSites[i].url != url) continue;
-    for (uint8_t next = i + 1; next < _favoriteCount; next++) {
-      _favoriteSites[next - 1] = _favoriteSites[next];
-    }
-    _favoriteCount--;
-    _favoriteSites[_favoriteCount] = {"", ""};
-    clampStartListScroll();
-    browserLog(String(F("favorite site removed: entries=")) + String(_favoriteCount));
-    return;
-  }
+  if (!isFavorite(url)) return;
+  _persistentState.removeFavorite(url);
+  clampStartListScroll();
+  browserLog(String(F("favorite site removed: entries=")) + String(_persistentState.favoriteCount()));
 }
 
 void BrowserScreen::toggleFavorite() {
@@ -4935,6 +4707,17 @@ void BrowserScreen::toggleUserAgent() {
 }
 
 void BrowserScreen::loadState() {
+  _persistentState.load();
+}
+
+void BrowserScreen::saveState() {
+  _persistentState.save();
+}
+
+// Kept as a short-lived migration reference while the browser state format is
+// being extracted.  BrowserPersistentState is the only compiled owner.
+#if 0
+void BrowserScreen::loadStateLegacy() {
   _recentCount = 0;
   _favoriteCount = 0;
   _cookieCount = 0;
@@ -5017,7 +4800,7 @@ void BrowserScreen::loadState() {
              F(", cookies=") + String(_cookieCount));
 }
 
-void BrowserScreen::saveState() {
+void BrowserScreen::saveStateLegacy() {
   pruneCookies();
   if (!_sdCard.isMounted()) {
     browserLog(F("saved state not written: SD card is not mounted"));
@@ -5094,3 +4877,4 @@ String BrowserScreen::decodeField(const String &value) const {
   }
   return result;
 }
+#endif

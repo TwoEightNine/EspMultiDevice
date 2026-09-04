@@ -9,13 +9,18 @@
 #include <freertos/task.h>
 
 #include "../../media/FileFormats.h"
-#include "BrowserText.h"
+#include "BrowserLimits.h"
+#include "BrowserPersistentState.h"
+#include "BrowserLifecycleWorker.h"
+#include "BrowserSessionCache.h"
+#include "BrowserTransport.h"
+#include "BrowserTypes.h"
 #include "../../core/Screen.h"
 
 class SdCardController;
 class WiFiController;
 
-class BrowserScreen : public Screen {
+class BrowserScreen : public Screen, private BrowserSessionCache, private BrowserLifecycleDelegate {
 public:
   BrowserScreen(Navigator &navigator,
                 TouchController &touch,
@@ -30,268 +35,67 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  // Start-page lists are paged in eight-row screens, with room for two pages
-  // of independently persisted recent and favorite entries.
-  static const uint8_t MaxRecentSites = 16;
-  static const uint8_t MaxCookies = 16;
-  static const uint16_t MaxRows = 192;
-  static const uint8_t MaxRunsPerRow = 16;
-  static const uint8_t MaxLinks = 64;
-  // Forms are deliberately bounded just like links and image previews. This
-  // keeps hostile or generated pages from consuming the ESP32 heap.
-  static const uint8_t MaxForms = 8;
-  static const uint8_t MaxFormControls = 32;
-  static const uint8_t MaxFormOptions = 80;
-  static const uint8_t MaxHistory = 8;
-  static const uint8_t MaxSessionPages = MaxHistory + 1;
-  static const uint8_t MaxSessionImages = 48;
-  static const uint8_t MaxStyleDepth = 16;
-  static const uint8_t MaxCssRules = 32;
-  static const uint8_t MaxCssSelectorLength = 48;
-  static const uint16_t MaxCssDeclarationLength = 256;
-  static const uint8_t MaxPages = 128;
-  // A thumbnail is kept only while there is enough memory for it. The row
-  // limit still bounds metadata and placeholders for pathological pages.
-  // Retain enough previews for a long article without allowing image-heavy
-  // pages to consume the internal heap needed by HTTPS.
-  static const uint16_t MaxEmbeddedImages = 48;
-  static const uint8_t ImageJobQueueLength = 4;
-  static const uint8_t LifecycleJobQueueLength = 1;
-  static const uint16_t ImageUrlMaxLength = 384;
-  // Keep enough of large legacy pages to reach their body while retaining a
-  // bounded allocation on the ESP32.
-  static const uint32_t MaxBodyBytes = 512UL * 1024UL;
-  static const uint16_t MaxFormPostBytes = 8UL * 1024UL;
-  static const uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
-  static const uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
-  // Keep the retained part of an HTTP line small.  Some sites send very
-  // large informational headers (notably Content-Security-Policy); those
-  // can be discarded while continuing to the blank header terminator.
-  static const uint16_t MaxHttpLineBytes = 2048;
-  static const uint8_t MaxResponseHeaderLines = 64;
-  static const uint32_t ConnectTimeoutMs = 10000;
-  static const uint8_t TlsRetryHandshakeTimeoutSeconds = 15;
-  // A stale background image request must never keep a foreground navigation
-  // stuck behind the shared HTTP client.  This is deliberately much shorter
-  // than the connection timeout: callers can cancel or retry immediately.
-  static const uint32_t NetworkLockTimeoutMs = 2000;
-  static const uint8_t MaxRedirects = 5;
+  // Compatibility aliases keep the extraction mechanical while ensuring all
+  // component-facing records and limits have one owning header.
+  using Rect = Browser::Rect;
+  using Url = Browser::Url;
+  using HttpResponse = Browser::HttpResponse;
+  using HttpMethod = Browser::HttpMethod;
+  using HttpRequest = Browser::HttpRequest;
+  using RecentSite = Browser::RecentSite;
+  using Cookie = Browser::Cookie;
+  using TextStyle = Browser::TextStyle;
+  using StyleOverride = Browser::StyleOverride;
+  using CssRule = Browser::CssRule;
+  using VisualRun = Browser::VisualRun;
+  using VisualRow = Browser::VisualRow;
+  using FormControlKind = Browser::FormControlKind;
+  using FormMethod = Browser::FormMethod;
+  using FormData = Browser::FormData;
+  using FormControl = Browser::FormControl;
+  using FormOption = Browser::FormOption;
+  using EmbeddedImage = Browser::EmbeddedImage;
+  using ImageJob = Browser::ImageJob;
+  using ImageResult = Browser::ImageResult;
+  using SessionPageCacheEntry = Browser::SessionPageCacheEntry;
+  using SessionImageCacheEntry = Browser::SessionImageCacheEntry;
+  using LifecycleJob = Browser::LifecycleJob;
+  using StyleFrame = Browser::StyleFrame;
 
-  struct Rect {
-    int16_t x;
-    int16_t y;
-    int16_t w;
-    int16_t h;
-  };
-
-  struct Url {
-    String scheme;
-    String host;
-    String path;
-    uint16_t port;
-  };
-
-  struct HttpResponse {
-    int statusCode;
-    String location;
-    String contentType;
-    String contentDisposition;
-    bool chunked;
-    bool compressed;
-    int32_t contentLength;
-  };
-
-  enum class HttpMethod : uint8_t { Get, Post };
-
-  struct HttpRequest {
-    HttpMethod method;
-    String url;
-    String body;
-  };
-
-  struct RecentSite {
-    String url;
-    String title;
-  };
-
-  struct Cookie {
-    String name;
-    String value;
-    String domain;
-    String path;
-    bool secure;
-    uint64_t expiresAt;
-  };
-
-  struct TextStyle {
-    uint16_t color;
-    uint16_t backgroundColor;
-    bool hasBackground;
-    uint16_t blockBackgroundColor;
-    bool hasBlockBackground;
-    bool bold;
-    bool italic;
-    bool underline;
-    bool link;
-    uint8_t linkIndex;
-    bool fullWidthImage;
-    BrowserText::Size size = BrowserText::Size::Normal;
-  };
-
-  struct StyleOverride {
-    bool hasColor;
-    uint16_t color;
-    bool hasBackground;
-    bool backgroundEnabled;
-    uint16_t backgroundColor;
-    bool hasBold;
-    bool bold;
-    bool hasItalic;
-    bool italic;
-    bool hasUnderline;
-    bool underline;
-    bool hasFullWidthImage;
-    bool fullWidthImage;
-    bool hasSize;
-    BrowserText::Size size;
-  };
-
-  struct CssRule {
-    String selector;
-    StyleOverride style;
-    uint16_t sourceOrder;
-    uint8_t specificity;
-    uint8_t selectorType;
-  };
-
-  struct VisualRun {
-    bool image;
-    String text;
-    TextStyle style;
-    int16_t imageIndex;
-    int16_t x;
-    int16_t width;
-  };
-
-  struct VisualRow {
-    bool image;
-    int8_t formControlIndex;
-    String imageLabel;
-    bool imageLink;
-    uint8_t imageLinkIndex;
-    int16_t imageIndex;
-    TextStyle style;
-    int16_t contentWidth;
-    uint8_t runCount;
-    VisualRun runs[MaxRunsPerRow];
-  };
-
-  enum class FormControlKind : uint8_t {
-    Text,
-    Textarea,
-    Checkbox,
-    Radio,
-    Select,
-    Submit,
-    Reset,
-    Unsupported
-  };
-
-  enum class FormMethod : uint8_t { Get, Post, Unsupported };
-
-  struct FormData {
-    String action;
-    FormMethod method;
-    bool urlEncoded;
-  };
-
-  struct FormControl {
-    FormControlKind kind;
-    int8_t formIndex;
-    String label;
-    bool labelIsPlaceholder;
-    String name;
-    String id;
-    String value;
-    String defaultValue;
-    bool checked;
-    bool defaultChecked;
-    bool disabled;
-    uint8_t firstOption;
-    uint8_t optionCount;
-    uint8_t selectedOption;
-    uint8_t defaultSelectedOption;
-  };
-
-  struct FormOption {
-    uint8_t controlIndex;
-    String label;
-    String value;
-  };
-
-  struct EmbeddedImage {
-    uint16_t *pixels;
-    uint8_t width;
-    uint8_t height;
-    uint16_t backgroundColor;
-    // Image records outlive parsing and worker jobs. Keeping their source as
-    // a fixed buffer avoids long-lived Arduino String state in this shared
-    // array; a corrupted String here previously crashed the dedupe scan.
-    char url[ImageUrlMaxLength];
-    uint32_t generation;
-    uint8_t state;
-  };
-
-  struct ImageJob {
-    uint16_t imageIndex;
-    uint32_t generation;
-    uint16_t backgroundColor;
-    bool useSessionCache;
-    char url[ImageUrlMaxLength];
-  };
-
-  struct SessionPageCacheEntry {
-    String url;
-    String contentType;
-    String path;
-    uint32_t bytes;
-    uint32_t lastUse;
-    bool used;
-  };
-
-  struct SessionImageCacheEntry {
-    String url;
-    String path;
-    uint32_t bytes;
-    uint32_t lastUse;
-    bool used;
-  };
-
-  struct ImageResult {
-    uint16_t imageIndex;
-    uint32_t generation;
-    uint16_t *pixels;
-    uint8_t width;
-    uint8_t height;
-  };
-
-  // Startup work is deliberately kept separate from the display task.  A
-  // previous implementation emptied the browser cache and parsed saved state
-  // from onEnter(), which left the Home screen visible and unresponsive while
-  // opening Browser.
-  struct LifecycleJob {
-    uint32_t generation;
-  };
-
-  struct StyleFrame {
-    String tag;
-    TextStyle style;
-  };
+  static constexpr uint8_t MaxRecentSites = BrowserLimits::MaxRecentSites;
+  static constexpr uint8_t MaxCookies = BrowserLimits::MaxCookies;
+  static constexpr uint16_t MaxRows = BrowserLimits::MaxRows;
+  static constexpr uint8_t MaxRunsPerRow = BrowserLimits::MaxRunsPerRow;
+  static constexpr uint8_t MaxLinks = BrowserLimits::MaxLinks;
+  static constexpr uint8_t MaxForms = BrowserLimits::MaxForms;
+  static constexpr uint8_t MaxFormControls = BrowserLimits::MaxFormControls;
+  static constexpr uint8_t MaxFormOptions = BrowserLimits::MaxFormOptions;
+  static constexpr uint8_t MaxHistory = BrowserLimits::MaxHistory;
+  static constexpr uint8_t MaxSessionPages = BrowserLimits::MaxSessionPages;
+  static constexpr uint8_t MaxSessionImages = BrowserLimits::MaxSessionImages;
+  static constexpr uint8_t MaxStyleDepth = BrowserLimits::MaxStyleDepth;
+  static constexpr uint8_t MaxCssRules = BrowserLimits::MaxCssRules;
+  static constexpr uint8_t MaxCssSelectorLength = BrowserLimits::MaxCssSelectorLength;
+  static constexpr uint16_t MaxCssDeclarationLength = BrowserLimits::MaxCssDeclarationLength;
+  static constexpr uint8_t MaxPages = BrowserLimits::MaxPages;
+  static constexpr uint16_t MaxEmbeddedImages = BrowserLimits::MaxEmbeddedImages;
+  static constexpr uint8_t ImageJobQueueLength = BrowserLimits::ImageJobQueueLength;
+  static constexpr uint8_t LifecycleJobQueueLength = BrowserLimits::LifecycleJobQueueLength;
+  static constexpr uint16_t ImageUrlMaxLength = BrowserLimits::ImageUrlMaxLength;
+  static constexpr uint32_t MaxBodyBytes = BrowserLimits::MaxBodyBytes;
+  static constexpr uint16_t MaxFormPostBytes = BrowserLimits::MaxFormPostBytes;
+  static constexpr uint32_t MaxDownloadBytes = BrowserLimits::MaxDownloadBytes;
+  static constexpr uint32_t MaxSessionCacheBytes = BrowserLimits::MaxSessionCacheBytes;
+  static constexpr uint16_t MaxHttpLineBytes = BrowserLimits::MaxHttpLineBytes;
+  static constexpr uint8_t MaxResponseHeaderLines = BrowserLimits::MaxResponseHeaderLines;
+  static constexpr uint32_t ConnectTimeoutMs = BrowserLimits::ConnectTimeoutMs;
+  static constexpr uint8_t TlsRetryHandshakeTimeoutSeconds = BrowserLimits::TlsRetryHandshakeTimeoutSeconds;
+  static constexpr uint32_t NetworkLockTimeoutMs = BrowserLimits::NetworkLockTimeoutMs;
+  static constexpr uint8_t MaxRedirects = BrowserLimits::MaxRedirects;
 
   WiFiController &_wifi;
   SdCardController &_sdCard;
-  WiFiClient _plainClient;
-  WiFiClientSecure _secureClient;
+  BrowserTransport _transport;
   String _linkUrls[MaxLinks];
   FormData _forms[MaxForms];
   FormControl _formControls[MaxFormControls];
@@ -303,16 +107,9 @@ private:
   String _historyUrls[MaxHistory];
   uint8_t _linkCount;
   uint8_t _historyCount;
-  RecentSite _recentSites[MaxRecentSites];
-  RecentSite _favoriteSites[MaxRecentSites];
-  Cookie _cookies[MaxCookies];
-  uint8_t _recentCount;
-  uint8_t _favoriteCount;
-  uint8_t _cookieCount;
+  BrowserPersistentState _persistentState;
   bool _loaded;
-  volatile bool _lifecycleLoading;
-  volatile bool _lifecycleDrawPending;
-  uint32_t _lifecycleGeneration;
+  BrowserLifecycleWorker _lifecycle;
   bool _showStart;
   bool _showFavorites;
   uint8_t _startListScroll;
@@ -334,8 +131,6 @@ private:
   uint32_t _lastLoadingDrawBytes;
   uint8_t _lastLoadingPercent;
   bool _lastLoadingKnownSize;
-  volatile bool _sessionCacheActive;
-  volatile bool _sessionCacheInitialized;
   bool _usingSessionPage;
   // Downloads open in a child viewer/player.  Keep the source page separate
   // from the downloaded URL so closing that child restores the document
@@ -343,11 +138,6 @@ private:
   String _downloadReturnUrl;
   bool _deferCachedPageDraw;
   uint32_t _deferCachedPageDrawStartedMs;
-  uint32_t _sessionCacheBytes;
-  uint32_t _sessionCacheClock;
-  uint32_t _sessionCacheSequence;
-  SessionPageCacheEntry _sessionPages[MaxSessionPages];
-  SessionImageCacheEntry _sessionImages[MaxSessionImages];
   uint16_t _documentBackgroundColor;
   String _titleBuffer;
   VisualRow _rows[MaxRows];
@@ -359,12 +149,6 @@ private:
   QueueHandle_t _imageJobs;
   QueueHandle_t _imageResults;
   TaskHandle_t _imageWorker;
-  QueueHandle_t _lifecycleJobs;
-  TaskHandle_t _lifecycleWorker;
-  SemaphoreHandle_t _httpMutex;
-  // Session entries are also accessed by the image worker, but reading a
-  // cached page must never wait behind that worker's HTTP request.
-  SemaphoreHandle_t _sessionCacheMutex;
   uint16_t _rowCount;
   uint16_t _pageStarts[MaxPages];
   uint8_t _pageCount;
@@ -496,8 +280,8 @@ private:
                                   bool useSessionCache, uint16_t *&pixels,
                                   uint8_t &width, uint8_t &height);
   static void imageWorkerTask(void *context);
-  static void lifecycleWorkerTask(void *context);
   void startLifecycleLoad();
+  void runBrowserLifecycle(uint32_t generation) override;
   void buildPages();
   uint16_t pageEndRow(uint8_t page) const;
   bool hasNextPage() const;
@@ -555,6 +339,4 @@ private:
 
   void loadState();
   void saveState();
-  String encodeField(const String &value) const;
-  String decodeField(const String &value) const;
 };

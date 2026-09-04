@@ -45,6 +45,30 @@ The UI loop must continue to process touch and redraw while expensive work is un
 
 SD and touch share clock/data lines. Long media reads are deliberately chunked, acquire `SpiBusLock` only around a read, and release it between chunks. Media decoders and frame rings rely on PSRAM. The supported N16R8 profile is not optional for the full animated-image/video feature set.
 
+## Browser internal boundaries
+
+`BrowserScreen` remains the Browser screen's Navigator and UI-task coordinator.
+Its browser-internal records and limits live in `BrowserTypes.h` and
+`BrowserLimits.h`, so bounded contracts are shared rather than duplicated in a
+screen declaration.
+
+`BrowserTransport` owns the HTTP client pair and their serialization mutex. It
+has no Navigator, touch, display, or SD dependency. `BrowserPersistentState`
+owns recents, favorites, cookies, and the plaintext browser-state file; it has
+no UI dependency. Both return data or terminal results to `BrowserScreen`,
+preserving the rule that no worker or service paints the display or navigates.
+
+`BrowserSessionCache` owns the Browser session's bounded page/image index,
+LRU accounting, and cache mutex. Its disposable files remain under
+`/.system/browser_session/`; the Browser lifecycle decides when to begin or
+end a session, while cache state is never duplicated in the screen.
+
+`BrowserLifecycleWorker` owns the Browser's one-entry lifecycle queue, worker
+task, generation invalidation, and completion signal. It invokes a narrow
+Browser callback for cache cleanup and persistent-state loading; the callback
+never draws, while `BrowserScreen::tick()` consumes the completion signal and
+redraws on the UI task.
+
 ## File and source boundaries
 
 ```text
