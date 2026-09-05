@@ -3,22 +3,45 @@
 #include <Arduino.h>
 #include <freertos/semphr.h>
 
+#include "../../media/FileFormats.h"
 #include "BrowserTypes.h"
 
-// Owns the bounded, disposable browser-session cache state.  Cache I/O stays
-// in the browser feature for this mechanical first move, but no screen now
-// owns the cache's records, accounting, or synchronization primitive.
+class SdCardController;
+
+// Owns the bounded, disposable browser-session cache, including its files,
+// LRU accounting, and synchronization. BrowserScreen only coordinates the
+// cache with navigation and its workers.
 class BrowserSessionCache {
 public:
-  BrowserSessionCache();
+  explicit BrowserSessionCache(SdCardController &sdCard);
 
-  void startSession();
+  void beginSession();
   void endSession();
+  bool prepareSession();
   bool active() const { return _sessionCacheActive; }
-  bool initialized() const { return _sessionCacheInitialized; }
 
-protected:
+  bool loadPage(const String &url, String &body, String &contentType,
+                const Browser::CancellationCheck *cancellation = nullptr);
+  bool storePage(const String &url, const String &contentType, const String &body,
+                 const Browser::CancellationCheck *cancellation = nullptr);
+  String findImage(const String &url);
+  String adoptImage(const String &url, const String &downloadedPath, FileFormats::Format format);
+  void discardImage(const String &url);
+
+private:
+  SdCardController &_sdCard;
   void resetCacheState();
+  bool clearSessionCache();
+  bool removeSessionFile(const String &path);
+  bool ensureSessionCacheSpace(uint32_t bytes, bool preservePages = false);
+  bool evictOldestSessionEntry();
+  bool evictOldestSessionImage();
+  void removeSessionPage(uint8_t index);
+  void removeSessionImage(uint8_t index);
+  uint32_t nextSessionCacheUse();
+  String nextSessionCachePath(const char *prefix, const char *extension);
+  int8_t sessionPageIndex(const String &url) const;
+  int8_t sessionImageIndex(const String &url) const;
 
   volatile bool _sessionCacheActive;
   volatile bool _sessionCacheInitialized;

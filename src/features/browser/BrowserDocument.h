@@ -28,9 +28,9 @@ struct BrowserDocumentContext {
   BrowserDocumentUrlResolver resolveUrl;
 };
 
-// Bounded parsed-document model. All mutation is UI-task-only. Image pixel
-// ownership remains with BrowserScreen until BrowserImageWorker is extracted;
-// this component stores only the accepted metadata/pointer for layout.
+// Bounded parsed-document model. All mutation is UI-task-only. Embedded-image
+// pixels are borrowed from BrowserImageWorker; this component stores only the
+// accepted metadata and pointer needed for layout and drawing.
 class BrowserDocument {
 public:
   BrowserDocument();
@@ -61,6 +61,7 @@ public:
   String formControlLabel(uint8_t controlIndex) const;
   String formControlValue(uint8_t controlIndex) const;
 
+  // Accepts a worker-owned buffer as a borrowed UI-task rendering reference.
   bool setImageResult(uint16_t imageIndex, uint32_t generation, uint16_t *pixels,
                       uint8_t width, uint8_t height);
 
@@ -87,9 +88,6 @@ public:
                      Browser::ImageJob &job);
   bool returnImageJobToPending(uint16_t imageIndex, uint32_t generation);
   bool hasUnfinishedImages(uint32_t generation) const;
-  // Screen remains the pixel allocator/free owner until BrowserImageWorker is
-  // extracted. Detach transfers exactly one accepted pointer to that owner.
-  uint16_t *detachImagePixels(uint16_t imageIndex);
   bool markImageFailed(uint16_t imageIndex, uint32_t generation);
   void clearImageDescriptors();
 

@@ -8,7 +8,14 @@ The Home Browser app holds up to 16 recents and 16 favorites, each with URL and 
 
 Open pages have back, home, page-up, and page-down controls. The three-dot menu toggles the favorite state and swaps between `ESP-Media-Browser/1.0` and an Android mobile user agent; the choice reloads the current page and resets on Browser exit. While a page or previews load, Back becomes an X that cancels work. The Home control is disabled at the start page.
 
-History is limited to the current session. Cached pages restore immediately when available; fresh URL opens, recents, links, and redirects remain network-first. Session storage is `/.system/browser_session/`, capped at 16 MiB across pages and inline images, and evicts image sources before page bodies. It is cleared on Browser close and cleaned at next startup after an interrupted session. Recents, favorites, and cookies are plaintext in `/.system/browser_state.txt`. The internal `BrowserPersistentState` component owns this bounded model and its atomic temporary-file commit; it does not make the file secure or change its format.
+History is limited to the current session. Cached pages restore without network access when available; fresh URL opens, recents, links, and redirects remain network-first. Session storage is `/.system/browser_session/`, capped at 16 MiB across pages and inline images, and evicts image sources before page bodies. It is cleared on Browser close and cleaned at next startup after an interrupted session. Recents, favorites, and cookies are plaintext in `/.system/browser_state.txt`. The internal `BrowserPersistentState` component owns this bounded model and its atomic temporary-file commit; it does not make the file secure or change its format.
+
+Page and cache loading is asynchronous. `BrowserScreen` starts one foreground
+request, keeps touch and display work on the UI task, and consumes coalesced
+progress plus the terminal result from `tick()`. A cache hit avoids the network
+and normally completes within the next UI ticks rather than inside the touch
+handler. While a foreground request is active, its footer Back control is an X;
+other page controls are disabled until the result or cancellation arrives.
 
 ## HTTP(S), redirects, and downloads
 
@@ -18,11 +25,27 @@ Text response retention is capped at 512 KiB; longer responses render the retain
 
 Direct BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4, and 3GP responses stream to `/Downloads/` and open in the appropriate player. Downloads are capped at 16 MiB, use a temporary file, verify the final signature, and are discarded when malformed, compressed, interrupted, or too large. MP4/3GP downloads additionally validate their ISO-BMFF identity. Downloaded files persist until removed outside the browser.
 
+The internal `BrowserDownloadStore` owns media-response classification, safe
+filename selection, and the complete temporary-file transaction. It bounds and
+serializes each SD write with the shared SPI lock, then exposes only a verified,
+atomically committed path to the Browser screen.
+
 TLS certificate validation is deliberately disabled for compatibility. Do not use the browser for private information or sensitive accounts.
 
-The internal `BrowserTransport` component owns the shared HTTP and HTTPS
-clients and serializes foreground navigation with preview transfers. UI code
-continues to own progress display and cancellation affordances.
+The internal `BrowserTransport` component owns the complete HTTP protocol
+transfer, including the private HTTP and HTTPS clients, serialization of
+foreground navigation with preview transfers, redirects, response framing,
+timeouts, and byte limits. It receives request policy plus observer/provider
+interfaces, streams downloads through `BrowserDownloadStore`, and returns one
+terminal result. Page and image workers implement its progress, cancellation,
+and cookie callbacks; transport never draws or navigates.
+
+The internal `BrowserPageLoader` runs the synchronous transport, session-page
+reads/writes, and text normalization on its worker task. It returns the final
+normalized URL, content type, UTF-8 text or verified download path, cache-origin
+flag, and typed error/cancellation state. `BrowserScreen::tick()` alone parses
+text into `BrowserDocument`, renders it, updates navigation state and recents,
+persists state, or opens a downloaded media file.
 
 ## Text, HTML, and CSS scope
 
@@ -37,5 +60,12 @@ Unsupported images show compact icon-and-alt placeholders; inside HTTP(S) links 
 ## Embedded images and forms
 
 Baseline JPEG, non-interlaced PNG, and GIF previews begin after static text renders. A second-core worker downloads/decodes each source and hands results to the UI task. Each source is limited to 384 KiB, renders aspect-fit up to 200 × 200, and is never upscaled; GIF uses its first frame. Cached source URLs are reused on later pages. If a thumbnail allocation cannot fit, remaining sources stay placeholders.
+
+The internal `BrowserImageWorker` owns preview transfers, session-cache access,
+decoders, queues, generation cancellation, and every preview pixel allocation.
+`BrowserDocument` creates copied jobs and stores only borrowed pointers accepted
+by `BrowserScreen::tick()` on the UI task. Cancelling or replacing a document
+invalidates the generation and releases queued, completed, and accepted preview
+buffers without allowing a stale result into the next document.
 
 Forms are capped at 8 forms, 32 controls, and 80 select options per document. The supported interactive controls are text/search/email/url/number fields, textareas, checkboxes, radios, single selects, submit, and reset. Named successful values use `application/x-www-form-urlencoded`: GET adds them to the action URL and POST sends an 8 KiB-capped body. POST values are not logged. 301/302/303 redirects become GET; 307/308 preserve the body. Other methods/encodings and password, file, multi-select, date/time, range, color, image, or unknown controls remain unsupported stubs.

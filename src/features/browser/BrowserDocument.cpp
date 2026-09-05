@@ -669,16 +669,6 @@ bool BrowserDocument::hasUnfinishedImages(uint32_t generation) const {
   return false;
 }
 
-uint16_t *BrowserDocument::detachImagePixels(uint16_t imageIndex) {
-  if (imageIndex >= _embeddedImageCount) return nullptr;
-  Browser::EmbeddedImage &image = _embeddedImages[imageIndex];
-  uint16_t *pixels = image.pixels;
-  image.pixels = nullptr;
-  image.width = image.height = 0;
-  if (image.state == 2) image.state = 0;
-  return pixels;
-}
-
 bool BrowserDocument::markImageFailed(uint16_t imageIndex, uint32_t generation) {
   if (imageIndex >= _embeddedImageCount) return false;
   Browser::EmbeddedImage &image = _embeddedImages[imageIndex];

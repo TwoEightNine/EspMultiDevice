@@ -11,20 +11,50 @@ struct Rect { int16_t x; int16_t y; int16_t w; int16_t h; };
 
 struct Url { String scheme; String host; String path; uint16_t port; };
 
-struct HttpResponse {
-  int statusCode;
-  String location;
-  String contentType;
-  String contentDisposition;
-  bool chunked;
-  bool compressed;
-  int32_t contentLength;
-};
-
 enum class HttpMethod : uint8_t { Get, Post };
 
 struct HttpRequest { HttpMethod method; String url; String body; };
 struct RecentSite { String url; String title; };
+
+struct LoadOptions {
+  String userAgent;
+  bool useSessionCache = false;
+  uint32_t bodyLimit = 0;
+  uint32_t downloadLimit = 0;
+};
+
+enum class PageLoadOutcome : uint8_t { Text, Download, Error };
+enum class PageLoadErrorKind : uint8_t {
+  None, InvalidRequest, Transport, TextEncoding, UnsupportedContent, Cancelled
+};
+
+struct PageLoadResult {
+  PageLoadOutcome outcome = PageLoadOutcome::Error;
+  PageLoadErrorKind errorKind = PageLoadErrorKind::None;
+  String finalUrl;
+  String contentType;
+  String textBody;
+  String downloadPath;
+  String error;
+  bool fromSessionCache = false;
+  bool cancelled = false;
+
+  bool succeeded() const {
+    return outcome != PageLoadOutcome::Error && !cancelled && error.length() == 0;
+  }
+};
+
+struct PageLoadProgress {
+  String phase;
+  uint32_t bytesReceived = 0;
+  int32_t totalBytes = -1;
+};
+
+class CancellationCheck {
+public:
+  virtual ~CancellationCheck() = default;
+  virtual bool cancelled() const = 0;
+};
 
 struct Cookie {
   String name;

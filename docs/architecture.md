@@ -52,11 +52,31 @@ Its browser-internal records and limits live in `BrowserTypes.h` and
 `BrowserLimits.h`, so bounded contracts are shared rather than duplicated in a
 screen declaration.
 
-`BrowserTransport` owns the HTTP client pair and their serialization mutex. It
-has no Navigator, touch, display, or SD dependency. `BrowserPersistentState`
-owns recents, favorites, cookies, and the plaintext browser-state file; it has
-no UI dependency. Both return data or terminal results to `BrowserScreen`,
-preserving the rule that no worker or service paints the display or navigates.
+`BrowserTransport` owns the complete synchronous HTTP transfer boundary: its
+private HTTP client pair and serialization mutex, DNS and compatibility-mode
+TLS policy, request/response parsing, redirects, body framing, timeouts, and
+byte limits. It receives request policy, a cookie provider, and a transfer
+observer rather than Navigator, touch, or display dependencies. It drives an
+injected `BrowserDownloadStore` and returns one terminal result containing the
+final URL and either retained text or a verified committed download path.
+`BrowserPersistentState` owns recents, favorites, cookies, and the plaintext
+browser-state file; it has no UI dependency. Neither transport nor persistence
+paints the display or navigates.
+
+`BrowserPageLoader` owns foreground page work above that synchronous transport:
+its one-entry request/result handoff, other-core task, generation cancellation,
+session-page cache access, UTF-8 normalization, and normalized cache writes. It
+coalesces progress into a latest-value record for `BrowserScreen::tick()` and
+returns a typed terminal result containing text, a download path, or an error.
+It may read and update browser cookies through `BrowserPersistentState`, but it
+never parses a `BrowserDocument`, draws, updates history/recents, or navigates.
+
+`BrowserDownloadStore` owns response media classification, safe download names,
+the single active `/Downloads` transaction, bounded incremental SD writes,
+signature and ISO-BMFF validation, and atomic commit or cleanup. It is injected
+into `BrowserTransport`, which owns HTTP body framing, cancellation polling,
+and progress callbacks. The store contains all download-specific `SD`,
+`SpiBusLock`, and `FileFormats` policy.
 
 `BrowserSessionCache` owns the Browser session's bounded page/image index,
 LRU accounting, and cache mutex. Its disposable files remain under
@@ -75,10 +95,21 @@ descriptors. It also owns display-independent pagination, thumbnail reflow,
 document hit testing, and form value/reset/toggle/payload behavior. The screen
 supplies a layout snapshot and normalized-URL callback, then consumes the
 document through read-only records and explicit mutation methods; it neither
-declares nor reaches into a duplicate document model. `BrowserScreen` still
-owns image-worker queues, network/cache access, decoding, and thumbnail pixel
-allocation/freeing. Moving that work to a separate Browser image-worker
-component is intentionally outside the document boundary.
+declares nor reaches into a duplicate document model. Embedded-image pixels in
+the document are borrowed, UI-task-only rendering references.
+
+`BrowserImageWorker` owns the Browser's JPEG/PNG/GIF thumbnail decoder, bounded
+job/result queues, other-core task, generation cancellation, image transfer and
+session-cache workflow, and all temporary or completed pixel allocations. It
+consumes copied jobs created by `BrowserDocument`, returns copied result records
+to `BrowserScreen::tick()`, and never draws, navigates, reflows, or mutates the
+document. The screen attaches accepted borrowed pixels to the document on the
+UI task and invalidates the worker generation before clearing those descriptors.
+
+Before submitting a page load, `BrowserScreen` invalidates embedded-image work
+and waits for any active decoder through successive non-blocking `tick()` calls.
+The shared `BrowserTransport` mutex remains the final serialization boundary for
+page and preview HTTP transfers.
 
 ## File and source boundaries
 
