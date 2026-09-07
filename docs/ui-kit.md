@@ -41,6 +41,13 @@ arrays with `tools/png_to_rgba565_icon.py` and draw them through
 colour; the helper alpha-blends every edge pixel without an SD card or display
 readback. Its maximum width is `UiKit::MaxRgba565IconWidth` (64 px).
 
+For a monochrome icon that needs runtime tinting, use its 8-bit alpha array
+with `UiKit::drawAlphaIcon()` and pass the desired foreground and immediate
+background colours. This retains antialiased edges without retaining a colour
+array at draw time. Both compile-time icon helpers leave fully transparent
+pixels untouched, so a non-rectangular parent background remains visible;
+redraw that background before replacing an existing icon.
+
 Use `UiText` for all application text:
 
 - `Compact`: metadata.

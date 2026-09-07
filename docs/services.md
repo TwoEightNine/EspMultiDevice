@@ -28,6 +28,6 @@ Recording and speaker playback never run concurrently because they share I2S clo
 
 The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
 
-The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. The controller measures every Home refresh, uses a median of nine samples, applies approximately 15 seconds of smoothing, and suppresses one-percent display flicker. Under Wi-Fi/display/speaker load the resting-cell curve can report a lower transient percentage.
+The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. The controller measures every Home refresh and uses the median of exactly three ADC samples, with no cross-refresh smoothing or averaging. The displayed percentage only decreases during one controller runtime; runtime charging support is not available. Under Wi-Fi/display/speaker load the resting-cell curve can report a lower transient percentage.
 
 At boot the serial log (115200 baud) prints reset cause, CPU frequency, flash bytes, and total/free/largest PSRAM block. A reported brownout reset indicates supply sag rather than an application exception.

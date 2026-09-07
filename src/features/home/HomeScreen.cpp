@@ -12,7 +12,7 @@
 namespace {
 const uint16_t StatusActiveColor = TFT_WHITE;
 const uint16_t StatusInactiveColor = TFT_DARKGREY;
-const uint16_t AppIconColor = TFT_WHITE;
+const uint16_t FilesIconColor = TFT_BLUE;
 }
 
 HomeScreen::HomeScreen(Navigator &navigator,
@@ -37,7 +37,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _lastClockCheckMs(0xffffffffUL),
     _lastBatteryCheckMs(0),
     _lastClockText("") {
-  _apps[0] = { "Files", AppAction::Files, TFT_BLUE, nullptr, 0, 0, 0, 0 };
+  _apps[0] = { "Files", AppAction::Files, TFT_YELLOW, nullptr, 0, 0, 0, 0 };
   _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
   _apps[2] = { "Settings", AppAction::Settings, TFT_DARKGREEN, nullptr, 0, 0, 0, 0 };
   _apps[3] = { "Browser", AppAction::Browser, TFT_CYAN, nullptr, 0, 0, 0, 0 };
@@ -186,23 +186,20 @@ void HomeScreen::drawSdIcon() {
   TFT_eSPI &tft = _display.tft();
   const int16_t x = _display.width() - 82;
   const int16_t y = 4;
-  uint16_t color = _sdMounted ? StatusActiveColor : StatusInactiveColor;
-  tft.fillRect(x, y, 16, 16, TFT_BLACK);
-  tft.drawXBitmap(x, y, ic_sd, 16, 16, color);
+  const uint16_t color = _sdMounted ? StatusActiveColor : StatusInactiveColor;
+  tft.fillRect(x, y, ic_sd_card_width, ic_sd_card_height, TFT_BLACK);
+  UiKit::drawAlphaIcon(tft, x, y, ic_sd_card_width, ic_sd_card_height,
+                       ic_sd_card_alpha, color, TFT_BLACK);
 }
 
 void HomeScreen::drawWifiIcon() {
   TFT_eSPI &tft = _display.tft();
   const int16_t x = _display.width() - 58;
   const int16_t y = 4;
-  tft.fillRect(x, y, ic_wifi_on_width, ic_wifi_on_height, TFT_BLACK);
-  if (_wifiConnected) {
-    UiKit::drawRgba565Icon(tft, x, y, ic_wifi_on_width, ic_wifi_on_height,
-                         ic_wifi_on_colors, ic_wifi_on_alpha, TFT_BLACK);
-  } else {
-    UiKit::drawRgba565Icon(tft, x, y, ic_wifi_off_width, ic_wifi_off_height,
-                         ic_wifi_off_colors, ic_wifi_off_alpha, TFT_BLACK);
-  }
+  const uint16_t color = _wifiConnected ? StatusActiveColor : StatusInactiveColor;
+  tft.fillRect(x, y, ic_wifi_width, ic_wifi_height, TFT_BLACK);
+  UiKit::drawAlphaIcon(tft, x, y, ic_wifi_width, ic_wifi_height,
+                       ic_wifi_alpha, color, TFT_BLACK);
 }
 
 void HomeScreen::drawBattery() {
@@ -235,14 +232,12 @@ void HomeScreen::drawApps() {
 }
 
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
-  (void)app;
-  (void)centerX;
-  (void)centerY;
-  // app icon: 64x64, 1 bit per pixel, colored dynamically at runtime
-  // TFT_eSPI &tft = _display.tft();
-  // int16_t x = centerX - IconBitmapSize / 2;
-  // int16_t y = centerY - IconBitmapSize / 2;
-  // tft.drawXBitmap(x, y, app.bitmap, IconBitmapSize, IconBitmapSize, AppIconColor, app.circleColor);
+  if (app.action != AppAction::Files) return;
+  UiKit::drawAlphaIcon(_display.tft(),
+                       centerX - ic_files_width / 2,
+                       centerY - ic_files_height / 2,
+                       ic_files_width, ic_files_height, ic_files_alpha,
+                       FilesIconColor, app.circleColor);
 }
 
 String HomeScreen::clockText(const struct tm &localTime) const {

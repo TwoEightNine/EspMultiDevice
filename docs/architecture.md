@@ -34,7 +34,7 @@ Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Im
 | `DisplayController` | Initializes TFT_eSPI, exposes the display, reports dimensions, and clears the panel. |
 | `TouchController` | Polls XPT2046 over SPI; debounces press/release, filters samples, maps to the display, and persists 4×4 mesh calibration at `/.system/touch`. |
 | `SpiBusLock` | FreeRTOS mutex for the SPI wires shared by SD and XPT2046. Concurrent work locks only individual transactions. |
-| `BatteryController` | Reads a divider-corrected cell voltage; reports the median of nine calibrated samples after ~15-second smoothing and one-percent hysteresis. |
+| `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. Its displayed percentage can only decrease for the controller's runtime; runtime charging support is not available. |
 | `SdCardController` | Mounts, monitors, and remounts FAT storage. `update()` is called from the main loop and consumers obtain pending `Mounted`, `Removed`, or `MountFailed` state through `takeEvent()`. |
 | `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, and incremental sidecar cleanup. Cache codecs retain their format-specific header and payload validation. |
 
