@@ -35,6 +35,12 @@ Use `UiKit`’s 24px navigation/control icons and its 16px list/keyboard icons. 
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
+For full-colour compile-time icons, generate straight RGB565 plus 8-bit alpha
+arrays with `tools/png_to_rgba565_icon.py` and draw them through
+`UiKit::drawRgba565Icon()`. Pass the icon's actual solid immediate background
+colour; the helper alpha-blends every edge pixel without an SD card or display
+readback. Its maximum width is `UiKit::MaxRgba565IconWidth` (64 px).
+
 Use `UiText` for all application text:
 
 - `Compact`: metadata.

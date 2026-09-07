@@ -1,6 +1,7 @@
 #include "HomeScreen.h"
 
 #include "../../app/Navigator.h"
+#include "../../ui/UiKit.h"
 #include "../../ui/UiText.h"
 #include "../../ui/icons.h"
 
@@ -194,9 +195,14 @@ void HomeScreen::drawWifiIcon() {
   TFT_eSPI &tft = _display.tft();
   const int16_t x = _display.width() - 58;
   const int16_t y = 4;
-  uint16_t color = _wifiConnected ? StatusActiveColor : StatusInactiveColor;
-  tft.fillRect(x, y, 16, 16, TFT_BLACK);
-  tft.drawXBitmap(x, y, ic_wifi, 16, 16, color);
+  tft.fillRect(x, y, ic_wifi_on_width, ic_wifi_on_height, TFT_BLACK);
+  if (_wifiConnected) {
+    UiKit::drawRgba565Icon(tft, x, y, ic_wifi_on_width, ic_wifi_on_height,
+                         ic_wifi_on_colors, ic_wifi_on_alpha, TFT_BLACK);
+  } else {
+    UiKit::drawRgba565Icon(tft, x, y, ic_wifi_off_width, ic_wifi_off_height,
+                         ic_wifi_off_colors, ic_wifi_off_alpha, TFT_BLACK);
+  }
 }
 
 void HomeScreen::drawBattery() {

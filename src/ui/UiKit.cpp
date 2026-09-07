@@ -11,6 +11,23 @@ constexpr int16_t ListIconX = 8;
 constexpr int16_t ListIconY = (ListCellHeight - ListIconSize) / 2;
 constexpr int16_t ListTextWithIconX = ListIconX + ListIconSize + ContentPadding;
 
+uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
+  if (alpha == 0) return background;
+  if (alpha == 255) return foreground;
+
+  const uint16_t inverseAlpha = 255 - alpha;
+  const uint16_t red = static_cast<uint16_t>(
+      ((static_cast<uint32_t>(foreground >> 11) * alpha) +
+       (static_cast<uint32_t>(background >> 11) * inverseAlpha) + 127) / 255);
+  const uint16_t green = static_cast<uint16_t>(
+      ((static_cast<uint32_t>((foreground >> 5) & 0x3f) * alpha) +
+       (static_cast<uint32_t>((background >> 5) & 0x3f) * inverseAlpha) + 127) / 255);
+  const uint16_t blue = static_cast<uint16_t>(
+      ((static_cast<uint32_t>(foreground & 0x1f) * alpha) +
+       (static_cast<uint32_t>(background & 0x1f) * inverseAlpha) + 127) / 255);
+  return static_cast<uint16_t>((red << 11) | (green << 5) | blue);
+}
+
 }  // namespace
 
 bool navigationIconContains(int16_t x, int16_t y) {
@@ -210,6 +227,30 @@ void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   if (capsLock) {
     tft.fillSmoothCircle(centerX, centerY + 5, 1, color, backgroundColor);
   }
+}
+
+void drawRgba565Icon(TFT_eSPI &tft,
+                     int16_t x,
+                     int16_t y,
+                     uint16_t width,
+                     uint16_t height,
+                     const uint16_t *colors,
+                     const uint8_t *alpha,
+                     uint16_t backgroundColor) {
+  if (!colors || !alpha || width == 0 || height == 0 || width > MaxRgba565IconWidth) return;
+
+  uint16_t row[MaxRgba565IconWidth];
+  tft.startWrite();
+  for (uint16_t rowIndex = 0; rowIndex < height; rowIndex++) {
+    const size_t offset = static_cast<size_t>(rowIndex) * width;
+    for (uint16_t column = 0; column < width; column++) {
+      const uint16_t foreground = pgm_read_word(colors + offset + column);
+      const uint8_t opacity = pgm_read_byte(alpha + offset + column);
+      row[column] = blendRgba565(foreground, backgroundColor, opacity);
+    }
+    tft.pushImage(x, y + static_cast<int16_t>(rowIndex), width, 1, row);
+  }
+  tft.endWrite();
 }
 
 void drawScaledXBitmap(TFT_eSPI &tft,

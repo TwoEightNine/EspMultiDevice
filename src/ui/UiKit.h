@@ -17,6 +17,9 @@ constexpr int16_t KeyboardIconSize = 16;
 constexpr int16_t ContentPadding = 16;
 constexpr int16_t ListCellHeight = 40;
 constexpr int16_t ListIconSize = 32;
+// Compile-time full-colour icon rows are blended on the UI task. Keeping the
+// buffer bounded avoids a heap allocation for each redraw.
+constexpr uint16_t MaxRgba565IconWidth = 64;
 constexpr uint16_t AppBarColor = 0x1082;  // #111111 in RGB565.
 constexpr uint16_t DividerColor = TFT_DARKGREY;
 
@@ -67,6 +70,19 @@ void drawKeyboardEnterIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                            uint16_t color, uint16_t backgroundColor);
 void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                            bool capsLock, uint16_t color, uint16_t backgroundColor);
+
+// Draws a flash-resident, straight-alpha RGB565 icon over a solid immediate
+// background. `colors` and `alpha` contain width * height entries generated
+// by tools/png_to_rgba565_icon.py. Icons wider than MaxRgba565IconWidth are
+// rejected so drawing remains allocation-free.
+void drawRgba565Icon(TFT_eSPI &tft,
+                     int16_t x,
+                     int16_t y,
+                     uint16_t width,
+                     uint16_t height,
+                     const uint16_t *colors,
+                     const uint8_t *alpha,
+                     uint16_t backgroundColor);
 
 void drawScaledXBitmap(TFT_eSPI &tft,
                        int16_t x,
