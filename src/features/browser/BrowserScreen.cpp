@@ -596,7 +596,10 @@ void BrowserScreen::drawDocument() {
       if (hasThumbnail) {
         drawThumbnail(row.imageIndex, DocumentSidePadding, y);
       } else {
-        tft.drawXBitmap(DocumentSidePadding + 2, y + 2, ic_file, 16, 16, color);
+        const uint16_t imageBackground = row.style.hasBackground ? row.style.backgroundColor : rowBackground;
+        UiKit::drawAlphaIcon(tft, DocumentSidePadding + 2, y + 2,
+                             ic_image_16_width, ic_image_16_height, ic_image_16_alpha,
+                             color, imageBackground);
         BrowserText::draw(tft, ImagePlaceholderLabel,
                           DocumentSidePadding + 22, y + 3, color, rowBackground);
       }
@@ -619,7 +622,9 @@ void BrowserScreen::drawDocument() {
           if (hasThumbnail) {
             drawThumbnail(run.imageIndex, x, y);
           } else {
-            tft.drawXBitmap(x + 2, y + 3, ic_file, 16, 16, color);
+            UiKit::drawAlphaIcon(tft, x + 2, y + 3,
+                                 ic_image_16_width, ic_image_16_height, ic_image_16_alpha,
+                                 color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
             BrowserText::draw(tft, ImagePlaceholderLabel, x + 22, y + 3, color,
                               run.style.hasBackground ? run.style.backgroundColor : rowBackground, run.style.size);
           }
@@ -733,7 +738,7 @@ void BrowserScreen::drawControls() {
     const int16_t centerX = button.x + button.w / 2;
     const int16_t centerY = button.y + button.h / 2;
     if (i == 0 && loading) UiKit::drawCloseIcon(tft, centerX, centerY, iconColor, color);
-    else if (i == 0) UiKit::drawBackIcon(tft, centerX, centerY, iconColor, color);
+    else if (i == 0) UiKit::drawFooterBackIcon(tft, centerX, centerY, iconColor, color);
     else if (i == 1) UiKit::drawHomeIcon(tft, centerX, centerY, iconColor, color);
     else UiKit::drawPageArrow(tft, centerX, centerY, true, i == 3, iconColor, color);
   }

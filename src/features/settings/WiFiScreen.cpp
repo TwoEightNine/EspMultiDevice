@@ -220,8 +220,7 @@ void WiFiScreen::drawNetworkList() {
     int16_t y = firstRowY + i * rowHeight;
     String details = String(WiFiController::securityType(network.authMode)) +
                      " " + String(network.rssi) + "dBm";
-    UiKit::drawListCell(tft, _display.width(), y, network.ssid,
-                        nullptr, TFT_WHITE, details);
+    UiKit::drawListCell(tft, _display.width(), y, network.ssid, details);
   }
 
   if (shown == 0) {

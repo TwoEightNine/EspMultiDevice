@@ -10,7 +10,7 @@ Clear the screen, then draw the bar before screen content:
 UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
 ```
 
-The helper draws a 48px `#111` bar. Its 24×24 antialiased navigation glyph has 12px padding inside a 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history.
+The helper draws a 48px `#111` bar. Its close glyph uses the generated 40×40 alpha asset, centered inside the 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history.
 
 Reserve y=0–47. Make the entire 48×48 cell tappable:
 
@@ -31,7 +31,7 @@ An icon-only list action has a 40×40 hit cell, a 16×16 kit glyph, and 12px pad
 
 ## Icons, smooth primitives, and text
 
-Use `UiKit`’s 24px navigation/control icons and its 16px list/keyboard icons. Every icon function takes its foreground and the immediate background color. Pass the true background color so TFT_eSPI antialiasing blends without display readback.
+Use `UiKit`’s generated 40px footer controls and 16px list/keyboard icons. The keyboard assets include off, one-shot Shift, and Caps Lock states. Every icon function takes its foreground and the immediate background color. Pass the true background color so TFT_eSPI antialiasing blends without display readback.
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
@@ -47,6 +47,12 @@ background colours. This retains antialiased edges without retaining a colour
 array at draw time. Both compile-time icon helpers leave fully transparent
 pixels untouched, so a non-rectangular parent background remains visible;
 redraw that background before replacing an existing icon.
+
+The 32px Files folder and document assets use `drawListCell()`'s alpha-icon
+variant so directory and media-type tints continue to apply. Browser uses the
+generated 40px close, back, home, recent, favorite, page-up, and page-down
+assets in footer controls; its saved-site removal control uses the 16px close
+asset.
 
 Use `UiText` for all application text:
 

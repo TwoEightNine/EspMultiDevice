@@ -13,7 +13,6 @@ constexpr int16_t NavigationIconSize = 24;
 constexpr int16_t AppBarIconPadding = (AppBarHeight - NavigationIconSize) / 2;
 // Action and keyboard glyph canvases; their owning cells supply the padding.
 constexpr int16_t ListActionIconSize = 16;
-constexpr int16_t KeyboardIconSize = 16;
 constexpr int16_t ContentPadding = 16;
 constexpr int16_t ListCellHeight = 40;
 constexpr int16_t ListIconSize = 32;
@@ -45,6 +44,10 @@ void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    uint16_t color, uint16_t backgroundColor);
 void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
+// 40px assets used by Files and Browser footer controls. The visual canvas
+// fills the 40px-tall footer cells while their complete cells remain tappable.
+void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                        uint16_t color, uint16_t backgroundColor);
 void drawPageArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    bool vertical, bool forward, uint16_t color,
                    uint16_t backgroundColor);
@@ -69,7 +72,8 @@ void drawKeyboardBackspaceIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 void drawKeyboardEnterIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                            uint16_t color, uint16_t backgroundColor);
 void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                           bool capsLock, uint16_t color, uint16_t backgroundColor);
+                           bool shifted, bool capsLock,
+                           uint16_t color, uint16_t backgroundColor);
 
 // Draws a flash-resident, straight-alpha RGB565 icon over a solid immediate
 // background. Fully transparent pixels are left untouched. `colors` and
@@ -97,21 +101,22 @@ void drawAlphaIcon(TFT_eSPI &tft,
                    uint16_t color,
                    uint16_t backgroundColor);
 
-void drawScaledXBitmap(TFT_eSPI &tft,
-                       int16_t x,
-                       int16_t y,
-                       const uint8_t *bitmap,
-                       uint8_t bitmapWidth,
-                       uint8_t bitmapHeight,
-                       uint16_t color,
-                       uint8_t scale = 2);
-
 void drawListCell(TFT_eSPI &tft,
                   int16_t width,
                   int16_t y,
                   const String &label,
-                  const uint8_t *icon = nullptr,
-                  uint16_t iconColor = TFT_WHITE,
+                  const String &trailingText = String());
+
+// Draws a standard 40px list cell with a 32px alpha-mask icon. The caller
+// supplies the tint so folder/file categories remain distinguishable.
+void drawListCell(TFT_eSPI &tft,
+                  int16_t width,
+                  int16_t y,
+                  const String &label,
+                  uint16_t iconWidth,
+                  uint16_t iconHeight,
+                  const uint8_t *iconAlpha,
+                  uint16_t iconColor,
                   const String &trailingText = String());
 
 // Draws a compact progress bar. Call with drawFrame=false to update only the

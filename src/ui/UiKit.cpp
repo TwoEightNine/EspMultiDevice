@@ -1,5 +1,7 @@
 #include "UiKit.h"
 
+#include "icons.h"
+
 namespace UiKit {
 namespace {
 constexpr int16_t NavigationIconLeft = AppBarIconPadding;
@@ -8,7 +10,6 @@ constexpr int16_t TitleX = NavigationIconLeft + NavigationIconSize + AppBarIconP
 // Font 4's visible glyphs sit slightly high within its 26 px cell.
 constexpr int16_t TitleCenterY = AppBarHeight / 2 + 1;
 constexpr int16_t ListIconX = 8;
-constexpr int16_t ListIconY = (ListCellHeight - ListIconSize) / 2;
 constexpr int16_t ListTextWithIconX = ListIconX + ListIconSize + ContentPadding;
 
 uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
@@ -61,16 +62,8 @@ void drawTopAppBar(TFT_eSPI &tft,
 
 void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 3.0f;
-  constexpr float strokeRadius = strokeWidth / 2.0f;
-  constexpr float halfSize = NavigationIconSize / 2.0f;
-  const float first = halfSize - strokeRadius;
-  tft.drawWideLine(centerX - first, centerY - first,
-                   centerX + first, centerY + first,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + first, centerY - first,
-                   centerX - first, centerY + first,
-                   strokeWidth, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_close_width / 2, centerY - ic_close_height / 2,
+                ic_close_width, ic_close_height, ic_close_alpha, color, backgroundColor);
 }
 
 void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
@@ -85,23 +78,27 @@ void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    strokeWidth, color, backgroundColor);
 }
 
+void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                        uint16_t color, uint16_t backgroundColor) {
+  drawAlphaIcon(tft, centerX - ic_back_width / 2, centerY - ic_back_height / 2,
+                ic_back_width, ic_back_height, ic_back_alpha, color, backgroundColor);
+}
+
 void drawPageArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    bool vertical, bool forward, uint16_t color,
                    uint16_t backgroundColor) {
+  if (vertical) {
+    const uint16_t width = forward ? ic_down_width : ic_up_width;
+    const uint16_t height = forward ? ic_down_height : ic_up_height;
+    const uint8_t *alpha = forward ? ic_down_alpha : ic_up_alpha;
+    drawAlphaIcon(tft, centerX - width / 2, centerY - height / 2,
+                  width, height, alpha, color, backgroundColor);
+    return;
+  }
   constexpr float strokeWidth = 3.0f;
   constexpr float tipOffset = 9.0f;
   constexpr float tailOffset = 10.0f;
   constexpr float wing = 8.0f;
-  if (vertical) {
-    const float tipY = centerY + (forward ? tipOffset : -tipOffset);
-    const float tailY = centerY - (forward ? tailOffset : -tailOffset);
-    const float wingY = centerY + (forward ? 1.0f : -1.0f);
-    tft.drawWideLine(centerX, tailY, centerX, tipY, strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX, tipY, centerX - wing, wingY, strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX, tipY, centerX + wing, wingY, strokeWidth, color, backgroundColor);
-    return;
-  }
-
   const float tipX = centerX + (forward ? tipOffset : -tipOffset);
   const float tailX = centerX - (forward ? tailOffset : -tailOffset);
   const float wingX = centerX + (forward ? 1.0f : -1.0f);
@@ -112,50 +109,26 @@ void drawPageArrow(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 
 void drawPlusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 3.0f;
-  constexpr float halfLength = 9.0f;
-  tft.drawWideLine(centerX - halfLength, centerY, centerX + halfLength, centerY,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY - halfLength, centerX, centerY + halfLength,
-                   strokeWidth, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_add_width / 2, centerY - ic_add_height / 2,
+                ic_add_width, ic_add_height, ic_add_alpha, color, backgroundColor);
 }
 
 void drawHomeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 3.0f;
-  const int16_t left = centerX - 10;
-  const int16_t right = centerX + 10;
-  const int16_t roof = centerY - 10;
-  const int16_t wallTop = centerY - 1;
-  const int16_t base = centerY + 10;
-  tft.drawWideLine(left, wallTop, centerX, roof, strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX, roof, right, wallTop, strokeWidth, color, backgroundColor);
-  tft.drawWideLine(left, wallTop, left, base, strokeWidth, color, backgroundColor);
-  tft.drawWideLine(right, wallTop, right, base, strokeWidth, color, backgroundColor);
-  tft.drawWideLine(left, base, right, base, strokeWidth, color, backgroundColor);
-  tft.fillSmoothRoundRect(centerX - 3, centerY + 2, 6, 8, 1, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_home_width / 2, centerY - ic_home_height / 2,
+                ic_home_width, ic_home_height, ic_home_alpha, color, backgroundColor);
 }
 
 void drawRecentIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                     uint16_t color, uint16_t backgroundColor) {
-  tft.drawSmoothCircle(centerX, centerY, 9, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY, centerX, centerY - 6,
-                   2.5f, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY, centerX + 5, centerY + 3,
-                   2.5f, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_recent_width / 2, centerY - ic_recent_height / 2,
+                ic_recent_width, ic_recent_height, ic_recent_alpha, color, backgroundColor);
 }
 
 void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       uint16_t color, uint16_t backgroundColor) {
-  constexpr int16_t points[][2] = {{0, -10}, {3, -3}, {10, -3}, {5, 2}, {7, 9},
-                                    {0, 5}, {-7, 9}, {-5, 2}, {-10, -3}, {-3, -3}};
-  constexpr float strokeWidth = 2.5f;
-  for (uint8_t i = 0; i < 10; i++) {
-    const uint8_t next = (i + 1) % 10;
-    tft.drawWideLine(centerX + points[i][0], centerY + points[i][1],
-                     centerX + points[next][0], centerY + points[next][1],
-                     strokeWidth, color, backgroundColor);
-  }
+  drawAlphaIcon(tft, centerX - ic_star_width / 2, centerY - ic_star_height / 2,
+                ic_star_width, ic_star_height, ic_star_alpha, color, backgroundColor);
 }
 
 void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
@@ -167,16 +140,8 @@ void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 
 void drawListCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                        uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.0f;
-  constexpr float strokeRadius = strokeWidth / 2.0f;
-  constexpr float halfSize = ListActionIconSize / 2.0f;
-  const float extent = halfSize - strokeRadius;
-  tft.drawWideLine(centerX - extent, centerY - extent,
-                   centerX + extent, centerY + extent,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + extent, centerY - extent,
-                   centerX - extent, centerY + extent,
-                   strokeWidth, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_close_16_width / 2, centerY - ic_close_16_height / 2,
+                ic_close_16_width, ic_close_16_height, ic_close_16_alpha, color, backgroundColor);
 }
 
 void drawListMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
@@ -190,43 +155,24 @@ void drawListMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 
 void drawKeyboardBackspaceIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                                uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.0f;
-  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
-  tft.drawWideLine(centerX - extent, centerY, centerX + extent, centerY,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - extent, centerY, centerX - 3, centerY - 4,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - extent, centerY, centerX - 3, centerY + 4,
-                   strokeWidth, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_backspace_width / 2, centerY - ic_backspace_height / 2,
+                ic_backspace_width, ic_backspace_height, ic_backspace_alpha, color, backgroundColor);
 }
 
 void drawKeyboardEnterIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                            uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.0f;
-  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
-  tft.drawWideLine(centerX + 4, centerY - extent, centerX + 4, centerY + 3,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + 4, centerY + 3, centerX - extent, centerY + 3,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - extent, centerY + 3, centerX - 3, centerY - 1,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - extent, centerY + 3, centerX - 3, centerY + extent,
-                   strokeWidth, color, backgroundColor);
+  drawAlphaIcon(tft, centerX - ic_enter_width / 2, centerY - ic_enter_height / 2,
+                ic_enter_width, ic_enter_height, ic_enter_alpha, color, backgroundColor);
 }
 
 void drawKeyboardShiftIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                           bool capsLock, uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.0f;
-  constexpr float extent = KeyboardIconSize / 2.0f - strokeWidth / 2.0f;
-  tft.drawWideLine(centerX, centerY + extent, centerX, centerY - 3,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY - extent, centerX - 6, centerY - 1,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY - extent, centerX + 6, centerY - 1,
-                   strokeWidth, color, backgroundColor);
-  if (capsLock) {
-    tft.fillSmoothCircle(centerX, centerY + 5, 1, color, backgroundColor);
-  }
+                           bool shifted, bool capsLock,
+                           uint16_t color, uint16_t backgroundColor) {
+  const uint16_t width = capsLock ? ic_shift_lock_width : (shifted ? ic_shift_on_width : ic_shift_off_width);
+  const uint16_t height = capsLock ? ic_shift_lock_height : (shifted ? ic_shift_on_height : ic_shift_off_height);
+  const uint8_t *alpha = capsLock ? ic_shift_lock_alpha : (shifted ? ic_shift_on_alpha : ic_shift_off_alpha);
+  drawAlphaIcon(tft, centerX - width / 2, centerY - height / 2,
+                width, height, alpha, color, backgroundColor);
 }
 
 void drawRgba565Icon(TFT_eSPI &tft,
@@ -310,37 +256,13 @@ void drawAlphaIcon(TFT_eSPI &tft,
   tft.endWrite();
 }
 
-void drawScaledXBitmap(TFT_eSPI &tft,
-                       int16_t x,
-                       int16_t y,
-                       const uint8_t *bitmap,
-                       uint8_t bitmapWidth,
-                       uint8_t bitmapHeight,
-                       uint16_t color,
-                       uint8_t scale) {
-  if (!bitmap || scale == 0) return;
-  const uint8_t rowBytes = (bitmapWidth + 7) / 8;
-  for (uint8_t row = 0; row < bitmapHeight; row++) {
-    for (uint8_t column = 0; column < bitmapWidth; column++) {
-      uint8_t value = pgm_read_byte(bitmap + row * rowBytes + column / 8);
-      if ((value & (1 << (column & 7))) == 0) continue;
-      tft.fillRect(x + column * scale, y + row * scale, scale, scale, color);
-    }
-  }
-}
-
 void drawListCell(TFT_eSPI &tft,
                   int16_t width,
                   int16_t y,
                   const String &label,
-                  const uint8_t *icon,
-                  uint16_t iconColor,
                   const String &trailingText) {
   tft.fillRect(0, y, width, ListCellHeight, TFT_BLACK);
-  const int16_t textX = icon ? ListTextWithIconX : ContentPadding;
-  if (icon) {
-    drawScaledXBitmap(tft, ListIconX, y + ListIconY, icon, 16, 16, iconColor);
-  }
+  const int16_t textX = ContentPadding;
 
   int16_t trailingWidth = 0;
   if (trailingText.length() > 0) {
@@ -356,6 +278,38 @@ void drawListCell(TFT_eSPI &tft,
                UiText::Size::Content, ML_DATUM);
   tft.drawFastHLine(textX, y + ListCellHeight - 1,
                     width - ContentPadding - textX, DividerColor);
+}
+
+void drawListCell(TFT_eSPI &tft,
+                  int16_t width,
+                  int16_t y,
+                  const String &label,
+                  uint16_t iconWidth,
+                  uint16_t iconHeight,
+                  const uint8_t *iconAlpha,
+                  uint16_t iconColor,
+                  const String &trailingText) {
+  tft.fillRect(0, y, width, ListCellHeight, TFT_BLACK);
+  if (iconAlpha && iconWidth && iconHeight) {
+    drawAlphaIcon(tft, ListIconX + (ListIconSize - iconWidth) / 2,
+                  y + (ListCellHeight - iconHeight) / 2,
+                  iconWidth, iconHeight, iconAlpha, iconColor, TFT_BLACK);
+  }
+
+  int16_t trailingWidth = 0;
+  if (trailingText.length() > 0) {
+    trailingWidth = UiText::measure(trailingText, UiText::Size::Compact);
+    UiText::draw(tft, trailingText, width - ContentPadding, y + ListCellHeight / 2,
+                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MR_DATUM);
+  }
+
+  const int16_t labelEnd = width - ContentPadding -
+                           (trailingWidth > 0 ? trailingWidth + 8 : 0);
+  UiText::draw(tft, UiKit::ellipsize(label, labelEnd - ListTextWithIconX, UiText::Size::Content),
+               ListTextWithIconX, y + ListCellHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Content, ML_DATUM);
+  tft.drawFastHLine(ListTextWithIconX, y + ListCellHeight - 1,
+                    width - ContentPadding - ListTextWithIconX, DividerColor);
 }
 
 void drawProgressBar(TFT_eSPI &tft,

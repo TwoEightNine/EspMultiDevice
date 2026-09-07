@@ -503,7 +503,7 @@ void TextInputScreen::drawKeyIcon(const Key &key, uint16_t color, uint16_t backg
     return;
   }
 
-  UiKit::drawKeyboardShiftIcon(tft, centerX, centerY, _capsLock, color, backgroundColor);
+  UiKit::drawKeyboardShiftIcon(tft, centerX, centerY, _shift, _capsLock, color, backgroundColor);
 }
 
 void TextInputScreen::handleKey(uint8_t index) {

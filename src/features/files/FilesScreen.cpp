@@ -988,14 +988,14 @@ void FilesScreen::redrawListingArea() {
 
 void FilesScreen::drawRow(const Row &row) {
   if (row.parent) {
-    UiKit::drawListCell(_display.tft(), _display.width(), row.bounds.y, F(".."), ic_dir, FolderColor);
+    UiKit::drawListCell(_display.tft(), _display.width(), row.bounds.y, F(".."),
+                        ic_folder_width, ic_folder_height, ic_folder_alpha, FolderColor);
     return;
   }
   const Entry *entry = entryAt(row.entryIndex);
   if (!entry) return;
   const bool secretDirectory = _secretMode && _currentPath == "/" && entry->directory &&
                                entry->storageName == F(".configs");
-  const uint8_t *icon = entry->directory ? ic_dir : ic_file;
   uint16_t color = secretDirectory ? TFT_RED : FolderColor;
   if (!entry->directory) {
     const bool openable = FileFormats::isOpenable(entry->format);
@@ -1003,7 +1003,11 @@ void FilesScreen::drawRow(const Row &row) {
           : openable && FileFormats::isAudio(entry->format) ? AudioFileColor
           : openable && FileFormats::isVideo(entry->format) ? VideoFileColor : FileColor;
   }
-  UiKit::drawListCell(_display.tft(), _display.width(), row.bounds.y, entry->name, icon, color,
+  const uint16_t iconWidth = entry->directory ? ic_folder_width : ic_file_width;
+  const uint16_t iconHeight = entry->directory ? ic_folder_height : ic_file_height;
+  const uint8_t *iconAlpha = entry->directory ? ic_folder_alpha : ic_file_alpha;
+  UiKit::drawListCell(_display.tft(), _display.width(), row.bounds.y, entry->name,
+                      iconWidth, iconHeight, iconAlpha, color,
                       canActOnEntry(*entry) ? String(F("            ")) : String());
   if (!entry->directory) {
     const String path = fullPathFor(*entry);
@@ -1043,9 +1047,9 @@ void FilesScreen::drawFooter() {
   UiText::draw(tft, String(_page + 1) + F(" / ") + String(_pageCount),
                emptyBounds.x + emptyBounds.w / 2, footerTop + 29,
                TFT_WHITE, FooterButtonColor, UiText::Size::Compact, MC_DATUM);
-  UiKit::drawBackIcon(tft, _parentBounds.x + _parentBounds.w / 2,
-                      footerTop + FooterHeight / 2, active[0] ? TFT_WHITE : 0x8410,
-                      FooterButtonColor);
+  UiKit::drawFooterBackIcon(tft, _parentBounds.x + _parentBounds.w / 2,
+                            footerTop + FooterHeight / 2, active[0] ? TFT_WHITE : 0x8410,
+                            FooterButtonColor);
   UiKit::drawPageArrow(tft, _previousBounds.x + _previousBounds.w / 2,
                        footerTop + FooterHeight / 2, true, false,
                        active[2] ? TFT_WHITE : 0x8410,

@@ -24,14 +24,15 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t AppCount = 5;
+  static const uint8_t AppCount = 6;
   static const uint8_t AppColumns = 3;
+  static const uint8_t FilesAppIndex = 2;
   static const int16_t StatusBarHeight = 24;
   static const int16_t IconDiameter = 80;
-  static const int16_t IconBitmapSize = 64;
   static const uint32_t BatteryRefreshIntervalMs = 5000UL;
 
   enum class AppAction : uint8_t {
+    AiAssistant,
     Files,
     Recorder,
     Settings,
@@ -43,9 +44,6 @@ private:
     const char *label;
     AppAction action;
     uint16_t circleColor;
-    // Replace nullptr with a 64x64, 1-bit bitmap when the final asset is ready.
-    // TFT_eSPI renders these with a runtime foreground color, keeping icons monochrome and themeable.
-    const uint8_t *bitmap;
     int16_t x;
     int16_t y;
     int16_t w;

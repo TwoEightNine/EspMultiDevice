@@ -36,11 +36,12 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _lastClockCheckMs(0xffffffffUL),
     _lastBatteryCheckMs(0),
     _lastClockText("") {
-  _apps[0] = { "Browser", AppAction::Browser, 0xfb17, nullptr, 0, 0, 0, 0 };
-  _apps[1] = { "Files", AppAction::Files, 0x065f, nullptr, 0, 0, 0, 0 };
-  _apps[2] = { "Recorder", AppAction::Recorder, 0x9adf, nullptr, 0, 0, 0, 0 };
-  _apps[3] = { "Settings", AppAction::Settings, 0xfda0, nullptr, 0, 0, 0, 0 };
-  _apps[4] = { "Workout", AppAction::Workout, 0x04df, nullptr, 0, 0, 0, 0 }; // ai 0xfe67
+  _apps[0] = { "AI Assistant", AppAction::AiAssistant, 0xfe67, 0, 0, 0, 0 };
+  _apps[1] = { "Browser", AppAction::Browser, 0xfb17, 0, 0, 0, 0 };
+  _apps[2] = { "Files", AppAction::Files, 0x065f, 0, 0, 0, 0 };
+  _apps[3] = { "Recorder", AppAction::Recorder, 0x9adf, 0, 0, 0, 0 };
+  _apps[4] = { "Settings", AppAction::Settings, 0xfda0, 0, 0, 0, 0 };
+  _apps[5] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -82,6 +83,9 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _filesPressPending = true;
       _filesHoldTriggered = false;
       _filesPressedMs = millis();
+    } else if (app.action == AppAction::AiAssistant) {
+      // Placeholder entry: its screen is intentionally not implemented yet.
+      return;
     } else if (app.action == AppAction::Recorder) {
       _navigator.push(ScreenId::VoiceRecorder);
     } else if (app.action == AppAction::Settings) {
@@ -104,7 +108,7 @@ void HomeScreen::onResult(const ScreenResult &result) {
 
 void HomeScreen::tick(uint32_t nowMs) {
   const TouchPoint heldPoint = _touch.point();
-  const AppTile &files = _apps[1];
+  const AppTile &files = _apps[FilesAppIndex];
   const bool holdingFiles = heldPoint.touched && heldPoint.x >= files.x && heldPoint.x < files.x + files.w &&
                             heldPoint.y >= files.y && heldPoint.y < files.y + files.h;
   if (_filesPressPending && !_filesHoldTriggered && holdingFiles && nowMs - _filesPressedMs >= 1000) {
@@ -231,18 +235,46 @@ void HomeScreen::drawApps() {
 }
 
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
-  if (app.action == AppAction::Files) {
-    UiKit::drawRgba565Icon(_display.tft(),
-                         centerX - ic_files_width / 2,
-                         centerY - ic_files_height / 2,
-                         ic_files_width, ic_files_height,
-                         ic_files_colors, ic_files_alpha, app.circleColor);
+  const uint16_t *colors = nullptr;
+  const uint8_t *alpha = nullptr;
+  uint16_t width = 0;
+  uint16_t height = 0;
+
+  if (app.action == AppAction::AiAssistant) {
+    colors = ic_ai_colors;
+    alpha = ic_ai_alpha;
+    width = ic_ai_width;
+    height = ic_ai_height;
+  } else if (app.action == AppAction::Recorder) {
+    colors = ic_recorder_colors;
+    alpha = ic_recorder_alpha;
+    width = ic_recorder_width;
+    height = ic_recorder_height;
+  } else if (app.action == AppAction::Settings) {
+    colors = ic_settings_colors;
+    alpha = ic_settings_alpha;
+    width = ic_settings_width;
+    height = ic_settings_height;
+  } else if (app.action == AppAction::Workout) {
+    colors = ic_workout_colors;
+    alpha = ic_workout_alpha;
+    width = ic_workout_width;
+    height = ic_workout_height;
+  } else if (app.action == AppAction::Files) {
+    colors = ic_files_colors;
+    alpha = ic_files_alpha;
+    width = ic_files_width;
+    height = ic_files_height;
   } else if (app.action == AppAction::Browser) {
-    UiKit::drawRgba565Icon(_display.tft(),
-                         centerX - ic_browser_width / 2,
-                         centerY - ic_browser_height / 2,
-                         ic_browser_width, ic_browser_height,
-                         ic_browser_colors, ic_browser_alpha, app.circleColor);
+    colors = ic_browser_colors;
+    alpha = ic_browser_alpha;
+    width = ic_browser_width;
+    height = ic_browser_height;
+  }
+
+  if (colors && alpha) {
+    UiKit::drawRgba565Icon(_display.tft(), centerX - width / 2, centerY - height / 2,
+                           width, height, colors, alpha, app.circleColor);
   }
 }
 
