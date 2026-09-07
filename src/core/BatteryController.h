@@ -8,16 +8,15 @@ public:
 
   void begin();
 
-  // Returns the measured battery-cell voltage after voltage-divider correction.
+  // Returns the current three-sample median battery-cell voltage after
+  // voltage-divider correction.
   float voltage();
   uint8_t percentage();
 
 private:
-  static const uint8_t SampleCount = 9;
+  static const uint8_t SampleCount = 3;
 
   int _adcPin;
-  bool _hasFilteredVoltage;
-  float _filteredVoltage;
   bool _hasReportedPercentage;
   uint8_t _reportedPercentage;
 

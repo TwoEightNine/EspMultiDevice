@@ -21,15 +21,11 @@ const ChargePoint RestingChargeCurve[] = {
 
 const uint8_t ChargePointCount = sizeof(RestingChargeCurve) / sizeof(RestingChargeCurve[0]);
 const float DividerMultiplier = 2.0f;
-const float VoltageSmoothingFactor = 0.25f;
-const uint8_t PercentageHysteresis = 1;
 
 }  // namespace
 
 BatteryController::BatteryController(int adcPin)
   : _adcPin(adcPin),
-    _hasFilteredVoltage(false),
-    _filteredVoltage(0.0f),
     _hasReportedPercentage(false),
     _reportedPercentage(0) {
 }
@@ -42,17 +38,7 @@ void BatteryController::begin() {
 }
 
 float BatteryController::voltage() {
-  float measuredVoltage = readMedianVoltage();
-  if (!_hasFilteredVoltage) {
-    _filteredVoltage = measuredVoltage;
-    _hasFilteredVoltage = true;
-  } else {
-    // Home refreshes every five seconds, so this gives a roughly 15-second
-    // response while smoothing short ADC and load transients.
-    _filteredVoltage += VoltageSmoothingFactor * (measuredVoltage - _filteredVoltage);
-  }
-
-  return _filteredVoltage;
+  return readMedianVoltage();
 }
 
 float BatteryController::readMedianVoltage() {
@@ -82,11 +68,10 @@ uint8_t BatteryController::percentage() {
   if (!_hasReportedPercentage) {
     _reportedPercentage = measuredPercentage;
     _hasReportedPercentage = true;
-  } else {
-    int16_t difference = (int16_t)measuredPercentage - _reportedPercentage;
-    if (difference > PercentageHysteresis || difference < -PercentageHysteresis) {
-      _reportedPercentage = measuredPercentage;
-    }
+  } else if (measuredPercentage < _reportedPercentage) {
+    // Runtime charging support is not available yet: never raise a displayed
+    // percentage until the controller is recreated at the next boot.
+    _reportedPercentage = measuredPercentage;
   }
 
   return _reportedPercentage;
