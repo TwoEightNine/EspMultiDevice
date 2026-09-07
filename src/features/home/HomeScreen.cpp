@@ -104,7 +104,7 @@ void HomeScreen::onResult(const ScreenResult &result) {
 
 void HomeScreen::tick(uint32_t nowMs) {
   const TouchPoint heldPoint = _touch.point();
-  const AppTile &files = _apps[0];
+  const AppTile &files = _apps[1];
   const bool holdingFiles = heldPoint.touched && heldPoint.x >= files.x && heldPoint.x < files.x + files.w &&
                             heldPoint.y >= files.y && heldPoint.y < files.y + files.h;
   if (_filesPressPending && !_filesHoldTriggered && holdingFiles && nowMs - _filesPressedMs >= 1000) {

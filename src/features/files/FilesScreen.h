@@ -176,10 +176,11 @@ private:
   String _moveStagePath;
   String _moveStagedPath;
   String _operationFailure;
-  fs::File _moveSource;
+  StorageFile _moveSource;
   StorageFile _moveTarget;
   uint32_t _moveBytes;
   bool _moveSourceDirectory;
+  bool _moveOutOfSecret;
   bool _moveStageCreated;
   bool _movePromoted;
   bool _moveCachesCleaned;
@@ -241,7 +242,7 @@ private:
   void beginDeleteHold();
   void updateDeleteHold(uint32_t nowMs);
   void startDeleteSelected();
-  void beginMoveToSecret();
+  void beginMove();
   void updateOperation();
   void updateCacheCleanup();
   void updateRecursiveDelete();
