@@ -83,8 +83,10 @@ int comparePresentationPoints(const void *left, const void *right) {
 
 VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touch,
                                      DisplayController &display, SdCardController &sdCard,
-                                     SpeakerController &speaker, SecretStorage &secretStorage)
+                                     SpeakerController &speaker, SecretStorage &secretStorage,
+                                     MediaCache &mediaCache)
   : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
+    _mediaCache(mediaCache),
     _secretAccess(false), _demux(nullptr),
     _state(State::Ready), _audioCodec(AudioCodec::None), _videoCodec(VideoCodec::None), _sdMounted(false),
     _lastTouchDown(false), _sourceSize(0), _sourceWriteTime(0), _sourceWidth(0),
@@ -126,8 +128,14 @@ void VideoPlayerScreen::onEnter(const ScreenData &data) {
     fail(F("SD card unavailable"));
   } else {
     if (openSource() && inspectSource()) {
-      _cachePath = cachePathForSource();
-      _cacheTempPath = _cachePath + F(".tmp");
+      CachePaths paths;
+      if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
+        fail(F("Invalid cache path"));
+        draw();
+        return;
+      }
+      _cachePath = paths.finalPath;
+      _cacheTempPath = paths.temporaryPath;
       if (loadCache()) {
         draw();
         startPlayback();
@@ -182,12 +190,8 @@ void VideoPlayerScreen::reset() {
   releaseAudioDecoder();
   releaseDemux();
   if (_source) _source.close();
-  if (_cache) _cache.close();
-  if (_cacheRead) _cacheRead.close();
-  if (_state == State::Building && _cacheTempPath.length() && SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    _secretStorage.remove(_cacheTempPath);
-    SpiBusLock::unlock();
-  }
+  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
+  if (_cacheRead) _mediaCache.close(_cacheRead);
   if (_sampleBuffer) free(_sampleBuffer);
   if (_annexBuffer) free(_annexBuffer);
   if (_pendingFrame) free(_pendingFrame);
@@ -233,8 +237,12 @@ void VideoPlayerScreen::releaseAudioDecoder() {
 bool VideoPlayerScreen::openSource() {
   _source = _secretStorage.open(_path, FILE_READ, _secretAccess);
   if (!_source) return fail(F("Unable to open video"));
-  _sourceSize = (uint32_t)_source.size();
-  _sourceWriteTime = (uint32_t)_source.getLastWrite();
+  SourceFingerprint fingerprint{};
+  if (_mediaCache.captureFingerprint(_source, fingerprint) != MediaCache::Result::Complete) {
+    return fail(F("Unable to inspect video"));
+  }
+  _sourceSize = fingerprint.size;
+  _sourceWriteTime = fingerprint.modified;
   if (_sourceSize < 12) return fail(F("Invalid MP4/3GP file"));
   return true;
 }
@@ -388,52 +396,47 @@ void VideoPlayerScreen::logAudioTrack() const {
   }
 }
 
-String VideoPlayerScreen::cachePathForSource() const {
-  int slash = _path.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
-  String name = slash < 0 ? _path : _path.substring(slash + 1);
-  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".emga");
-}
-
 bool VideoPlayerScreen::readCacheHeader(uint32_t &frames, uint32_t &duration) {
   frames = duration = 0;
-  if (!_cacheRead || _cacheRead.size() < AnimationCache::HeaderBytes) return false;
+  uint32_t cacheSize = 0;
+  if (!_cacheRead || _mediaCache.fileSize(_cacheRead, cacheSize) != MediaCache::Result::Complete ||
+      cacheSize < AnimationCache::HeaderBytes) return false;
   uint8_t header[AnimationCache::HeaderBytes] = {};
-  if (!_cacheRead.seek(0) || _cacheRead.read(header, sizeof(header)) != sizeof(header) ||
-      AnimationCache::readLe32(header) != AnimationCache::Magic || header[4] != AnimationCache::Version ||
-      header[5] != 2 || AnimationCache::readLe16(header + 8) != AnimationCache::CanvasWidth ||
-      AnimationCache::readLe16(header + 10) != AnimationCache::CanvasHeight ||
-      AnimationCache::readLe32(header + 12) != _sourceSize ||
-      AnimationCache::readLe32(header + 16) != _sourceWriteTime ||
-      AnimationCache::readLe32(header + 20) != _sourceWidth ||
-      AnimationCache::readLe32(header + 24) != _sourceHeight ||
-      AnimationCache::readLe16(header + 36) != _drawWidth ||
-      AnimationCache::readLe16(header + 38) != _drawHeight) return false;
-  frames = AnimationCache::readLe32(header + 28);
+  AnimationCache::Header parsed{};
+  if (_mediaCache.seek(_cacheRead, 0) != MediaCache::Result::Complete ||
+      _mediaCache.read(_cacheRead, header, sizeof(header)) != MediaCache::Result::Complete ||
+      !AnimationCache::parseHeader(header, sizeof(header), parsed) ||
+      !MediaCache::matches(parsed.source, {_sourceSize, _sourceWriteTime}) ||
+      parsed.sourceWidth != _sourceWidth || parsed.sourceHeight != _sourceHeight ||
+      parsed.drawWidth != _drawWidth || parsed.drawHeight != _drawHeight) return false;
+  frames = parsed.frameCount;
   if (!frames) return false;
   uint64_t expected = AnimationCache::HeaderBytes + (uint64_t)frames * AnimationCache::frameBytes(_drawWidth, _drawHeight);
-  if (expected != _cacheRead.size()) return false;
+  if (expected != cacheSize) return false;
   for (uint32_t index = 0; index < frames; index++) {
     uint64_t offset = AnimationCache::HeaderBytes + (uint64_t)index * AnimationCache::frameBytes(_drawWidth, _drawHeight);
     uint8_t delay[4];
-    if (!_cacheRead.seek((uint32_t)offset) || _cacheRead.read(delay, sizeof(delay)) != sizeof(delay)) return false;
+    if (_mediaCache.seek(_cacheRead, (uint32_t)offset) != MediaCache::Result::Complete ||
+        _mediaCache.read(_cacheRead, delay, sizeof(delay)) != MediaCache::Result::Complete) return false;
     duration += AnimationCache::readLe32(delay);
   }
   return duration > 0;
 }
 
 bool VideoPlayerScreen::loadCache() {
-  if (!psramFound() || !_secretStorage.exists(_cachePath)) return false;
-  _cacheRead = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
+  if (!psramFound()) return false;
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
+      _mediaCache.openRead(paths, _secretAccess, _cacheRead) != MediaCache::Result::Complete) return false;
   uint32_t frames = 0, duration = 0;
   if (!_cacheRead || !readCacheHeader(frames, duration)) {
-    if (_cacheRead) _cacheRead.close();
+    _mediaCache.close(_cacheRead);
     return false;
   }
   const size_t pixels = (size_t)_drawWidth * _drawHeight;
   _playFrameBuffer = (uint16_t *)ps_malloc(pixels * sizeof(uint16_t));
   if (!_playFrameBuffer) {
-    _cacheRead.close();
+    _mediaCache.close(_cacheRead);
     return false;
   }
   _playFrames = frames;
@@ -444,17 +447,14 @@ bool VideoPlayerScreen::loadCache() {
 bool VideoPlayerScreen::beginBuild() {
   if (!psramFound()) return fail(F("Video needs PSRAM"));
   if (!preparePresentationTimeline()) return fail(F("Cannot build video timeline"));
-  int slash = _cachePath.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!_secretStorage.mkdir(directory)) return fail(F("Cannot create video cache"));
-  if (_secretStorage.exists(_cacheTempPath) && !_secretStorage.remove(_cacheTempPath)) {
-    return fail(F("Cannot replace incomplete cache"));
-  }
-  _cache = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
-  if (!_cache || !AnimationCache::writeHeader(_cache, _sourceSize, _sourceWriteTime, _sourceWidth,
-                                               _sourceHeight, 0, -1, _drawWidth, _drawHeight)) {
-    if (_cache) _cache.close();
-    _secretStorage.remove(_cacheTempPath);
+  CachePaths paths;
+  uint8_t header[AnimationCache::HeaderBytes];
+  AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth,
+                               _sourceHeight, 0, -1, _drawWidth, _drawHeight);
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
+      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete ||
+      _mediaCache.write(_cacheWriter, header, sizeof(header)) != MediaCache::Result::Complete) {
+    _mediaCache.abort(_cacheWriter);
     return fail(F("Cannot start video cache"));
   }
   _pendingFrame = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
@@ -625,12 +625,10 @@ bool VideoPlayerScreen::captureDecodedFrame(const VideoH264::Frame &frame) {
 }
 
 bool VideoPlayerScreen::writeFrameRgb444(const uint16_t *pixels, uint32_t delayMs) {
-  if (!_cache || !pixels) return false;
+  if (!_cacheWriter.active || !pixels) return false;
   uint8_t delay[4];
   AnimationCache::writeLe32(delay, delayMs);
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
-  bool delayWritten = _cache.write(delay, sizeof(delay)) == sizeof(delay);
-  SpiBusLock::unlock();
+  bool delayWritten = _mediaCache.write(_cacheWriter, delay, sizeof(delay)) == MediaCache::Result::Complete;
   if (!delayWritten) return false;
   const uint32_t total = AnimationCache::rgb444Bytes(_drawWidth, _drawHeight);
   for (uint32_t base = 0; base < total; ) {
@@ -646,9 +644,7 @@ bool VideoPlayerScreen::writeFrameRgb444(const uint16_t *pixels, uint32_t delayM
       _cacheChunk[i] = position % 3 == 0 ? (uint8_t)(a >> 4) :
                        (position % 3 == 1 ? (uint8_t)((a << 4) | (b >> 8)) : (uint8_t)b);
     }
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
-    bool written = _cache.write(_cacheChunk, count) == count;
-    SpiBusLock::unlock();
+    bool written = _mediaCache.write(_cacheWriter, _cacheChunk, count) == MediaCache::Result::Complete;
     if (!written) return false;
     base += count;
     taskYIELD();
@@ -695,17 +691,20 @@ bool VideoPlayerScreen::buildStep() {
 
 bool VideoPlayerScreen::finishBuild() {
   uint32_t finalDelay = _durationMs > _buildLastTimestamp ? _durationMs - _buildLastTimestamp : _buildLastDelay;
-  if (!appendPendingFrame(finalDelay) || !_buildFrames || !_cache.seek(0) ||
-      !AnimationCache::writeHeader(_cache, _sourceSize, _sourceWriteTime, _sourceWidth, _sourceHeight,
-                                   _buildFrames, -1, _drawWidth, _drawHeight)) return false;
-  _cache.close();
-  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
-  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) return false;
+  uint8_t header[AnimationCache::HeaderBytes];
+  AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth, _sourceHeight,
+                               _buildFrames, -1, _drawWidth, _drawHeight);
+  if (!appendPendingFrame(finalDelay) || !_buildFrames ||
+      _mediaCache.seek(_cacheWriter, 0) != MediaCache::Result::Complete ||
+      _mediaCache.write(_cacheWriter, header, sizeof(header)) != MediaCache::Result::Complete ||
+      _mediaCache.commit(_cacheWriter) != MediaCache::Result::Complete) return false;
   _h264.end();
   _legacy.end();
   if (_source) _source.close();
   releaseDemux();
-  _cacheRead = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
+      _mediaCache.openRead(paths, _secretAccess, _cacheRead) != MediaCache::Result::Complete) return false;
   uint32_t frames = 0, duration = 0;
   if (!_cacheRead || !readCacheHeader(frames, duration)) return false;
   _playFrameBuffer = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
@@ -721,9 +720,10 @@ bool VideoPlayerScreen::finishBuild() {
 bool VideoPlayerScreen::loadPlaybackFrame(uint32_t frame) {
   if (!_cacheRead || !_playFrameBuffer || frame >= _playFrames) return false;
   uint64_t offset = AnimationCache::HeaderBytes + (uint64_t)frame * AnimationCache::frameBytes(_drawWidth, _drawHeight);
-  if (offset > 0xffffffffULL || !_cacheRead.seek((uint32_t)offset)) return false;
+  if (offset > 0xffffffffULL ||
+      _mediaCache.seek(_cacheRead, (uint32_t)offset) != MediaCache::Result::Complete) return false;
   uint8_t delay[4];
-  if (_cacheRead.read(delay, sizeof(delay)) != sizeof(delay)) return false;
+  if (_mediaCache.read(_cacheRead, delay, sizeof(delay)) != MediaCache::Result::Complete) return false;
   _playDelay = AnimationCache::readLe32(delay);
   uint32_t total = AnimationCache::rgb444Bytes(_drawWidth, _drawHeight);
   uint8_t packed[3];
@@ -731,7 +731,7 @@ bool VideoPlayerScreen::loadPlaybackFrame(uint32_t frame) {
   uint32_t pixel = 0;
   for (uint32_t base = 0; base < total; ) {
     uint16_t count = total - base > IoChunkBytes ? IoChunkBytes : (uint16_t)(total - base);
-    if (_cacheRead.read(_cacheChunk, count) != count) return false;
+    if (_mediaCache.read(_cacheRead, _cacheChunk, count) != MediaCache::Result::Complete) return false;
     for (uint16_t i = 0; i < count; i++) {
       packed[packedCount++] = _cacheChunk[i];
       if (packedCount != 3) continue;
@@ -977,8 +977,7 @@ uint32_t VideoPlayerScreen::playbackElapsedMs(uint32_t nowMs) const {
 
 bool VideoPlayerScreen::fail(const String &message) {
   stopSpeaker();
-  if (_cache) _cache.close();
-  if (_cacheTempPath.length() && _secretStorage.exists(_cacheTempPath)) _secretStorage.remove(_cacheTempPath);
+  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
   _error = message;
   _state = State::Error;
   return false;

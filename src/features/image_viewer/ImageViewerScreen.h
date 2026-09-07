@@ -27,6 +27,7 @@ using File = fs::File;
 #include "../../core/Screen.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../services/storage/SecretStorage.h"
+#include "../../media/MediaCache.h"
 
 class ImageViewerScreen : public Screen {
 public:
@@ -34,7 +35,8 @@ public:
                     TouchController &touch,
                     DisplayController &display,
                     SdCardController &sdCard,
-                    SecretStorage &secretStorage);
+                    SecretStorage &secretStorage,
+                    MediaCache &mediaCache);
 
   void onEnter(const ScreenData &data) override;
   void onExit() override;
@@ -100,9 +102,10 @@ private:
 
   SdCardController &_sdCard;
   SecretStorage &_secretStorage;
+  MediaCache &_mediaCache;
   StorageFile _file;
   StorageFile _decoderFile;
-  StorageFile _cacheFile;
+  MediaCache::Writer _cacheWriter;
   StorageFile _gifCacheReadFile;
   bool _secretAccess;
   uint8_t *_webpSource;
@@ -161,6 +164,7 @@ private:
   bool _gifDecoderOpen;
   bool _gifBuildWritePending;
   bool _gifBuildLastFrame;
+  bool _gifBuildFinalizing;
   uint32_t _gifBuildFrame;
   uint32_t _gifBuildWriteOffset;
   uint32_t _gifBuildDelay;
@@ -232,7 +236,7 @@ private:
   bool readRasterHeader();
   bool prepareRender();
   bool decodeRasterImage();
-  String cachePathForSource() const;
+  bool prepareCachePaths(FileFormats::Format format);
   bool loadCache();
   bool loadAnimationCache();
   bool readAnimationCacheHeader(StorageFile &file, uint32_t &frameCount, int32_t &loopCount,
@@ -272,8 +276,7 @@ private:
   bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
                               uint16_t *destination, uint32_t &delay);
   bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);
-  bool writeAnimationCacheHeader(StorageFile &file, uint32_t frameCount, int32_t loopCount) const;
-  String animationCachePathForSource() const;
+  bool writeAnimationCacheHeader(uint32_t frameCount, int32_t loopCount);
   void releaseGifBuffers();
   void releaseGifDecoder();
   bool isGifSource();
@@ -291,7 +294,7 @@ private:
   void startCacheWrite();
   void writeCacheChunk();
   void finishCacheWrite(bool success);
-  bool writeCacheHeader(StorageFile &file) const;
+  bool writeCacheHeader();
   bool readCacheHeader(StorageFile &file) const;
   void writeLe16(uint8_t *buffer, uint16_t value) const;
   void writeLe32(uint8_t *buffer, uint32_t value) const;

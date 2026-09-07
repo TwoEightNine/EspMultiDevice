@@ -4,6 +4,7 @@
 #include <FS.h>
 
 #include "../../media/FileFormats.h"
+#include "../../media/MediaCache.h"
 #include "../../core/Screen.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../services/storage/SecretStorage.h"
@@ -17,7 +18,8 @@ public:
               TouchController &touch,
               DisplayController &display,
               SdCardController &sdCard,
-              SecretStorage &secretStorage);
+              SecretStorage &secretStorage,
+              MediaCache &mediaCache);
   ~FilesScreen() override;
 
   void onEnter() override;
@@ -98,6 +100,8 @@ private:
 
   enum class OperationState : uint8_t {
     None,
+    RenameCleanup,
+    DeleteCacheCleanup,
     Deleting,
     MovePreflight,
     MoveCopying,
@@ -115,8 +119,12 @@ private:
 
   SdCardController &_sdCard;
   SecretStorage &_secretStorage;
+  MediaCache &_mediaCache;
   String _currentPath;
   String _pendingRenamePath;
+  bool _pendingRenameDirectory;
+  String _renameSourcePath;
+  String _renameTargetPath;
   String _message;
   uint32_t _messageUntilMs;
   uint16_t _page;
@@ -175,6 +183,7 @@ private:
   bool _moveStageCreated;
   bool _movePromoted;
   bool _moveCachesCleaned;
+  MediaCache::Cleanup _cacheCleanup;
   uint8_t _moveBuffer[4096];
 
   void draw();
@@ -234,6 +243,7 @@ private:
   void startDeleteSelected();
   void beginMoveToSecret();
   void updateOperation();
+  void updateCacheCleanup();
   void updateRecursiveDelete();
   void updateMovePreflight();
   void updateMoveCopy();
@@ -246,7 +256,6 @@ private:
   bool expandDeleteDirectory(const PathTask &task);
   bool removePath(const String &path, bool directory);
   bool prepareMoveTarget(const Entry &entry);
-  bool removePlaintextCaches(const String &sourcePath);
   void showMessage(const String &message, uint32_t durationMs = 1800);
   void handleSdCardEvent(SdCardEvent event);
 };

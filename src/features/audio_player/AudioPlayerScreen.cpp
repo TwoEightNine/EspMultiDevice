@@ -78,12 +78,14 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
                                      SdCardController &sdCard,
                                      SpeakerController &speaker,
                                      AudioSettings &audioSettings,
-                                     SecretStorage &secretStorage)
+                                     SecretStorage &secretStorage,
+                                     MediaCache &mediaCache)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _speaker(speaker),
     _audioSettings(audioSettings),
     _secretStorage(secretStorage),
+    _mediaCache(mediaCache),
     _secretAccess(false),
     _state(State::Ready),
     _format(SourceFormat::None),
@@ -240,8 +242,12 @@ bool AudioPlayerScreen::loadSource(const String &path) {
   _format = formatForPath(path);
   _file = _secretStorage.open(path, FILE_READ, _secretAccess);
   if (!_file) return fail(F("Unable to open audio file"));
-  _sourceFileSize = (uint32_t)_file.size();
-  _sourceWriteTime = (uint32_t)_file.getLastWrite();
+  SourceFingerprint fingerprint{};
+  if (_mediaCache.captureFingerprint(_file, fingerprint) != MediaCache::Result::Complete) {
+    return fail(F("Unable to inspect audio file"));
+  }
+  _sourceFileSize = fingerprint.size;
+  _sourceWriteTime = fingerprint.modified;
   if (_format == SourceFormat::Wav && !parseWav()) {
     if (_file) _file.close();
     _state = State::Error;
@@ -388,25 +394,21 @@ bool AudioPlayerScreen::beginMp3Analysis() {
   return true;
 }
 
-String AudioPlayerScreen::mp3CachePath() const {
-  int slash = _path.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
-  String name = slash < 0 ? _path : _path.substring(slash + 1);
-  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".empa");
-}
-
 bool AudioPlayerScreen::loadMp3Cache() {
-  String path = mp3CachePath();
-  if (!_secretStorage.exists(path)) return false;
-
-  StorageFile cache = _secretStorage.open(path, FILE_READ, _secretAccess);
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return false;
+  StorageFile cache;
+  if (_mediaCache.openRead(paths, _secretAccess, cache) != MediaCache::Result::Complete) return false;
+  uint32_t cacheSize = 0;
   uint8_t header[Mp3CacheHeaderBytes];
-  bool readOk = cache && cache.size() == Mp3CacheHeaderBytes &&
-    cache.read(header, sizeof(header)) == sizeof(header);
-  if (cache) cache.close();
+  bool readOk = _mediaCache.fileSize(cache, cacheSize) == MediaCache::Result::Complete &&
+    cacheSize == Mp3CacheHeaderBytes &&
+    _mediaCache.read(cache, header, sizeof(header)) == MediaCache::Result::Complete;
+  _mediaCache.close(cache);
   if (!readOk || header[0] != 'E' || header[1] != 'M' || header[2] != 'P' || header[3] != 'A' ||
       header[4] != 1 || header[5] != 0 || readLe16(header + 6) != Mp3CacheHeaderBytes ||
-      readLe32(header + 8) != _sourceFileSize || readLe32(header + 12) != _sourceWriteTime) {
+      !MediaCache::matches({readLe32(header + 8), readLe32(header + 12)},
+                           {_sourceFileSize, _sourceWriteTime})) {
     return false;
   }
 
@@ -439,25 +441,21 @@ bool AudioPlayerScreen::loadMp3Cache() {
   _mp3Analyzing = false;
   if (!resetMp3Decoder()) return false;
   Serial.print(F("MP3 cache hit: "));
-  Serial.println(path);
+  Serial.println(paths.finalPath);
   return true;
 }
 
 void AudioPlayerScreen::writeMp3Cache() {
   if (!_file || _frameCount == 0 || _sampleRate == 0 || (_channels != 1 && _channels != 2)) return;
 
-  String path = mp3CachePath();
-  int slash = path.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : path.substring(0, slash);
-  if (!_secretStorage.mkdir(directory)) {
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return;
+  MediaCache::Writer writer;
+  if (_mediaCache.beginWrite(paths, _secretAccess, writer) != MediaCache::Result::Complete) {
     Serial.print(F("MP3 cache directory failed: "));
-    Serial.println(directory);
+    Serial.println(paths.directory);
     return;
   }
-
-  String tempPath = path + F(".tmp");
-  _secretStorage.remove(tempPath);
-  StorageFile cache = _secretStorage.open(tempPath, FILE_WRITE, _secretAccess);
   uint8_t header[Mp3CacheHeaderBytes] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = 'P'; header[3] = 'A';
   header[4] = 1;
@@ -469,17 +467,15 @@ void AudioPlayerScreen::writeMp3Cache() {
   writeLe32(header + 24, _frameCount);
   writeLe32(header + 28, _sampleRate);
   writeLe16(header + 32, _channels);
-  bool written = cache && cache.write(header, sizeof(header)) == sizeof(header);
-  if (cache) cache.close();
-  if (!written || (_secretStorage.exists(path) && !_secretStorage.remove(path)) ||
-      !_secretStorage.rename(tempPath, path)) {
-    _secretStorage.remove(tempPath);
+  bool written = _mediaCache.write(writer, header, sizeof(header)) == MediaCache::Result::Complete;
+  if (!written || _mediaCache.commit(writer) != MediaCache::Result::Complete) {
+    _mediaCache.abort(writer);
     Serial.print(F("MP3 cache write failed: "));
-    Serial.println(path);
+    Serial.println(paths.finalPath);
     return;
   }
   Serial.print(F("MP3 cache ready: "));
-  Serial.println(path);
+  Serial.println(paths.finalPath);
 }
 
 void AudioPlayerScreen::analyzeMp3Step() {

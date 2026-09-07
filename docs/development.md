@@ -30,6 +30,8 @@ Do not casually upgrade, reconfigure, or copy a dependency into the Arduino libr
 | `tools/generate_browser_freesans_font.py` | Reproducibly generates `src/ui/fonts/BrowserFreeSans.h` from redistributable GNU FreeSans. Preserve `LICENSE.FreeFont`. |
 | `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates H.263/3GP and MPEG-4 Part 2/MP4 176×144, 10fps fixtures in `tests/video/fixtures/`. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
+| `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
+| `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.
 

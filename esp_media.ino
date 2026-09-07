@@ -27,6 +27,7 @@
 #include "src/services/network/WiFiController.h"
 #include "src/features/settings/WiFiScreen.h"
 #include "src/features/workout/WorkoutScreen.h"
+#include "src/media/MediaCache.h"
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
@@ -68,6 +69,7 @@ TouchController *touch = nullptr;
 MicController *mic = nullptr;
 SpeakerController *speaker = nullptr;
 SecretStorage *secretStorage = nullptr;
+MediaCache *mediaCache = nullptr;
 AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
@@ -230,6 +232,7 @@ void setup() {
   Serial.println(F("MAX98357A speaker muted; I2S configured on playback."));
 
   secretStorage = new SecretStorage();
+  mediaCache = new MediaCache(*secretStorage);
 
   audioSettings = new AudioSettings(*speaker);
   audioSettings->begin();
@@ -248,13 +251,13 @@ void setup() {
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController, *batteryController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
-  filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
+  filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
-  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
-  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage);
-  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
+  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
+  audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
+  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage, *mediaCache);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);

@@ -28,7 +28,10 @@ public:
     ThreeGp,
     Em16,
     Emga,
-    Empa
+    Empa,
+    // Keep new values after the persisted source-format values above. ETH1
+    // stores a FileFormats::Format byte in its version-1 header.
+    Eth1
   };
 
   static Format fromPath(const String &path) {
@@ -51,6 +54,7 @@ public:
     if (suffix == F(".em16")) return Format::Em16;
     if (suffix == F(".emga")) return Format::Emga;
     if (suffix == F(".empa")) return Format::Empa;
+    if (suffix == F(".eth1")) return Format::Eth1;
     return Format::Unknown;
   }
 
@@ -79,6 +83,7 @@ public:
     if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == '1' && bytes[3] == '6') return Format::Em16;
     if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == 'G' && bytes[3] == 'A') return Format::Emga;
     if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'M' && bytes[2] == 'P' && bytes[3] == 'A') return Format::Empa;
+    if (length >= 4 && bytes[0] == 'E' && bytes[1] == 'T' && bytes[2] == 'H' && bytes[3] == '1') return Format::Eth1;
     if (length >= 2 && bytes[0] == 'B' && bytes[1] == 'M') return Format::Bmp;
     if (length >= 8 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G' &&
         bytes[4] == 0x0d && bytes[5] == 0x0a && bytes[6] == 0x1a && bytes[7] == 0x0a) return Format::Png;
@@ -110,6 +115,7 @@ public:
       case Format::Webp:
       case Format::Em16:
       case Format::Emga:
+      case Format::Eth1:
         return Group::Image;
       case Format::Wav:
       case Format::Mp3:
@@ -144,7 +150,20 @@ public:
   }
 
   static bool isInternal(Format format) {
-    return format == Format::Em16 || format == Format::Emga || format == Format::Empa;
+    return format == Format::Em16 || format == Format::Emga || format == Format::Empa ||
+           format == Format::Eth1;
+  }
+
+  static uint8_t internalCacheCount() { return 4; }
+
+  static Format internalCacheAt(uint8_t index) {
+    switch (index) {
+      case 0: return Format::Eth1;
+      case 1: return Format::Em16;
+      case 2: return Format::Emga;
+      case 3: return Format::Empa;
+      default: return Format::Unknown;
+    }
   }
 
   static const char *extension(Format format) {
@@ -161,7 +180,18 @@ public:
       case Format::Em16: return ".em16";
       case Format::Emga: return ".emga";
       case Format::Empa: return ".empa";
+      case Format::Eth1: return ".eth1";
       default: return "";
     }
   }
 };
+
+static_assert((uint8_t)FileFormats::Format::Bmp == 1 &&
+              (uint8_t)FileFormats::Format::Png == 2 &&
+              (uint8_t)FileFormats::Format::Jpeg == 3 &&
+              (uint8_t)FileFormats::Format::Gif == 4 &&
+              (uint8_t)FileFormats::Format::Webp == 5,
+              "ETH1 persists these source-format values");
+static_assert((uint8_t)FileFormats::Format::Empa == 12 &&
+              (uint8_t)FileFormats::Format::Eth1 == 13,
+              "New cache formats must be appended");

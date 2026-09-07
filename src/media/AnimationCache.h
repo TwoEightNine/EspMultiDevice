@@ -2,6 +2,9 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <string.h>
+
+#include "SourceFingerprint.h"
 
 // The compact, display-ready cache shared by animated images and video. The
 // payload contains a four-byte frame delay followed by packed RGB444 pixels.
@@ -14,6 +17,16 @@ constexpr uint16_t HeaderBytes = 40;
 constexpr uint16_t FrameHeaderBytes = 4;
 constexpr uint16_t CanvasWidth = 480;
 constexpr uint16_t CanvasHeight = 320;
+
+struct Header {
+  SourceFingerprint source;
+  uint32_t sourceWidth;
+  uint32_t sourceHeight;
+  uint32_t frameCount;
+  int32_t loopCount;
+  uint16_t drawWidth;
+  uint16_t drawHeight;
+};
 
 inline uint16_t readLe16(const uint8_t *bytes) {
   return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
@@ -36,11 +49,10 @@ inline void writeLe32(uint8_t *bytes, uint32_t value) {
   bytes[3] = (uint8_t)(value >> 24);
 }
 
-template <typename FileType>
-inline bool writeHeader(FileType &file, uint32_t sourceSize, uint32_t sourceWriteTime,
-                        uint32_t sourceWidth, uint32_t sourceHeight, uint32_t frameCount,
-                        int32_t loopCount, uint16_t drawWidth, uint16_t drawHeight) {
-  uint8_t header[HeaderBytes] = {};
+inline void encodeHeader(uint8_t *header, uint32_t sourceSize, uint32_t sourceWriteTime,
+                         uint32_t sourceWidth, uint32_t sourceHeight, uint32_t frameCount,
+                         int32_t loopCount, uint16_t drawWidth, uint16_t drawHeight) {
+  memset(header, 0, HeaderBytes);
   writeLe32(header + 0, Magic);
   header[4] = Version;
   header[5] = 2;  // packed RGB444
@@ -54,6 +66,15 @@ inline bool writeHeader(FileType &file, uint32_t sourceSize, uint32_t sourceWrit
   writeLe32(header + 32, (uint32_t)loopCount);
   writeLe16(header + 36, drawWidth);
   writeLe16(header + 38, drawHeight);
+}
+
+template <typename FileType>
+inline bool writeHeader(FileType &file, uint32_t sourceSize, uint32_t sourceWriteTime,
+                        uint32_t sourceWidth, uint32_t sourceHeight, uint32_t frameCount,
+                        int32_t loopCount, uint16_t drawWidth, uint16_t drawHeight) {
+  uint8_t header[HeaderBytes];
+  encodeHeader(header, sourceSize, sourceWriteTime, sourceWidth, sourceHeight, frameCount,
+               loopCount, drawWidth, drawHeight);
   return file.write(header, sizeof(header)) == sizeof(header);
 }
 
@@ -63,5 +84,19 @@ inline uint32_t rgb444Bytes(uint16_t drawWidth, uint16_t drawHeight) {
 
 inline uint32_t frameBytes(uint16_t drawWidth, uint16_t drawHeight) {
   return FrameHeaderBytes + rgb444Bytes(drawWidth, drawHeight);
+}
+
+inline bool parseHeader(const uint8_t *bytes, size_t length, Header &header) {
+  if (!bytes || length < HeaderBytes || readLe32(bytes) != Magic || bytes[4] != Version ||
+      bytes[5] != 2 || readLe16(bytes + 8) != CanvasWidth ||
+      readLe16(bytes + 10) != CanvasHeight) return false;
+  header.source = {readLe32(bytes + 12), readLe32(bytes + 16)};
+  header.sourceWidth = readLe32(bytes + 20);
+  header.sourceHeight = readLe32(bytes + 24);
+  header.frameCount = readLe32(bytes + 28);
+  header.loopCount = (int32_t)readLe32(bytes + 32);
+  header.drawWidth = readLe16(bytes + 36);
+  header.drawHeight = readLe16(bytes + 38);
+  return true;
 }
 }  // namespace AnimationCache

@@ -33,10 +33,12 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
                                      TouchController &touch,
                                      DisplayController &display,
                                      SdCardController &sdCard,
-                                     SecretStorage &secretStorage)
+                                     SecretStorage &secretStorage,
+                                     MediaCache &mediaCache)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _secretStorage(secretStorage),
+    _mediaCache(mediaCache),
     _secretAccess(false),
     _webpSource(nullptr),
     _webpSourceSize(0),
@@ -87,6 +89,7 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _gifDecoderOpen(false),
     _gifBuildWritePending(false),
     _gifBuildLastFrame(false),
+    _gifBuildFinalizing(false),
     _gifBuildFrame(0),
     _gifBuildWriteOffset(0),
     _gifBuildDelay(0),
@@ -172,12 +175,21 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     drawError();
     return;
   }
-  _sourceFileSize = (uint32_t)_file.size();
-  _sourceWriteTime = (uint32_t)_file.getLastWrite();
+  SourceFingerprint fingerprint{};
+  if (_mediaCache.captureFingerprint(_file, fingerprint) != MediaCache::Result::Complete) {
+    _error = F("Unable to inspect source image");
+    drawError();
+    return;
+  }
+  _sourceFileSize = fingerprint.size;
+  _sourceWriteTime = fingerprint.modified;
   if (isGifSource()) {
     _format = ImageFormat::Gif;
-    _cachePath = animationCachePathForSource();
-    _cacheTempPath = _cachePath + F(".tmp");
+    if (!prepareCachePaths(FileFormats::Format::Emga)) {
+      _error = F("Invalid cache path");
+      drawError();
+      return;
+    }
     if (loadAnimationCache()) return;
   } else if (isWebpSource()) {
     _format = ImageFormat::Webp;
@@ -186,12 +198,18 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
       drawError();
       return;
     }
-    _cachePath = _webpAnimated ? animationCachePathForSource() : cachePathForSource();
-    _cacheTempPath = _cachePath + F(".tmp");
+    if (!prepareCachePaths(_webpAnimated ? FileFormats::Format::Emga : FileFormats::Format::Em16)) {
+      _error = F("Invalid cache path");
+      drawError();
+      return;
+    }
     if (_webpAnimated && loadAnimationCache()) return;
   } else {
-    _cachePath = cachePathForSource();
-    _cacheTempPath = _cachePath + F(".tmp");
+    if (!prepareCachePaths(FileFormats::Format::Em16)) {
+      _error = F("Invalid cache path");
+      drawError();
+      return;
+    }
   }
   if (loadCache()) {
     Serial.print(F("Image cache hit: "));
@@ -215,8 +233,7 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     bool started = _format == ImageFormat::Gif ? startGifBuild() : startWebpBuild();
     if (!started) {
       if (_error.length() == 0) _error = F("Could not cache animation");
-      if (_cacheFile) _cacheFile.close();
-      if (_cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
+      _mediaCache.abort(_cacheWriter);
       releaseGifDecoder();
       releaseWebpDecoder();
       releaseGifBuffers();
@@ -265,8 +282,7 @@ void ImageViewerScreen::tick(uint32_t nowMs) {
     if (!built) {
       _gifState = GifState::None;
       if (_error.length() == 0) _error = F("Could not cache animation");
-      if (_cacheFile) _cacheFile.close();
-      if (_cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
+      _mediaCache.abort(_cacheWriter);
       releaseGifDecoder();
       releaseWebpDecoder();
       releaseGifBuffers();
@@ -292,7 +308,7 @@ void ImageViewerScreen::tick(uint32_t nowMs) {
       drawError();
     } else if (_gifState == GifState::None) {
       releaseGifBuffers();
-      if (_gifCacheReadFile) _gifCacheReadFile.close();
+      if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
     }
     return;
   }
@@ -344,9 +360,9 @@ void ImageViewerScreen::reset() {
   releaseWebpDecoder();
   if (_file) _file.close();
   if (_decoderFile) _decoderFile.close();
-  if (_cacheFile) _cacheFile.close();
-  if (_gifCacheReadFile) _gifCacheReadFile.close();
-  if ((_cacheWriting || removeGifTemp) && _cacheTempPath.length() > 0) _secretStorage.remove(_cacheTempPath);
+  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
+  if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
+  (void)removeGifTemp;
   _cacheWriting = false;
   releaseGifBuffers();
   releaseBuffers();
@@ -359,6 +375,7 @@ void ImageViewerScreen::reset() {
   _cacheOffset = 0;
   _gifBuildWritePending = false;
   _gifBuildLastFrame = false;
+  _gifBuildFinalizing = false;
   _gifBuildFrame = 0;
   _gifBuildWriteOffset = 0;
   _gifBuildDelay = 0;
@@ -740,28 +757,26 @@ bool ImageViewerScreen::readRasterHeader() {
   return false;
 }
 
-String ImageViewerScreen::cachePathForSource() const {
-  int slash = _path.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
-  String name = slash < 0 ? _path : _path.substring(slash + 1);
-  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".em16");
-}
-
-String ImageViewerScreen::animationCachePathForSource() const {
-  int slash = _path.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _path.substring(0, slash);
-  String name = slash < 0 ? _path : _path.substring(slash + 1);
-  return directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name + F(".emga");
+bool ImageViewerScreen::prepareCachePaths(FileFormats::Format format) {
+  CachePaths paths;
+  if (!CachePath::forSource(_path, format, paths)) return false;
+  _cachePath = paths.finalPath;
+  _cacheTempPath = paths.temporaryPath;
+  return true;
 }
 
 bool ImageViewerScreen::readCacheHeader(StorageFile &file) const {
-  if (!file || file.size() != CacheHeaderSize + CachePixelBytes) return false;
+  uint32_t fileBytes = 0;
+  if (!file || _mediaCache.fileSize(file, fileBytes) != MediaCache::Result::Complete ||
+      fileBytes != CacheHeaderSize + CachePixelBytes) return false;
   uint8_t header[CacheHeaderSize];
-  if (file.read(header, sizeof(header)) != sizeof(header)) return false;
+  if (_mediaCache.read(file, header, sizeof(header)) != MediaCache::Result::Complete) return false;
   if (header[0] != 'E' || header[1] != 'M' || header[2] != '1' || header[3] != '6' ||
       header[4] != 1 || header[5] != 0 || readLe16(header + 8) != CacheWidth ||
-      readLe16(header + 10) != CacheHeight || readLe32(header + 12) != _sourceFileSize ||
-      readLe32(header + 16) != _sourceWriteTime || readLe32(header + 20) != CachePixelBytes) {
+      readLe16(header + 10) != CacheHeight ||
+      !MediaCache::matches({readLe32(header + 12), readLe32(header + 16)},
+                           {_sourceFileSize, _sourceWriteTime}) ||
+      readLe32(header + 20) != CachePixelBytes) {
     return false;
   }
   return true;
@@ -774,10 +789,12 @@ bool ImageViewerScreen::loadCache() {
   if (_format == ImageFormat::Gif ||
       (_format == ImageFormat::Webp && _webpAnimated)) return false;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
-  if (!_secretStorage.exists(_cachePath)) return false;
-  StorageFile cache = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Em16, paths)) return false;
+  StorageFile cache;
+  if (_mediaCache.openRead(paths, _secretAccess, cache) != MediaCache::Result::Complete) return false;
   if (!cache || !readCacheHeader(cache)) {
-    if (cache) cache.close();
+    _mediaCache.close(cache);
     return false;
   }
   _frameBuffer = (uint16_t *)ps_malloc(CachePixelBytes);
@@ -786,7 +803,7 @@ bool ImageViewerScreen::loadCache() {
   while (readOk && offset < CachePixelBytes) {
     uint32_t remaining = CachePixelBytes - offset;
     uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
-    if (cache.read(_cacheChunk, amount) != amount) {
+    if (_mediaCache.read(cache, _cacheChunk, amount) != MediaCache::Result::Complete) {
       readOk = false;
       break;
     }
@@ -809,20 +826,19 @@ bool ImageViewerScreen::loadCache() {
     offset += amount;
   }
   if (!readOk) {
-    cache.close();
+    _mediaCache.close(cache);
     releaseBuffers();
     return false;
   }
-  cache.close();
+  _mediaCache.close(cache);
   return true;
 }
 
-bool ImageViewerScreen::writeAnimationCacheHeader(StorageFile &file,
-                                                   uint32_t frameCount,
-                                                   int32_t loopCount) const {
-  return AnimationCache::writeHeader(file, _sourceFileSize, _sourceWriteTime,
-                                     _sourceWidth, _sourceHeight, frameCount,
-                                     loopCount, _drawWidth, _drawHeight);
+bool ImageViewerScreen::writeAnimationCacheHeader(uint32_t frameCount, int32_t loopCount) {
+  uint8_t header[AnimationCache::HeaderBytes];
+  AnimationCache::encodeHeader(header, _sourceFileSize, _sourceWriteTime, _sourceWidth,
+                               _sourceHeight, frameCount, loopCount, _drawWidth, _drawHeight);
+  return _mediaCache.write(_cacheWriter, header, sizeof(header)) == MediaCache::Result::Complete;
 }
 
 bool ImageViewerScreen::readAnimationCacheHeader(StorageFile &file,
@@ -832,40 +848,43 @@ bool ImageViewerScreen::readAnimationCacheHeader(StorageFile &file,
                                                   uint32_t &sourceHeight,
                                                   uint16_t &drawWidth,
                                                   uint16_t &drawHeight) const {
-  if (!file || file.size() < AnimationCacheHeaderSize) return false;
+  uint32_t fileBytes = 0;
+  if (!file || _mediaCache.fileSize(file, fileBytes) != MediaCache::Result::Complete ||
+      fileBytes < AnimationCacheHeaderSize) return false;
   uint8_t header[AnimationCacheHeaderSize];
-  if (!file.seek(0) || file.read(header, sizeof(header)) != sizeof(header)) return false;
-  if (readLe32(header + 0) != AnimationCache::Magic || header[4] != AnimationCache::Version ||
-      header[5] != 2 || readLe16(header + 8) != CacheWidth ||
-      readLe16(header + 10) != CacheHeight ||
-      readLe32(header + 12) != _sourceFileSize ||
-      readLe32(header + 16) != _sourceWriteTime) return false;
-  sourceWidth = readLe32(header + 20);
-  sourceHeight = readLe32(header + 24);
-  frameCount = readLe32(header + 28);
-  loopCount = (int32_t)readLe32(header + 32);
-  drawWidth = readLe16(header + 36);
-  drawHeight = readLe16(header + 38);
+  if (_mediaCache.seek(file, 0) != MediaCache::Result::Complete ||
+      _mediaCache.read(file, header, sizeof(header)) != MediaCache::Result::Complete) return false;
+  AnimationCache::Header parsed{};
+  if (!AnimationCache::parseHeader(header, sizeof(header), parsed) ||
+      !MediaCache::matches(parsed.source, {_sourceFileSize, _sourceWriteTime})) return false;
+  sourceWidth = parsed.sourceWidth;
+  sourceHeight = parsed.sourceHeight;
+  frameCount = parsed.frameCount;
+  loopCount = parsed.loopCount;
+  drawWidth = parsed.drawWidth;
+  drawHeight = parsed.drawHeight;
   if (sourceWidth == 0 || sourceHeight == 0 || frameCount == 0 ||
       drawWidth == 0 || drawHeight == 0 ||
       drawWidth > GifPhotoMaxWidth || drawHeight > GifPhotoMaxHeight) return false;
   uint64_t pixels = (uint64_t)drawWidth * drawHeight;
   uint64_t recordBytes = AnimationFrameHeaderSize + (pixels * 3 + 1) / 2;
   uint64_t expected = AnimationCacheHeaderSize + recordBytes * frameCount;
-  return expected == file.size();
+  return expected == fileBytes;
 }
 
 bool ImageViewerScreen::loadAnimationCache() {
-  if (!psramFound() || !_secretStorage.exists(_cachePath)) return false;
-  StorageFile cache = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
-  if (!cache) return false;
+  if (!psramFound()) return false;
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) return false;
+  StorageFile cache;
+  if (_mediaCache.openRead(paths, _secretAccess, cache) != MediaCache::Result::Complete) return false;
   uint32_t frameCount = 0, sourceWidth = 0, sourceHeight = 0;
   uint16_t drawWidth = 0, drawHeight = 0;
   int32_t loopCount = -1;
   bool valid = readAnimationCacheHeader(cache, frameCount, loopCount, sourceWidth, sourceHeight,
                                         drawWidth, drawHeight);
   if (!valid) {
-    cache.close();
+    _mediaCache.close(cache);
     return false;
   }
   _sourceWidth = sourceWidth;
@@ -878,7 +897,7 @@ bool ImageViewerScreen::loadAnimationCache() {
   _gifLoopCount = loopCount;
   _gifCacheReadFile = cache;
   if (!startGifPlayback()) {
-    _gifCacheReadFile.close();
+    _mediaCache.close(_gifCacheReadFile);
     releaseGifBuffers();
     return false;
   }
@@ -896,18 +915,12 @@ bool ImageViewerScreen::startGifBuild() {
     _error = F("GIF cache does not support this display size");
     return false;
   }
-  int slash = _cachePath.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!_secretStorage.mkdir(directory)) {
-    _error = F("Cannot create GIF cache directory");
-    return false;
-  }
-  _secretStorage.remove(_cacheTempPath);
-  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
-  if (!_cacheFile || !writeAnimationCacheHeader(_cacheFile, 0, _gif.getLoopCount())) {
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
+      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete ||
+      !writeAnimationCacheHeader(0, _gif.getLoopCount())) {
     _error = F("Cannot start GIF cache");
-    if (_cacheFile) _cacheFile.close();
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     return false;
   }
   _gifLoopCount = _gif.getLoopCount();
@@ -915,13 +928,15 @@ bool ImageViewerScreen::startGifBuild() {
   _gifBuildWriteOffset = 0;
   _gifBuildWritePending = false;
   _gifBuildLastFrame = false;
+  _gifBuildFinalizing = false;
   _gifState = GifState::Building;
   drawGifLoading(0);
   return true;
 }
 
 bool ImageViewerScreen::buildGifFrame() {
-  if (!_cacheFile || !_gifDecoderOpen || !_frameBuffer) return false;
+  if (!_cacheWriter.active || !_gifDecoderOpen || !_frameBuffer) return false;
+  if (_gifBuildFinalizing) return finishGifBuild();
   if (_gifBuildWritePending) {
     uint32_t recordBytes = gifFrameRecordBytes();
     uint32_t remaining = recordBytes - _gifBuildWriteOffset;
@@ -960,7 +975,9 @@ bool ImageViewerScreen::buildGifFrame() {
         }
       }
     }
-    if (_cacheFile.write(_cacheChunk, amount) != amount) {
+    const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, _cacheChunk, amount);
+    if (writeResult == MediaCache::Result::Busy) return true;
+    if (writeResult != MediaCache::Result::Complete) {
       _error = F("GIF cache write failed");
       return false;
     }
@@ -976,7 +993,10 @@ bool ImageViewerScreen::buildGifFrame() {
       }
       if (_gifBuildLastFrame) percent = 100;
       drawGifLoading(percent);
-      if (_gifBuildLastFrame) return finishGifBuild();
+      if (_gifBuildLastFrame) {
+        _gifBuildFinalizing = true;
+        return finishGifBuild();
+      }
     }
     return true;
   }
@@ -996,27 +1016,39 @@ bool ImageViewerScreen::buildGifFrame() {
 }
 
 bool ImageViewerScreen::finishGifBuild() {
-  if (!_cacheFile.seek(0) || !writeAnimationCacheHeader(_cacheFile, _gifBuildFrame, _gifLoopCount)) {
+  const MediaCache::Result seekResult = _mediaCache.seek(_cacheWriter, 0);
+  if (seekResult == MediaCache::Result::Busy) return true;
+  if (seekResult != MediaCache::Result::Complete) {
     _error = F("GIF cache header write failed");
     return false;
   }
-  _cacheFile.close();
-  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
-  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) {
+  uint8_t header[AnimationCache::HeaderBytes];
+  AnimationCache::encodeHeader(header, _sourceFileSize, _sourceWriteTime, _sourceWidth,
+                               _sourceHeight, _gifBuildFrame, _gifLoopCount, _drawWidth, _drawHeight);
+  const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
+  if (writeResult == MediaCache::Result::Busy) return true;
+  if (writeResult != MediaCache::Result::Complete) {
+    _error = F("GIF cache header write failed");
+    return false;
+  }
+  const MediaCache::Result commitResult = _mediaCache.commit(_cacheWriter);
+  if (commitResult == MediaCache::Result::Busy) return true;
+  if (commitResult != MediaCache::Result::Complete) {
     _error = F("GIF cache commit failed");
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     return false;
   }
   releaseGifDecoder();
   releaseBuffers();
-  _gifCacheReadFile = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
-  if (!_gifCacheReadFile) {
+  CachePaths paths;
+  CachePath::forSource(_path, FileFormats::Format::Emga, paths);
+  if (_mediaCache.openRead(paths, _secretAccess, _gifCacheReadFile) != MediaCache::Result::Complete) {
     _error = F("GIF cache reopen failed");
     return false;
   }
   _gifFrameCount = _gifBuildFrame;
   if (!startGifPlayback()) {
-    _gifCacheReadFile.close();
+    _mediaCache.close(_gifCacheReadFile);
     releaseGifBuffers();
     return false;
   }
@@ -1074,15 +1106,16 @@ bool ImageViewerScreen::readGifCacheFrame(uint32_t frameIndex,
   if (!_gifCacheReadFile || !destination || frameIndex >= _gifFrameCount) return false;
   uint64_t offset = AnimationCacheHeaderSize +
     (uint64_t)frameIndex * (AnimationFrameHeaderSize + CachePixelBytes);
-  if (offset > 0xffffffffULL || !_gifCacheReadFile.seek((uint32_t)offset)) return false;
+  if (offset > 0xffffffffULL ||
+      _mediaCache.seek(_gifCacheReadFile, (uint32_t)offset) != MediaCache::Result::Complete) return false;
   uint8_t delayBytes[AnimationFrameHeaderSize];
-  if (_gifCacheReadFile.read(delayBytes, sizeof(delayBytes)) != sizeof(delayBytes)) return false;
+  if (_mediaCache.read(_gifCacheReadFile, delayBytes, sizeof(delayBytes)) != MediaCache::Result::Complete) return false;
   delay = readLe32(delayBytes);
   uint32_t readOffset = 0;
   while (readOffset < CachePixelBytes) {
     uint32_t remaining = CachePixelBytes - readOffset;
     uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
-    if (_gifCacheReadFile.read(_cacheChunk, amount) != amount) return false;
+    if (_mediaCache.read(_gifCacheReadFile, _cacheChunk, amount) != MediaCache::Result::Complete) return false;
     if (!cacheNeedsRotation()) {
       memcpy((uint8_t *)destination + readOffset, _cacheChunk, amount);
     } else {
@@ -1135,16 +1168,18 @@ bool ImageViewerScreen::readGifCacheFrameChunk(uint32_t frameIndex,
   uint64_t recordOffset = AnimationCacheHeaderSize +
     (uint64_t)frameIndex * gifFrameRecordBytes();
   if (pixelOffset == 0) {
-    if (recordOffset > 0xffffffffULL || !_gifCacheReadFile.seek((uint32_t)recordOffset)) return false;
+    if (recordOffset > 0xffffffffULL ||
+        _mediaCache.seek(_gifCacheReadFile, (uint32_t)recordOffset) != MediaCache::Result::Complete) return false;
     uint8_t delayBytes[AnimationFrameHeaderSize];
-    if (_gifCacheReadFile.read(delayBytes, sizeof(delayBytes)) != sizeof(delayBytes)) return false;
+    if (_mediaCache.read(_gifCacheReadFile, delayBytes, sizeof(delayBytes)) != MediaCache::Result::Complete) return false;
     delay = readLe32(delayBytes);
   }
   uint64_t pixelFileOffset = recordOffset + AnimationFrameHeaderSize + pixelOffset;
   uint32_t remaining = CachePixelBytes - pixelOffset;
   uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
-  if (pixelFileOffset > 0xffffffffULL || !_gifCacheReadFile.seek((uint32_t)pixelFileOffset) ||
-      _gifCacheReadFile.read(_cacheChunk, amount) != amount) return false;
+  if (pixelFileOffset > 0xffffffffULL ||
+      _mediaCache.seek(_gifCacheReadFile, (uint32_t)pixelFileOffset) != MediaCache::Result::Complete ||
+      _mediaCache.read(_gifCacheReadFile, _cacheChunk, amount) != MediaCache::Result::Complete) return false;
   copyGifCacheChunk(destination, pixelOffset, _cacheChunk, amount);
   return true;
 }
@@ -1248,11 +1283,10 @@ bool ImageViewerScreen::loadGifFrameOnWorker(StorageFile &cache,
   if (!destination || frameIndex >= _gifFrameCount) return false;
   uint64_t recordOffset = AnimationCacheHeaderSize +
     (uint64_t)frameIndex * gifFrameRecordBytes();
-  if (recordOffset > 0xffffffffULL || !SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-  bool ok = cache.seek((uint32_t)recordOffset);
+  if (recordOffset > 0xffffffffULL) return false;
+  bool ok = _mediaCache.seek(cache, (uint32_t)recordOffset) == MediaCache::Result::Complete;
   uint8_t delayBytes[AnimationFrameHeaderSize];
-  if (ok) ok = cache.read(delayBytes, sizeof(delayBytes)) == sizeof(delayBytes);
-  SpiBusLock::unlock();
+  if (ok) ok = _mediaCache.read(cache, delayBytes, sizeof(delayBytes)) == MediaCache::Result::Complete;
   if (!ok) return false;
   result.delay = readLe32(delayBytes);
 
@@ -1269,9 +1303,7 @@ bool ImageViewerScreen::loadGifFrameOnWorker(StorageFile &cache,
     uint16_t amount = remaining > GifLoaderReadChunkBytes ? GifLoaderReadChunkBytes : (uint16_t)remaining;
     // The cursor is positioned immediately after the delay header. Reading
     // sequentially avoids 75 FAT seeks per 480x320 frame.
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-    ok = cache.read(chunk, amount) == amount;
-    SpiBusLock::unlock();
+    ok = _mediaCache.read(cache, chunk, amount) == MediaCache::Result::Complete;
     if (!ok) return false;
     for (uint16_t i = 0; i < amount; i++) {
       packed[packedCount++] = chunk[i];
@@ -1315,12 +1347,9 @@ void ImageViewerScreen::gifLoaderTask(void *context) {
   uint8_t *chunk = (uint8_t *)heap_caps_malloc(CacheChunkBytes,
                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   StorageFile cache;
-  bool opened = chunk != nullptr && SpiBusLock::lock(pdMS_TO_TICKS(100));
-  if (opened) {
-    cache = viewer->_secretStorage.open(viewer->_cachePath, FILE_READ, viewer->_secretAccess);
-    SpiBusLock::unlock();
-    opened = (bool)cache;
-  }
+  CachePaths paths;
+  bool opened = chunk != nullptr && CachePath::forSource(viewer->_path, FileFormats::Format::Emga, paths) &&
+    viewer->_mediaCache.openRead(paths, viewer->_secretAccess, cache) == MediaCache::Result::Complete;
   while (!viewer->_gifLoaderStop) {
     GifLoadRequest request;
     if (xQueueReceive(viewer->_gifLoadRequests, &request, pdMS_TO_TICKS(20)) != pdTRUE) continue;
@@ -1329,12 +1358,7 @@ void ImageViewerScreen::gifLoaderTask(void *context) {
     result.success = ok;
     xQueueSend(viewer->_gifLoadResults, &result, portMAX_DELAY);
   }
-  if (cache) {
-    if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-      cache.close();
-      SpiBusLock::unlock();
-    }
-  }
+  if (cache) viewer->_mediaCache.close(cache);
   if (chunk) heap_caps_free(chunk);
   xSemaphoreGive(viewer->_gifLoaderStopped);
   vTaskDelete(nullptr);
@@ -1546,7 +1570,7 @@ bool ImageViewerScreen::startGifPreload() {
       releaseGifBuffers();
       return false;
     }
-    if (_gifCacheReadFile) _gifCacheReadFile.close();
+    if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
     _lastProgress = 0;
     uint32_t initialFrames = _gifFullResident ? capacity : _gifPreloadTarget;
     for (uint32_t sequence = 0; sequence < initialFrames; sequence++) {
@@ -1598,7 +1622,7 @@ bool ImageViewerScreen::beginGifResidentPlayback() {
   _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs);
   _gifCyclesCompleted = 0;
   _gifState = GifState::Playing;
-  if (_gifFullResident && _gifCacheReadFile) _gifCacheReadFile.close();
+  if (_gifFullResident && _gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
   return true;
 }
 
@@ -1927,24 +1951,19 @@ bool ImageViewerScreen::startWebpBuild() {
     _error = F("WebP cache does not support this display size");
     return false;
   }
-  int slash = _cachePath.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
-  if (!_secretStorage.mkdir(directory)) {
-    _error = F("Cannot create WebP cache directory");
-    return false;
-  }
-  _secretStorage.remove(_cacheTempPath);
-  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
-  if (!_cacheFile || !writeAnimationCacheHeader(_cacheFile, 0, _gifLoopCount)) {
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
+      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete ||
+      !writeAnimationCacheHeader(0, _gifLoopCount)) {
     _error = F("Cannot start WebP cache");
-    if (_cacheFile) _cacheFile.close();
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     return false;
   }
   _gifBuildFrame = 0;
   _gifBuildWriteOffset = 0;
   _gifBuildWritePending = false;
   _gifBuildLastFrame = false;
+  _gifBuildFinalizing = false;
   _gifBuildDelay = 0;
   _webpPreviousTimestamp = 0;
   _gifState = GifState::Building;
@@ -1953,7 +1972,8 @@ bool ImageViewerScreen::startWebpBuild() {
 }
 
 bool ImageViewerScreen::buildWebpFrame() {
-  if (!_cacheFile || !_webpAnimDecoder || !_frameBuffer) return false;
+  if (!_cacheWriter.active || !_webpAnimDecoder || !_frameBuffer) return false;
+  if (_gifBuildFinalizing) return finishWebpBuild();
   if (_gifBuildWritePending) {
     uint32_t recordBytes = gifFrameRecordBytes();
     uint32_t remaining = recordBytes - _gifBuildWriteOffset;
@@ -1992,7 +2012,9 @@ bool ImageViewerScreen::buildWebpFrame() {
         }
       }
     }
-    if (_cacheFile.write(_cacheChunk, amount) != amount) {
+    const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, _cacheChunk, amount);
+    if (writeResult == MediaCache::Result::Busy) return true;
+    if (writeResult != MediaCache::Result::Complete) {
       _error = F("WebP cache write failed");
       return false;
     }
@@ -2001,7 +2023,10 @@ bool ImageViewerScreen::buildWebpFrame() {
       _gifBuildWritePending = false;
       _gifBuildFrame++;
       drawGifLoading((uint8_t)((_gifBuildFrame * 100UL) / _gifFrameCount));
-      if (_gifBuildLastFrame) return finishWebpBuild();
+      if (_gifBuildLastFrame) {
+        _gifBuildFinalizing = true;
+        return finishWebpBuild();
+      }
     }
     return true;
   }
@@ -2025,23 +2050,36 @@ bool ImageViewerScreen::buildWebpFrame() {
 }
 
 bool ImageViewerScreen::finishWebpBuild() {
-  if (!_cacheFile.seek(0) || !writeAnimationCacheHeader(_cacheFile, _gifBuildFrame, _gifLoopCount)) {
+  const MediaCache::Result seekResult = _mediaCache.seek(_cacheWriter, 0);
+  if (seekResult == MediaCache::Result::Busy) return true;
+  if (seekResult != MediaCache::Result::Complete) {
     _error = F("WebP cache header write failed");
     return false;
   }
-  _cacheFile.close();
-  if (_secretStorage.exists(_cachePath)) _secretStorage.remove(_cachePath);
-  if (!_secretStorage.rename(_cacheTempPath, _cachePath)) {
+  uint8_t header[AnimationCache::HeaderBytes];
+  AnimationCache::encodeHeader(header, _sourceFileSize, _sourceWriteTime, _sourceWidth,
+                               _sourceHeight, _gifBuildFrame, _gifLoopCount, _drawWidth, _drawHeight);
+  const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
+  if (writeResult == MediaCache::Result::Busy) return true;
+  if (writeResult != MediaCache::Result::Complete) {
+    _error = F("WebP cache header write failed");
+    return false;
+  }
+  const MediaCache::Result commitResult = _mediaCache.commit(_cacheWriter);
+  if (commitResult == MediaCache::Result::Busy) return true;
+  if (commitResult != MediaCache::Result::Complete) {
     _error = F("WebP cache commit failed");
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     return false;
   }
   releaseWebpDecoder();
   releaseBuffers();
-  _gifCacheReadFile = _secretStorage.open(_cachePath, FILE_READ, _secretAccess);
-  if (!_gifCacheReadFile || !startGifPlayback()) {
+  CachePaths paths;
+  CachePath::forSource(_path, FileFormats::Format::Emga, paths);
+  if (_mediaCache.openRead(paths, _secretAccess, _gifCacheReadFile) != MediaCache::Result::Complete ||
+      !startGifPlayback()) {
     _error = F("WebP cache reopen failed");
-    if (_gifCacheReadFile) _gifCacheReadFile.close();
+    if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
     releaseGifBuffers();
     return false;
   }
@@ -2066,7 +2104,7 @@ void ImageViewerScreen::releaseWebpDecoder() {
   memset(&_webpAnimInfo, 0, sizeof(_webpAnimInfo));
 }
 
-bool ImageViewerScreen::writeCacheHeader(StorageFile &file) const {
+bool ImageViewerScreen::writeCacheHeader() {
   uint8_t header[CacheHeaderSize] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = '1'; header[3] = '6';
   header[4] = 1; // cache format version
@@ -2076,7 +2114,7 @@ bool ImageViewerScreen::writeCacheHeader(StorageFile &file) const {
   writeLe32(header + 12, _sourceFileSize);
   writeLe32(header + 16, _sourceWriteTime);
   writeLe32(header + 20, CachePixelBytes);
-  return file.write(header, sizeof(header)) == sizeof(header);
+  return _mediaCache.write(_cacheWriter, header, sizeof(header)) == MediaCache::Result::Complete;
 }
 
 void ImageViewerScreen::startCacheWrite() {
@@ -2088,22 +2126,19 @@ void ImageViewerScreen::startCacheWrite() {
     Serial.println(_display.height());
     return;
   }
-  int slash = _cachePath.lastIndexOf('/');
-  String directory = slash <= 0 ? F("/") : _cachePath.substring(0, slash);
   Serial.print(F("Image cache: preparing "));
   Serial.println(_cachePath);
-  if (!_secretStorage.mkdir(directory)) {
+  CachePaths paths;
+  if (!CachePath::forSource(_path, FileFormats::Format::Em16, paths) ||
+      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete) {
     Serial.print(F("Image cache: cannot create "));
-    Serial.println(directory);
+    Serial.println(paths.directory);
     return;
   }
-  _secretStorage.remove(_cacheTempPath);
-  _cacheFile = _secretStorage.open(_cacheTempPath, FILE_WRITE, _secretAccess);
-  if (!_cacheFile || !writeCacheHeader(_cacheFile)) {
+  if (!writeCacheHeader()) {
     Serial.print(F("Image cache: cannot start "));
     Serial.println(_cacheTempPath);
-    if (_cacheFile) _cacheFile.close();
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     return;
   }
   _cacheOffset = 0;
@@ -2113,7 +2148,11 @@ void ImageViewerScreen::startCacheWrite() {
 }
 
 void ImageViewerScreen::writeCacheChunk() {
-  if (!_cacheWriting || !_cacheFile || !_frameBuffer) return;
+  if (!_cacheWriting || !_cacheWriter.active || !_frameBuffer) return;
+  if (_cacheOffset == CachePixelBytes) {
+    finishCacheWrite(true);
+    return;
+  }
   uint32_t remaining = CachePixelBytes - _cacheOffset;
   uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
   // Copy through internal RAM; SPI DMA cannot reliably source arbitrary PSRAM buffers.
@@ -2132,8 +2171,9 @@ void ImageViewerScreen::writeCacheChunk() {
       memcpy(_cacheChunk + i * 2, &color, sizeof(color));
     }
   }
-  size_t written = _cacheFile.write(_cacheChunk, amount);
-  if (written != amount) {
+  const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, _cacheChunk, amount);
+  if (writeResult == MediaCache::Result::Busy) return;
+  if (writeResult != MediaCache::Result::Complete) {
     Serial.print(F("Image cache: write failed "));
     Serial.println(_cacheTempPath);
     finishCacheWrite(false);
@@ -2148,14 +2188,14 @@ bool ImageViewerScreen::cacheNeedsRotation() const {
 }
 
 void ImageViewerScreen::finishCacheWrite(bool success) {
-  if (_cacheFile) _cacheFile.close();
   bool committed = false;
   if (success) {
-    bool removedOld = !_cachePath.length() || !_secretStorage.exists(_cachePath) || _secretStorage.remove(_cachePath);
-    committed = removedOld && _secretStorage.rename(_cacheTempPath, _cachePath);
+    const MediaCache::Result result = _mediaCache.commit(_cacheWriter);
+    if (result == MediaCache::Result::Busy) return;
+    committed = result == MediaCache::Result::Complete;
   }
   if (!committed) {
-    _secretStorage.remove(_cacheTempPath);
+    _mediaCache.abort(_cacheWriter);
     if (success) {
       Serial.print(F("Image cache: commit failed "));
       Serial.println(_cachePath);

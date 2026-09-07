@@ -9,6 +9,7 @@
 #include "../../services/storage/SecretStorage.h"
 #include "../../media/VideoH264.h"
 #include "../../media/VideoLegacy.h"
+#include "../../media/MediaCache.h"
 
 struct MP4D_demux_tag;
 typedef struct MP4D_demux_tag MP4D_demux_t;
@@ -20,7 +21,8 @@ struct VideoPresentationPoint {
 class VideoPlayerScreen : public Screen {
 public:
   VideoPlayerScreen(Navigator &navigator, TouchController &touch, DisplayController &display,
-                    SdCardController &sdCard, SpeakerController &speaker, SecretStorage &secretStorage);
+                    SdCardController &sdCard, SpeakerController &speaker, SecretStorage &secretStorage,
+                    MediaCache &mediaCache);
   ~VideoPlayerScreen() override;
 
   void onEnter(const ScreenData &data) override;
@@ -42,8 +44,9 @@ private:
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   SecretStorage &_secretStorage;
+  MediaCache &_mediaCache;
   StorageFile _source;
-  StorageFile _cache;
+  MediaCache::Writer _cacheWriter;
   StorageFile _cacheRead;
   bool _secretAccess;
   MP4D_demux_t *_demux;
@@ -146,7 +149,6 @@ private:
   uint32_t timestampMs(uint32_t timestamp, uint32_t timeScale) const;
   uint32_t presentationTimestampMs(int64_t timestamp, uint32_t timeScale) const;
   uint32_t playbackElapsedMs(uint32_t nowMs) const;
-  String cachePathForSource() const;
   String displayName(const String &path) const;
   bool fail(const String &message);
   bool fail(const __FlashStringHelper *message);

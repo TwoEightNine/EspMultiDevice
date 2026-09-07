@@ -10,6 +10,7 @@
 #include "../../services/storage/SdCardController.h"
 #include "../../services/storage/SecretStorage.h"
 #include "../../services/audio/SpeakerController.h"
+#include "../../media/MediaCache.h"
 
 class AudioPlayerScreen : public Screen {
 public:
@@ -19,7 +20,8 @@ public:
                     SdCardController &sdCard,
                     SpeakerController &speaker,
                     AudioSettings &audioSettings,
-                    SecretStorage &secretStorage);
+                    SecretStorage &secretStorage,
+                    MediaCache &mediaCache);
 
   void onEnter(const ScreenData &data) override;
   void onExit() override;
@@ -51,6 +53,7 @@ private:
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
   SecretStorage &_secretStorage;
+  MediaCache &_mediaCache;
   StorageFile _file;
   bool _secretAccess;
   String _path;
@@ -96,7 +99,6 @@ private:
   bool beginMp3Analysis();
   bool loadMp3Cache();
   void writeMp3Cache();
-  String mp3CachePath() const;
   void analyzeMp3Step();
   bool parseMp3FrameHeader(uint32_t position,
                            uint32_t &frameBytes,

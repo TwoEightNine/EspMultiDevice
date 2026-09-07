@@ -51,8 +51,8 @@ public:
   static const uint32_t MaxPngScanlineBytes = MaxPngDimension * 4;
   struct Result { uint32_t generation; char path[MaxPath]; uint16_t *pixels; };
 
-  FileThumbnailWorker(SecretStorage &secretStorage)
-    : _secretStorage(secretStorage), _jobs(xQueueCreate(2, sizeof(Job))), _results(xQueueCreate(2, sizeof(Result))),
+  FileThumbnailWorker(SecretStorage &secretStorage, MediaCache &mediaCache)
+    : _secretStorage(secretStorage), _mediaCache(mediaCache), _jobs(xQueueCreate(2, sizeof(Job))), _results(xQueueCreate(2, sizeof(Result))),
       _task(nullptr), _encrypted(false), _pixels(nullptr), _sourceWidth(0), _sourceHeight(0),
       _decodedWidth(0), _decodedHeight(0), _sourceSize(0), _sourceWriteTime(0), _gif(nullptr) {
     if (_jobs && _results) {
@@ -82,6 +82,7 @@ public:
 private:
   struct Job { uint32_t generation; FileFormats::Format format; bool encrypted; char path[MaxPath]; };
   SecretStorage &_secretStorage;
+  MediaCache &_mediaCache;
   QueueHandle_t _jobs;
   QueueHandle_t _results;
   TaskHandle_t _task;
@@ -222,24 +223,16 @@ private:
   bool sourceInfo(const String &path) {
     if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
     StorageFile source = _secretStorage.open(path, FILE_READ, _encrypted);
-    const bool opened = (bool)source;
-    if (source) {
-      _sourceSize = source.size();
-      _sourceWriteTime = (uint32_t)source.getLastWrite();
-      source.close();
-    }
     SpiBusLock::unlock();
-    return opened;
-  }
-
-  String cacheDirectoryFor(const String &path) const {
-    const int slash = path.lastIndexOf('/');
-    const String parent = slash <= 0 ? "/" : path.substring(0, slash);
-    return parent == "/" ? "/.cache" : parent + "/.cache";
-  }
-
-  String cachePathFor(const String &path) const {
-    return cacheDirectoryFor(path) + "/" + path.substring(path.lastIndexOf('/') + 1) + ".eth1";
+    if (!source) return false;
+    SourceFingerprint fingerprint{};
+    const bool captured = _mediaCache.captureFingerprint(source, fingerprint) == MediaCache::Result::Complete;
+    _mediaCache.close(source);
+    if (captured) {
+      _sourceSize = fingerprint.size;
+      _sourceWriteTime = fingerprint.modified;
+    }
+    return captured;
   }
 
   static uint32_t readLe32(const uint8_t *value) {
@@ -255,33 +248,27 @@ private:
   }
 
   bool readCacheFile(StorageFile &file, uint8_t *data, size_t length) {
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-    const size_t read = file.read(data, length);
-    SpiBusLock::unlock();
-    return read == length;
+    return _mediaCache.read(file, data, length) == MediaCache::Result::Complete;
   }
 
   bool writeCacheFile(StorageFile &file, const uint8_t *data, size_t length) {
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-    const size_t written = file.write(data, length);
-    SpiBusLock::unlock();
-    return written == length;
+    return _mediaCache.write(file, data, length) == MediaCache::Result::Complete;
   }
 
   void closeCacheFile(StorageFile &file) {
-    if (!file) return;
-    if (SpiBusLock::lock(pdMS_TO_TICKS(20))) {
-      file.close();
-      SpiBusLock::unlock();
-    }
+    _mediaCache.close(file);
   }
 
   bool loadCache(const String &sourcePath, FileFormats::Format format) {
-    const String path = cachePathFor(sourcePath);
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-    StorageFile cache = _secretStorage.open(path, FILE_READ, _encrypted);
-    const size_t size = cache ? cache.size() : 0;
-    SpiBusLock::unlock();
+    CachePaths paths;
+    if (!CachePath::forSource(sourcePath, FileFormats::Format::Eth1, paths)) return false;
+    StorageFile cache;
+    if (_mediaCache.openRead(paths, _encrypted, cache) != MediaCache::Result::Complete) return false;
+    uint32_t size = 0;
+    if (_mediaCache.fileSize(cache, size) != MediaCache::Result::Complete) {
+      closeCacheFile(cache);
+      return false;
+    }
     if (!cache || size != CacheHeaderBytes + Size * Size * sizeof(uint16_t)) {
       closeCacheFile(cache);
       return false;
@@ -289,8 +276,10 @@ private:
     uint8_t header[CacheHeaderBytes] = {};
     const bool valid = readCacheFile(cache, header, sizeof(header)) &&
       memcmp(header, "ETH1", 4) == 0 && header[4] == 1 && header[5] == (uint8_t)format &&
-      header[6] == Size && header[7] == Size && readLe32(header + 8) == _sourceSize &&
-      readLe32(header + 12) == _sourceWriteTime && readLe32(header + 16) == Size * Size * sizeof(uint16_t);
+      header[6] == Size && header[7] == Size &&
+      MediaCache::matches({readLe32(header + 8), readLe32(header + 12)},
+                          {_sourceSize, _sourceWriteTime}) &&
+      readLe32(header + 16) == Size * Size * sizeof(uint16_t);
     if (!valid || !prepare(Size, Size, Size, Size) ||
         !readCacheFile(cache, reinterpret_cast<uint8_t *>(_pixels), Size * Size * sizeof(uint16_t))) {
       closeCacheFile(cache);
@@ -303,33 +292,25 @@ private:
 
   void writeCache(const String &sourcePath, FileFormats::Format format) {
     if (!_pixels || _sourceSize == 0) return;
-    const String finalPath = cachePathFor(sourcePath);
-    const String temporaryPath = finalPath + ".tmp";
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return;
-    _secretStorage.mkdir(cacheDirectoryFor(sourcePath));
-    _secretStorage.remove(temporaryPath);
-    StorageFile cache = _secretStorage.open(temporaryPath, FILE_WRITE, _encrypted);
-    SpiBusLock::unlock();
-    if (!cache) return;
+    CachePaths paths;
+    if (!CachePath::forSource(sourcePath, FileFormats::Format::Eth1, paths)) return;
+    MediaCache::Writer writer;
+    if (_mediaCache.beginWrite(paths, _encrypted, writer) != MediaCache::Result::Complete) return;
     uint8_t header[CacheHeaderBytes] = {'E', 'T', 'H', '1', 1, (uint8_t)format, Size, Size};
     writeLe32(header + 8, _sourceSize);
     writeLe32(header + 12, _sourceWriteTime);
     writeLe32(header + 16, Size * Size * sizeof(uint16_t));
-    bool written = writeCacheFile(cache, header, sizeof(header));
+    bool written = _mediaCache.write(writer, header, sizeof(header)) == MediaCache::Result::Complete;
     const uint8_t *pixels = reinterpret_cast<const uint8_t *>(_pixels);
     for (size_t offset = 0; written && offset < Size * Size * sizeof(uint16_t); offset += 256) {
       const size_t amount = Size * Size * sizeof(uint16_t) - offset > 256 ? 256 : Size * Size * sizeof(uint16_t) - offset;
-      written = writeCacheFile(cache, pixels + offset, amount);
+      written = _mediaCache.write(writer, pixels + offset, amount) == MediaCache::Result::Complete;
     }
-    closeCacheFile(cache);
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return;
     if (written) {
-      _secretStorage.remove(finalPath);
-      if (!_secretStorage.rename(temporaryPath, finalPath)) _secretStorage.remove(temporaryPath);
+      if (_mediaCache.commit(writer) != MediaCache::Result::Complete) _mediaCache.abort(writer);
     } else {
-      _secretStorage.remove(temporaryPath);
+      _mediaCache.abort(writer);
     }
-    SpiBusLock::unlock();
   }
 
   static void *openCallback(const char *path, int32_t *size) { return _owner && _owner->openFile(path, size) ? &_owner->_file : nullptr; }
@@ -625,12 +606,17 @@ FilesScreen::FilesScreen(Navigator &navigator,
                          TouchController &touch,
                          DisplayController &display,
                          SdCardController &sdCard,
-                         SecretStorage &secretStorage)
+                         SecretStorage &secretStorage,
+                         MediaCache &mediaCache)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _secretStorage(secretStorage),
+    _mediaCache(mediaCache),
     _currentPath("/"),
     _pendingRenamePath(),
+    _pendingRenameDirectory(false),
+    _renameSourcePath(),
+    _renameTargetPath(),
     _message(),
     _messageUntilMs(0),
     _page(0),
@@ -639,7 +625,7 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _retainCacheWhileCovered(false),
     _secretMode(false),
     _listing(nullptr),
-    _thumbnailWorker(new FileThumbnailWorker(secretStorage)),
+    _thumbnailWorker(new FileThumbnailWorker(secretStorage, mediaCache)),
     _listingGeneration(1),
     _scanDirectory(),
     _scanCache(nullptr),
@@ -761,6 +747,7 @@ void FilesScreen::onResult(const ScreenResult &result) {
     applyRename(result.text);
   }
   _pendingRenamePath = "";
+  _pendingRenameDirectory = false;
 }
 
 void FilesScreen::handleTouch(const TouchPoint &point) {
@@ -1667,6 +1654,7 @@ void FilesScreen::startRename() {
   Entry *entry = entryAt(_menuEntryIndex);
   if (!entry) return;
   _pendingRenamePath = fullPathFor(*entry);
+  _pendingRenameDirectory = entry->directory;
   _retainCacheWhileCovered = true;
   closeMenu();
   if (!_navigator.push(ScreenId::TextInput,
@@ -1691,6 +1679,27 @@ void FilesScreen::applyRename(const String &newName) {
   const int16_t slash = _pendingRenamePath.lastIndexOf('/');
   const String target = (slash <= 0 ? "/" : _pendingRenamePath.substring(0, slash) + "/") + newName;
   if (target == _pendingRenamePath) {
+    draw();
+    return;
+  }
+  if (!_pendingRenameDirectory) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      showMessage(F("Storage busy; rename not started"));
+      draw();
+      return;
+    }
+    const bool targetExists = SD.exists(target.c_str());
+    SpiBusLock::unlock();
+    if (targetExists) {
+      showMessage(F("Rename failed or target exists"));
+      draw();
+      return;
+    }
+    _renameSourcePath = _pendingRenamePath;
+    _renameTargetPath = target;
+    _mediaCache.beginCleanup(_renameSourcePath, _cacheCleanup);
+    _operationState = OperationState::RenameCleanup;
+    showMessage(F("Preparing rename..."), 60000);
     draw();
     return;
   }
@@ -1740,15 +1749,21 @@ void FilesScreen::startDeleteSelected() {
     return;
   }
   const String path = fullPathFor(*entry);
+  const bool directory = entry->directory;
   closeMenu();
   clearTasks();
-  if (!appendTask(path, "", entry->directory)) {
+  if (!appendTask(path, "", directory)) {
     showMessage(F("Not enough memory to delete"));
     draw();
     return;
   }
-  _operationState = OperationState::Deleting;
-  showMessage(entry->directory ? F("Deleting folder...") : F("Deleting..."), 60000);
+  if (directory) {
+    _operationState = OperationState::Deleting;
+  } else {
+    _mediaCache.beginCleanup(path, _cacheCleanup);
+    _operationState = OperationState::DeleteCacheCleanup;
+  }
+  showMessage(directory ? F("Deleting folder...") : F("Deleting..."), 60000);
   draw();
 }
 
@@ -1789,6 +1804,7 @@ bool FilesScreen::prepareMoveTarget(const Entry &entry) {
   _moveStageCreated = false;
   _movePromoted = false;
   _moveCachesCleaned = false;
+  _cacheCleanup = MediaCache::Cleanup();
   _moveBytes = 0;
   _operationFailure = "";
   if (_secretStorage.exists(_moveTargetPath)) {
@@ -1805,7 +1821,10 @@ bool FilesScreen::prepareMoveTarget(const Entry &entry) {
 }
 
 void FilesScreen::updateOperation() {
-  if (_operationState == OperationState::Deleting ||
+  if (_operationState == OperationState::RenameCleanup ||
+      _operationState == OperationState::DeleteCacheCleanup) {
+    updateCacheCleanup();
+  } else if (_operationState == OperationState::Deleting ||
       _operationState == OperationState::MoveRemoveSource ||
       _operationState == OperationState::MoveCleanupStage) {
     updateRecursiveDelete();
@@ -1816,6 +1835,27 @@ void FilesScreen::updateOperation() {
   } else if (_operationState == OperationState::MoveCommit) {
     updateMoveCommit();
   }
+}
+
+void FilesScreen::updateCacheCleanup() {
+  const MediaCache::Result result = _mediaCache.cleanupStep(_cacheCleanup);
+  if (result == MediaCache::Result::Busy || result == MediaCache::Result::More) return;
+  if (result != MediaCache::Result::Complete) {
+    finishOperation(false, _operationState == OperationState::RenameCleanup
+      ? String(F("Rename stopped; cache cleanup failed"))
+      : String(F("Delete stopped; cache cleanup failed")));
+    return;
+  }
+  if (_operationState == OperationState::DeleteCacheCleanup) {
+    _operationState = OperationState::Deleting;
+    return;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
+  const bool renamed = !SD.exists(_renameTargetPath.c_str()) &&
+                       SD.rename(_renameSourcePath.c_str(), _renameTargetPath.c_str());
+  SpiBusLock::unlock();
+  finishOperation(renamed, renamed ? String(F("Renamed"))
+                                   : String(F("Rename failed or target exists")));
 }
 
 void FilesScreen::updateMovePreflight() {
@@ -1931,9 +1971,16 @@ void FilesScreen::updateMoveCommit() {
 
 void FilesScreen::updateRecursiveDelete() {
   if (_operationState == OperationState::MoveRemoveSource && !_moveCachesCleaned) {
-    if (!_moveSourceDirectory && !removePlaintextCaches(_moveSourcePath)) {
-      finishOperation(false, F("Secret copy kept; cache cleanup failed"));
-      return;
+    if (!_moveSourceDirectory) {
+      if (!_cacheCleanup.active && _cacheCleanup.sourcePath != _moveSourcePath) {
+        _mediaCache.beginCleanup(_moveSourcePath, _cacheCleanup);
+      }
+      const MediaCache::Result cleanup = _mediaCache.cleanupStep(_cacheCleanup);
+      if (cleanup == MediaCache::Result::Busy || cleanup == MediaCache::Result::More) return;
+      if (cleanup != MediaCache::Result::Complete) {
+        finishOperation(false, F("Secret copy kept; cache cleanup failed"));
+        return;
+      }
     }
     _moveCachesCleaned = true;
     if (!appendTask(_moveSourcePath, "", _moveSourceDirectory)) {
@@ -2065,24 +2112,11 @@ void FilesScreen::finishOperation(bool success, const String &message) {
   _moveStageCreated = false;
   _movePromoted = false;
   _moveCachesCleaned = false;
+  _renameSourcePath = "";
+  _renameTargetPath = "";
+  _cacheCleanup = MediaCache::Cleanup();
   showMessage(message);
   refreshListing();
-}
-
-bool FilesScreen::removePlaintextCaches(const String &sourcePath) {
-  const int slash = sourcePath.lastIndexOf('/');
-  const String directory = slash <= 0 ? F("/") : sourcePath.substring(0, slash);
-  const String name = sourcePath.substring(slash + 1);
-  const String base = directory + (directory == F("/") ? F("") : F("/")) + F(".cache/") + name;
-  const char *suffixes[] = { ".eth1", ".em16", ".emga", ".empa", ".eth1.tmp", ".em16.tmp", ".emga.tmp", ".empa.tmp" };
-  for (const char *suffix : suffixes) {
-    const String path = base + suffix;
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
-    const bool removed = !SD.exists(path.c_str()) || SD.remove(path.c_str());
-    SpiBusLock::unlock();
-    if (!removed) return false;
-  }
-  return true;
 }
 
 void FilesScreen::showMessage(const String &message, uint32_t durationMs) {
@@ -2107,6 +2141,9 @@ void FilesScreen::handleSdCardEvent(SdCardEvent event) {
     _moveStageCreated = false;
     _movePromoted = false;
     _moveCachesCleaned = false;
+    _renameSourcePath = "";
+    _renameTargetPath = "";
+    _cacheCleanup = MediaCache::Cleanup();
     showMessage(F("SD card removed; operation stopped"), 3000);
   }
   closeMenu();
