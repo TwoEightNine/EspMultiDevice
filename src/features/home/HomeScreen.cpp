@@ -12,7 +12,6 @@
 namespace {
 const uint16_t StatusActiveColor = TFT_WHITE;
 const uint16_t StatusInactiveColor = TFT_DARKGREY;
-const uint16_t FilesIconColor = TFT_BLUE;
 }
 
 HomeScreen::HomeScreen(Navigator &navigator,
@@ -37,11 +36,11 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _lastClockCheckMs(0xffffffffUL),
     _lastBatteryCheckMs(0),
     _lastClockText("") {
-  _apps[0] = { "Files", AppAction::Files, TFT_YELLOW, nullptr, 0, 0, 0, 0 };
-  _apps[1] = { "Recorder", AppAction::Recorder, TFT_RED, nullptr, 0, 0, 0, 0 };
-  _apps[2] = { "Settings", AppAction::Settings, TFT_DARKGREEN, nullptr, 0, 0, 0, 0 };
-  _apps[3] = { "Browser", AppAction::Browser, TFT_CYAN, nullptr, 0, 0, 0, 0 };
-  _apps[4] = { "Workout", AppAction::Workout, TFT_ORANGE, nullptr, 0, 0, 0, 0 };
+  _apps[0] = { "Browser", AppAction::Browser, 0xfb17, nullptr, 0, 0, 0, 0 };
+  _apps[1] = { "Files", AppAction::Files, 0x065f, nullptr, 0, 0, 0, 0 };
+  _apps[2] = { "Recorder", AppAction::Recorder, 0x9adf, nullptr, 0, 0, 0, 0 };
+  _apps[3] = { "Settings", AppAction::Settings, 0xfda0, nullptr, 0, 0, 0, 0 };
+  _apps[4] = { "Workout", AppAction::Workout, 0x04df, nullptr, 0, 0, 0, 0 }; // ai 0xfe67
 }
 
 void HomeScreen::onEnter() {
@@ -232,12 +231,19 @@ void HomeScreen::drawApps() {
 }
 
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
-  if (app.action != AppAction::Files) return;
-  UiKit::drawAlphaIcon(_display.tft(),
-                       centerX - ic_files_width / 2,
-                       centerY - ic_files_height / 2,
-                       ic_files_width, ic_files_height, ic_files_alpha,
-                       FilesIconColor, app.circleColor);
+  if (app.action == AppAction::Files) {
+    UiKit::drawRgba565Icon(_display.tft(),
+                         centerX - ic_files_width / 2,
+                         centerY - ic_files_height / 2,
+                         ic_files_width, ic_files_height,
+                         ic_files_colors, ic_files_alpha, app.circleColor);
+  } else if (app.action == AppAction::Browser) {
+    UiKit::drawRgba565Icon(_display.tft(),
+                         centerX - ic_browser_width / 2,
+                         centerY - ic_browser_height / 2,
+                         ic_browser_width, ic_browser_height,
+                         ic_browser_colors, ic_browser_alpha, app.circleColor);
+  }
 }
 
 String HomeScreen::clockText(const struct tm &localTime) const {
