@@ -250,6 +250,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     browserLog(F("close requested"));
     abandonPageLoad();
     releaseEmbeddedImages();
+    _transport.closeWhenIdle();
     // Never wait for an image decoder or delete a directory from the touch
     // handler.  The next Browser entry clears the disposable session cache
     // from its lifecycle worker.

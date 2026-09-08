@@ -6,6 +6,7 @@
 
 #include "../../core/SpiBusLock.h"
 #include "../../services/storage/SdCardController.h"
+#include "BrowserLimits.h"
 
 using File = fs::File;
 
@@ -224,6 +225,7 @@ bool BrowserSessionCache::loadPage(const String &url, String &body, String &cont
   if (!lock.locked() || !_sessionCacheActive || !_sessionCacheInitialized || !_sdCard.isMounted()) return false;
   const int8_t index = sessionPageIndex(url);
   if (index < 0) return false;
+  const uint32_t cacheStartedMs = millis();
   Browser::SessionPageCacheEntry &entry = _sessionPages[index];
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   File file = SD.open(entry.path.c_str(), FILE_READ);
@@ -239,7 +241,7 @@ bool BrowserSessionCache::loadPage(const String &url, String &body, String &cont
     if (removeSessionFile(entry.path)) removeSessionPage((uint8_t)index);
     return false;
   }
-  uint8_t buffer[512];
+  uint8_t buffer[BrowserLimits::CacheIoChunkBytes];
   uint32_t offset = 0;
   bool readOk = true;
   while (offset < size) {
@@ -270,6 +272,8 @@ bool BrowserSessionCache::loadPage(const String &url, String &body, String &cont
   }
   entry.lastUse = nextSessionCacheUse();
   contentType = entry.contentType;
+  cacheLog(String(F("session page cache loaded: bytes=")) + String(size) +
+           F(", elapsedMs=") + String(millis() - cacheStartedMs));
   return true;
 }
 
@@ -300,6 +304,7 @@ bool BrowserSessionCache::storePage(const String &url, const String &contentType
   }
   const String path = nextSessionCachePath("page-", ".html");
   const String temporary = path + F(".tmp");
+  const uint32_t cacheStartedMs = millis();
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
   SD.remove(temporary.c_str());
   File file = SD.open(temporary.c_str(), FILE_WRITE);
@@ -309,7 +314,8 @@ bool BrowserSessionCache::storePage(const String &url, const String &contentType
   bool written = true;
   while (offset < body.length()) {
     if (cancellation && cancellation->cancelled()) { written = false; break; }
-    const uint16_t amount = body.length() - offset > 512 ? 512 : (uint16_t)(body.length() - offset);
+    const uint16_t amount = body.length() - offset > BrowserLimits::CacheIoChunkBytes
+      ? BrowserLimits::CacheIoChunkBytes : (uint16_t)(body.length() - offset);
     if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { written = false; break; }
     const size_t count = file.write(reinterpret_cast<const uint8_t *>(body.c_str()) + offset, amount);
     SpiBusLock::unlock();
@@ -334,7 +340,8 @@ bool BrowserSessionCache::storePage(const String &url, const String &contentType
   if (!committed) return false;
   _sessionPages[slot] = {url, contentType, path, body.length(), nextSessionCacheUse(), true};
   _sessionCacheBytes += body.length();
-  cacheLog(String(F("page stored in session cache: ")) + url);
+  cacheLog(String(F("page stored in session cache: ")) + url + F(", bytes=") +
+           String(body.length()) + F(", elapsedMs=") + String(millis() - cacheStartedMs));
   return true;
 }
 

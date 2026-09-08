@@ -19,7 +19,9 @@ other page controls are disabled until the result or cancellation arrives.
 
 ## HTTP(S), redirects, and downloads
 
-The browser supports uncompressed HTTP/HTTPS GET, fixed-length or chunked bodies, up to five redirects, and a bounded cookie jar. It resolves absolute, protocol-relative, root-relative, directory-relative, and query-relative URLs. Fragment-only links and non-web schemes (`mailto:`, `tel:`, `javascript:`) are not tappable.
+The browser supports identity-encoded HTTP/HTTPS GET, fixed-length or chunked bodies, up to five redirects, and a bounded cookie jar. Compressed page, preview, and downloadable-media responses are rejected to preserve byte-exact media verification. It resolves absolute, protocol-relative, root-relative, directory-relative, and query-relative URLs. Fragment-only links and non-web schemes (`mailto:`, `tel:`, `javascript:`) are not tappable.
+
+The browser reuses one fully consumed HTTP/1.1 connection for the next request to the same scheme, host, and port when the server permits it. Redirects, errors, cancellation, responses without a known framing boundary, `Connection: close`, Wi-Fi loss, and closing Browser discard that connection. It does not issue parallel foreground or preview transfers.
 
 Text response retention is capped at 512 KiB; longer responses render the retained prefix. Connection timeout is 10 seconds. Page/media transfers show a phase and progress bar; length is a percentage only with `Content-Length`, otherwise a received-byte count.
 
@@ -29,6 +31,10 @@ The internal `BrowserDownloadStore` owns media-response classification, safe
 filename selection, and the complete temporary-file transaction. It bounds and
 serializes each SD write with the shared SPI lock, then exposes only a verified,
 atomically committed path to the Browser screen.
+
+Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
+
+To retune on a physical device, compare 1/2/4/8 KiB receive buffers with 512-byte SD writes, then compare 512 B, 1/2/4/8 KiB SD writes using the fastest receive size. Run each candidate three times over controlled fixed-length and chunked HTTPS media responses, then keep the fastest median that completes ten cancel/retry cycles without corruption or missed touch input.
 
 TLS certificate validation is deliberately disabled for compatibility. Do not use the browser for private information or sensitive accounts.
 

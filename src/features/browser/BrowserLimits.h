@@ -30,6 +30,13 @@ constexpr uint32_t MaxBodyBytes = 512UL * 1024UL;
 constexpr uint16_t MaxFormPostBytes = 8UL * 1024UL;
 constexpr uint32_t MaxDownloadBytes = 16UL * 1024UL * 1024UL;
 constexpr uint32_t MaxSessionCacheBytes = 16UL * 1024UL * 1024UL;
+// Transfers are deliberately bounded.  The values below are the default
+// high-throughput candidates for the N16R8 profile; benchmark alternatives
+// on the physical SD card before changing them.
+constexpr uint16_t TransferReadBufferBytes = 8192;
+constexpr uint16_t SdWriteChunkBytes = 4096;
+constexpr uint16_t CacheIoChunkBytes = 4096;
+constexpr uint16_t FallbackTransferReadBufferBytes = 512;
 constexpr uint16_t MaxHttpLineBytes = 2048;
 constexpr uint8_t MaxResponseHeaderLines = 64;
 constexpr uint32_t ConnectTimeoutMs = 10000;

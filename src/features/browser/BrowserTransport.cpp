@@ -50,7 +50,28 @@ private:
 }  // namespace
 
 BrowserTransport::BrowserTransport(WiFiController &wifi, BrowserDownloadStore &downloadStore)
-    : _wifi(wifi), _downloadStore(downloadStore), _mutex(xSemaphoreCreateMutex()) {}
+    : _wifi(wifi),
+      _downloadStore(downloadStore),
+      _connectionUrl{},
+      _connectionOpen(false),
+      _connectionSecure(false),
+      _closeRequested(false),
+      _transferBuffer(nullptr),
+      _transferBufferBytes(0),
+      _mutex(xSemaphoreCreateMutex()) {
+  _transferBuffer = static_cast<uint8_t *>(psramFound()
+    ? ps_malloc(BrowserLimits::TransferReadBufferBytes)
+    : malloc(BrowserLimits::TransferReadBufferBytes));
+  if (_transferBuffer) {
+    _transferBufferBytes = BrowserLimits::TransferReadBufferBytes;
+  } else {
+    _transferBuffer = static_cast<uint8_t *>(malloc(BrowserLimits::FallbackTransferReadBufferBytes));
+    _transferBufferBytes = _transferBuffer ? BrowserLimits::FallbackTransferReadBufferBytes : 0;
+  }
+  browserLog(String(F("transfer buffer: bytes=")) + String(_transferBufferBytes) +
+             F(", psram=") + (psramFound() && _transferBufferBytes == BrowserLimits::TransferReadBufferBytes
+               ? F("yes") : F("no")));
+}
 
 bool BrowserTransport::discardDownload(const String &path) {
   return _downloadStore.discard(path);
@@ -59,6 +80,33 @@ bool BrowserTransport::discardDownload(const String &path) {
 void BrowserTransport::stopClients() {
   _plainClient.stop();
   _secureClient.stop();
+}
+
+void BrowserTransport::clearConnection() {
+  _connectionUrl = {};
+  _connectionOpen = false;
+  _connectionSecure = false;
+}
+
+bool BrowserTransport::reusableConnectionFor(const Browser::Url &url) const {
+  if (!_connectionOpen || _closeRequested || _connectionSecure != (url.scheme == "https")) return false;
+  return _connectionUrl.scheme == url.scheme && _connectionUrl.host == url.host &&
+         _connectionUrl.port == url.port;
+}
+
+void BrowserTransport::retainConnection(const Browser::Url &url) {
+  _connectionUrl = url;
+  _connectionOpen = true;
+  _connectionSecure = url.scheme == "https";
+}
+
+void BrowserTransport::closeWhenIdle() {
+  _closeRequested = true;
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return;
+  stopClients();
+  clearConnection();
+  _closeRequested = false;
+  xSemaphoreGive(_mutex);
 }
 
 Browser::TransferResult BrowserTransport::transfer(
@@ -101,7 +149,11 @@ Browser::TransferResult BrowserTransport::transfer(
   }
 
   browserLog(F("network access acquired"));
-  stopClients();
+  if (_closeRequested || !_wifi.isConnected()) {
+    stopClients();
+    clearConnection();
+    _closeRequested = false;
+  }
   _downloadStore.abort();
   const uint32_t bodyLimit = options.bodyLimit == 0 || options.bodyLimit > BrowserLimits::MaxBodyBytes
     ? BrowserLimits::MaxBodyBytes : options.bodyLimit;
@@ -129,14 +181,16 @@ Browser::TransferResult BrowserTransport::transfer(
     WiFiClient *client = nullptr;
     const String cookieHeader = redirect == 0
       ? options.cookieHeader : cookieProvider.cookieHeaderFor(url);
+    bool reusedConnection = false;
     if (!requestOne(url, request.method, request.body, options.userAgent, cookieHeader,
-                    response, client, observer, result.error)) {
+                    response, client, observer, reusedConnection, result.error)) {
       browserLog(String(F("HTTP request failed: url=")) + request.url + F(", error=") + result.error);
       break;
     }
 
     if (response.statusCode >= 300 && response.statusCode <= 399) {
       client->stop();
+      clearConnection();
       if (!response.location.length()) {
         browserLog(String(F("redirect rejected: url=")) + request.url + F(", status=") +
                    String(response.statusCode) + F(", reason=no Location header"));
@@ -158,12 +212,14 @@ Browser::TransferResult BrowserTransport::transfer(
 
     if (response.statusCode == 401) {
       client->stop();
+      clearConnection();
       browserLog(String(F("server requires unsupported Basic authentication: url=")) + request.url);
       result.error = "Basic authentication is unsupported";
       break;
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       client->stop();
+      clearConnection();
       browserLog(String(F("HTTP request rejected: url=")) + request.url + F(", status=") +
                  String(response.statusCode));
       result.error = "HTTP error " + String(response.statusCode);
@@ -179,6 +235,13 @@ Browser::TransferResult BrowserTransport::transfer(
                (response.chunked ? F(", chunked") : F("")) +
                (downloadable ? F(", media download") : F(", page response")));
 
+    if (!_transferBuffer || _transferBufferBytes == 0) {
+      result.error = "Not enough transfer memory";
+      client->stop();
+      clearConnection();
+      break;
+    }
+    const uint32_t bodyStartedMs = millis();
     bool readOk = false;
     if (downloadable && response.compressed) {
       browserLog(String(F("compressed media download rejected: url=")) + request.url +
@@ -188,26 +251,39 @@ Browser::TransferResult BrowserTransport::transfer(
       readOk = readDownloadBody(
         *client, response.chunked, response.contentLength, format,
         BrowserDownloadStore::deriveSuggestedName(response.contentDisposition, url.path, format),
-        downloadLimit, result.downloadPath, observer, result.error);
+        downloadLimit, result.downloadPath, observer, response.fullyConsumed, result.error);
+    } else if (response.compressed) {
+      result.error = "Compressed page response unsupported";
     } else {
       readOk = readBody(*client, response.chunked, response.contentLength, bodyLimit,
-                        result.retainedText, observer, result.error);
+                        result.retainedText, observer, response.fullyConsumed, result.error);
     }
     if (!readOk) {
       browserLog(String(F("response transfer failed: url=")) + request.url + F(", error=") +
                  result.error + F(", retainedBytes=") + String(result.retainedText.length()) +
                  F(", ") + clientState(*client));
       client->stop();
+      clearConnection();
       break;
     }
 
-    client->stop();
+    const uint32_t bodyElapsedMs = millis() - bodyStartedMs;
+    const bool keepAlive = response.fullyConsumed && (response.chunked || response.contentLength >= 0) &&
+                           !response.connectionClose &&
+                           !observer.cancelled() && !_closeRequested && _wifi.isConnected();
+    if (keepAlive) retainConnection(url);
+    else {
+      client->stop();
+      clearConnection();
+    }
     String canonicalUrl;
     String canonicalError;
     if (normalizeUrl(request.url, canonicalUrl, canonicalError)) result.finalUrl = canonicalUrl;
     result.error = "";
+    browserLog(String(F("performance: reused=")) + (reusedConnection ? F("yes") : F("no")) +
+               F(", bodyMs=") + String(bodyElapsedMs) + F(", rssi=") + String(WiFi.RSSI()) +
+               F(", keepAlive=") + (keepAlive ? F("yes") : F("no")));
     browserLog(String(F("HTTP transfer complete: ")) + result.finalUrl);
-    stopClients();
     _downloadStore.abort();
     return result;
   }
@@ -219,6 +295,7 @@ Browser::TransferResult BrowserTransport::transfer(
   }
   result.downloadPath = "";
   stopClients();
+  clearConnection();
   _downloadStore.abort();
   return result;
 }
@@ -227,7 +304,7 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
                                   const String &requestBody, const String &userAgent,
                                   const String &cookieHeader, HttpResponse &response,
                                   WiFiClient *&client, Browser::TransferObserver &observer,
-                                  String &error) {
+                                  bool &reusedConnection, String &error) {
   if (observer.cancelled()) {
     error = "Loading cancelled";
     browserLog(String(F("request cancelled before connect: url=")) + url.scheme +
@@ -235,17 +312,28 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     return false;
   }
 
-  stopClients();
-  client = &_plainClient;
-  if (url.scheme == "https") {
-    _secureClient.setInsecure();
-    _secureClient.setHandshakeTimeout(BrowserLimits::ConnectTimeoutMs / 1000);
-    client = &_secureClient;
+  reusedConnection = reusableConnectionFor(url);
+  client = url.scheme == "https" ? static_cast<WiFiClient *>(&_secureClient) : &_plainClient;
+  if (reusedConnection && !client->connected()) {
+    reusedConnection = false;
+    clearConnection();
   }
 
-  observer.phaseChanged(String(F("Connecting to ")) + url.host, -1);
-  browserLog(String(F("connecting: ")) + url.scheme + F("://") + url.host + F(":") + String(url.port));
+  observer.phaseChanged(reusedConnection ? String(F("Reusing connection to ")) + url.host
+                                        : String(F("Connecting to ")) + url.host, -1);
+  browserLog(String(reusedConnection ? F("reusing: ") : F("connecting: ")) + url.scheme +
+             F("://") + url.host + F(":") + String(url.port));
+  if (!reusedConnection) {
+    stopClients();
+    clearConnection();
+    client = &_plainClient;
+    if (url.scheme == "https") {
+      _secureClient.setInsecure();
+      _secureClient.setHandshakeTimeout(BrowserLimits::ConnectTimeoutMs / 1000);
+      client = &_secureClient;
+    }
   IPAddress resolvedAddress;
+  const uint32_t dnsStartedMs = millis();
   const int dnsResult = WiFi.hostByName(url.host.c_str(), resolvedAddress);
   if (dnsResult != 1) {
     browserLog(String(F("DNS lookup failed: host=")) + url.host + F(", result=") +
@@ -254,7 +342,8 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     error = "DNS lookup failed";
     return false;
   }
-  browserLog(String(F("DNS resolved: host=")) + url.host + F(", address=") + resolvedAddress.toString());
+  browserLog(String(F("DNS resolved: host=")) + url.host + F(", address=") + resolvedAddress.toString() +
+             F(", dnsMs=") + String(millis() - dnsStartedMs));
   browserLog(String(F("TLS memory before connect: freeHeap=")) + String(ESP.getFreeHeap()) +
              F(", largestHeapBlock=") + String(ESP.getMaxAllocHeap()) + F(", freePsram=") +
              String(ESP.getFreePsram()) + F(", largestPsramBlock=") + String(ESP.getMaxAllocPsram()));
@@ -299,6 +388,11 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     error = observer.cancelled() ? "Loading cancelled" : "Connection failed";
     return false;
   }
+  browserLog(String(F("connection ready: reused=no, connectMs=")) +
+             String(initialConnectElapsedMs + retryConnectElapsedMs));
+  } else {
+    browserLog(F("connection ready: reused=yes, connectMs=0"));
+  }
 
   observer.phaseChanged(F("Sending request"), -1);
   if (observer.cancelled()) {
@@ -314,7 +408,7 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
   const bool post = method == Browser::HttpMethod::Post;
   String request = String(post ? "POST" : "GET") + " " + url.path +
                    " HTTP/1.1\r\nHost: " + hostHeader + "\r\nUser-Agent: " + userAgent +
-                   "\r\nAccept: text/html,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: close\r\n";
+                   "\r\nAccept: text/html,*/*;q=0.1\r\nAccept-Encoding: identity\r\nConnection: keep-alive\r\n";
   if (post) {
     request += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
                String(requestBody.length()) + "\r\n";
@@ -353,6 +447,7 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
 
   String line;
   observer.phaseChanged(F("Waiting for response"), -1);
+  const uint32_t responseWaitStartedMs = millis();
   if (!readLine(*client, line, BrowserLimits::ConnectTimeoutMs, observer) ||
       !startsWithIgnoreCase(line, "HTTP/")) {
     browserLog(String(F("invalid or timed out HTTP status line: host=")) + url.host +
@@ -362,6 +457,8 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     error = "Invalid HTTP response";
     return false;
   }
+  browserLog(String(F("response first byte: ms=")) + String(millis() - responseWaitStartedMs));
+  const bool http10 = startsWithIgnoreCase(line, "HTTP/1.0");
   const int firstSpace = line.indexOf(' ');
   response.statusCode = firstSpace >= 0 ? line.substring(firstSpace + 1).toInt() : 0;
   if (response.statusCode == 0) {
@@ -375,6 +472,8 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
 
   response.chunked = false;
   response.compressed = false;
+  response.connectionClose = http10;
+  response.fullyConsumed = false;
   response.contentLength = -1;
   response.contentType = "";
   response.contentDisposition = "";
@@ -406,7 +505,10 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     const String headerValue = trimCopy(line.substring(colon + 1));
     if (name == "content-length") response.contentLength = headerValue.toInt();
     else if (name == "transfer-encoding" && lower(headerValue).indexOf("chunked") >= 0) response.chunked = true;
-    else if (name == "content-encoding" && !headerValue.equalsIgnoreCase("identity")) response.compressed = true;
+    else if (name == "content-encoding" && !headerValue.equalsIgnoreCase("identity")) {
+      response.compressed = true;
+    }
+    else if (name == "connection" && lower(headerValue).indexOf("close") >= 0) response.connectionClose = true;
     else if (name == "content-type") response.contentType = lower(headerValue);
     else if (name == "content-disposition") response.contentDisposition = headerValue;
     else if (name == "location") response.location = headerValue;
@@ -463,12 +565,18 @@ bool BrowserTransport::readLine(WiFiClient &client, String &line, uint32_t timeo
   return false;
 }
 
-int BrowserTransport::readByte(WiFiClient &client, uint32_t timeoutMs,
-                               Browser::TransferObserver &observer) {
+int BrowserTransport::readSome(WiFiClient &client, uint8_t *buffer, size_t capacity,
+                               uint32_t timeoutMs, Browser::TransferObserver &observer) {
+  if (!buffer || capacity == 0) return -1;
   const uint32_t started = millis();
   while (millis() - started < timeoutMs) {
     if (observer.cancelled()) return -1;
-    if (client.available()) return client.read();
+    const int available = client.available();
+    if (available > 0) {
+      const size_t amount = static_cast<size_t>(available) < capacity ? static_cast<size_t>(available) : capacity;
+      const int received = client.read(buffer, amount);
+      if (received > 0) return received;
+    }
     if (!client.connected()) return -1;
     delay(1);
     yield();
@@ -478,8 +586,11 @@ int BrowserTransport::readByte(WiFiClient &client, uint32_t timeoutMs,
 
 bool BrowserTransport::readBody(WiFiClient &client, bool chunked, int32_t contentLength,
                                 uint32_t bodyLimit, String &body,
-                                Browser::TransferObserver &observer, String &error) {
+                                Browser::TransferObserver &observer, bool &fullyConsumed,
+                                String &error) {
+  fullyConsumed = false;
   observer.phaseChanged(F("Loading page"), chunked ? -1 : contentLength);
+  const uint32_t bodyStartedMs = millis();
   browserLog(String(F("reading page body")) + (chunked ? F(" (chunked)") : F("")) +
              F(", expected bytes=") + String(contentLength));
   body = "";
@@ -493,7 +604,11 @@ bool BrowserTransport::readBody(WiFiClient &client, bool chunked, int32_t conten
     return false;
   }
 
+  uint8_t *buffer = _transferBuffer;
+  const size_t bufferBytes = _transferBufferBytes;
   uint32_t total = 0;
+  uint32_t chunkCount = 0;
+  uint32_t largestChunk = 0;
   uint32_t reported = 0;
   auto reportProgress = [&]() {
     if (total - reported >= 1024) {
@@ -503,6 +618,41 @@ bool BrowserTransport::readBody(WiFiClient &client, bool chunked, int32_t conten
   };
   auto finishProgress = [&]() {
     if (total > reported) observer.bytesReceived(total - reported);
+  };
+
+  auto appendBytes = [&](const uint8_t *bytes, uint16_t amount) -> bool {
+    if (total > bodyLimit - amount) return false;
+    if (!body.concat(reinterpret_cast<const char *>(bytes), amount)) {
+      error = "Not enough memory for page";
+      return false;
+    }
+    total += amount;
+    reportProgress();
+    return true;
+  };
+  auto receiveExact = [&](uint32_t length) -> bool {
+    while (length) {
+      const size_t wanted = length > bufferBytes ? bufferBytes : static_cast<size_t>(length);
+      const int received = readSome(client, buffer, wanted, BrowserLimits::ConnectTimeoutMs, observer);
+      if (received <= 0) {
+        error = observer.cancelled() ? "Loading cancelled" : "Page body timed out";
+        return false;
+      }
+      if (!appendBytes(buffer, static_cast<uint16_t>(received))) return true;
+      length -= static_cast<uint32_t>(received);
+    }
+    return true;
+  };
+  auto receiveTerminator = [&]() -> bool {
+    uint8_t terminator[2] = {};
+    size_t received = 0;
+    while (received < sizeof(terminator)) {
+      const int count = readSome(client, terminator + received, sizeof(terminator) - received,
+                                 BrowserLimits::ConnectTimeoutMs, observer);
+      if (count <= 0) return false;
+      received += static_cast<size_t>(count);
+    }
+    return terminator[0] == '\r' && terminator[1] == '\n';
   };
 
   if (chunked) {
@@ -520,38 +670,26 @@ bool BrowserTransport::readBody(WiFiClient &client, bool chunked, int32_t conten
           if (!readLine(client, sizeLine, BrowserLimits::ConnectTimeoutMs, observer)) break;
         } while (sizeLine.length());
         finishProgress();
-        browserLog(String(F("page body complete: bytes=")) + String(total));
+        fullyConsumed = true;
+        const uint32_t elapsedMs = millis() - bodyStartedMs;
+        const uint32_t kibPerSecond = elapsedMs ? (total * 1000UL) / elapsedMs / 1024UL : 0;
+        browserLog(String(F("page body complete: bytes=")) + String(total) +
+                   F(", httpChunks=") + String(chunkCount) + F(", largestChunk=") + String(largestChunk));
+        browserLog(String(F("page throughput: elapsedMs=")) + String(elapsedMs) +
+                   F(", KiB/s=") + String(kibPerSecond));
         return true;
       }
+      ++chunkCount;
+      if (chunk > largestChunk) largestChunk = chunk;
       if (chunk > bodyLimit - total) {
         const uint32_t keep = bodyLimit - total;
-        for (uint32_t index = 0; index < keep; ++index) {
-          const int value = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-          if (value < 0) {
-            error = "Page body timed out";
-            return false;
-          }
-          body += (char)value;
-          ++total;
-          reportProgress();
-        }
+        if (keep && !receiveExact(keep)) return false;
         finishProgress();
         browserLog(String(F("page body reached retained limit: bytes=")) + String(total));
         return true;
       }
-      for (uint32_t index = 0; index < chunk; ++index) {
-        const int value = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-        if (value < 0) {
-          error = "Page body timed out";
-          return false;
-        }
-        body += (char)value;
-        ++total;
-        reportProgress();
-      }
-      const int cr = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-      const int lf = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-      if (cr != '\r' || lf != '\n') {
+      if (!receiveExact(chunk)) return false;
+      if (!receiveTerminator()) {
         error = "Invalid chunked response";
         return false;
       }
@@ -559,27 +697,34 @@ bool BrowserTransport::readBody(WiFiClient &client, bool chunked, int32_t conten
   }
 
   while (contentLength < 0 || total < (uint32_t)contentLength) {
-    const int value = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-    if (value < 0) {
+    const uint32_t remaining = contentLength < 0 ? bufferBytes : (uint32_t)contentLength - total;
+    const size_t wanted = remaining > bufferBytes ? bufferBytes : remaining;
+    const int received = readSome(client, buffer, wanted, BrowserLimits::ConnectTimeoutMs, observer);
+    if (received <= 0) {
       if (contentLength < 0) {
         finishProgress();
+        fullyConsumed = !observer.cancelled();
         browserLog(String(F("page body complete at connection close: bytes=")) + String(total));
         return true;
       }
       error = contentLength < 0 ? "Page body timed out" : "Incomplete page body";
       return false;
     }
-    if (total >= bodyLimit) {
+    if (total > bodyLimit - static_cast<uint32_t>(received)) {
       finishProgress();
       browserLog(String(F("page body reached retained limit: bytes=")) + String(total));
       return true;
     }
-    body += (char)value;
-    ++total;
-    reportProgress();
+    if (!appendBytes(buffer, static_cast<uint16_t>(received))) return false;
   }
   finishProgress();
-  browserLog(String(F("page body complete: bytes=")) + String(total));
+  fullyConsumed = true;
+  const uint32_t elapsedMs = millis() - bodyStartedMs;
+  const uint32_t kibPerSecond = elapsedMs ? (total * 1000UL) / elapsedMs / 1024UL : 0;
+  browserLog(String(F("page body complete: bytes=")) + String(total) +
+             F(", httpChunks=") + String(chunkCount) + F(", largestChunk=") + String(largestChunk));
+  browserLog(String(F("page throughput: elapsedMs=")) + String(elapsedMs) +
+             F(", KiB/s=") + String(kibPerSecond));
   return true;
 }
 
@@ -587,8 +732,11 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
                                         int32_t contentLength, FileFormats::Format format,
                                         const String &suggestedFileName, uint32_t downloadLimit,
                                         String &downloadedPath,
-                                        Browser::TransferObserver &observer, String &error) {
+                                        Browser::TransferObserver &observer, bool &fullyConsumed,
+                                        String &error) {
   downloadedPath = "";
+  fullyConsumed = false;
+  const uint32_t downloadStartedMs = millis();
   observer.phaseChanged(String(F("Downloading ")) + FileFormats::extension(format),
                         chunked ? -1 : contentLength);
   browserLog(String(F("starting file download: format=")) + FileFormats::extension(format) +
@@ -599,7 +747,11 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
     return false;
   }
 
+  uint8_t *buffer = _transferBuffer;
+  const size_t bufferBytes = _transferBufferBytes;
   uint32_t total = 0;
+  uint32_t chunkCount = 0;
+  uint32_t largestChunk = 0;
   auto writeBytes = [&](const uint8_t *bytes, uint16_t length) -> bool {
     if (!_downloadStore.write(bytes, length, error)) return false;
     total += length;
@@ -607,21 +759,28 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
     return true;
   };
   auto receiveBytes = [&](uint32_t length) -> bool {
-    uint8_t buffer[512];
     while (length) {
-      const uint16_t amount = length > sizeof(buffer) ? sizeof(buffer) : (uint16_t)length;
-      for (uint16_t index = 0; index < amount; ++index) {
-        const int value = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-        if (value < 0) {
-          error = "File download timed out";
-          return false;
-        }
-        buffer[index] = (uint8_t)value;
+      const size_t wanted = length > bufferBytes ? bufferBytes : static_cast<size_t>(length);
+      const int received = readSome(client, buffer, wanted, BrowserLimits::ConnectTimeoutMs, observer);
+      if (received <= 0) {
+        error = observer.cancelled() ? "Loading cancelled" : "File download timed out";
+        return false;
       }
-      if (!writeBytes(buffer, amount)) return false;
-      length -= amount;
+      if (!writeBytes(buffer, static_cast<uint16_t>(received))) return false;
+      length -= static_cast<uint32_t>(received);
     }
     return true;
+  };
+  auto receiveTerminator = [&]() -> bool {
+    uint8_t terminator[2] = {};
+    size_t received = 0;
+    while (received < sizeof(terminator)) {
+      const int count = readSome(client, terminator + received, sizeof(terminator) - received,
+                                 BrowserLimits::ConnectTimeoutMs, observer);
+      if (count <= 0) return false;
+      received += static_cast<size_t>(count);
+    }
+    return terminator[0] == '\r' && terminator[1] == '\n';
   };
 
   bool complete = true;
@@ -652,14 +811,14 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
         } while (sizeLine.length());
         break;
       }
+      ++chunkCount;
+      if (amount > largestChunk) largestChunk = amount;
       if (!receiveBytes(amount)) {
         if (!error.length()) error = "File exceeds download limit";
         complete = false;
         break;
       }
-      const int cr = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-      const int lf = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-      if (cr != '\r' || lf != '\n') {
+      if (!receiveTerminator()) {
         error = "Invalid chunked download";
         complete = false;
       }
@@ -668,26 +827,19 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
     complete = receiveBytes((uint32_t)contentLength);
     if (!complete && !error.length()) error = "Incomplete file download";
   } else {
-    uint8_t buffer[512];
-    uint16_t buffered = 0;
     while (true) {
-      const int value = readByte(client, BrowserLimits::ConnectTimeoutMs, observer);
-      if (value < 0) {
+      const int received = readSome(client, buffer, bufferBytes, BrowserLimits::ConnectTimeoutMs, observer);
+      if (received <= 0) {
         if (!client.connected() && !client.available() && !observer.cancelled()) break;
         error = "File download timed out";
         complete = false;
         break;
       }
-      buffer[buffered++] = (uint8_t)value;
-      if (buffered == sizeof(buffer)) {
-        if (!writeBytes(buffer, buffered)) {
-          complete = false;
-          break;
-        }
-        buffered = 0;
+      if (!writeBytes(buffer, static_cast<uint16_t>(received))) {
+        complete = false;
+        break;
       }
     }
-    if (complete && buffered && !writeBytes(buffer, buffered)) complete = false;
   }
 
   if (!complete) {
@@ -695,6 +847,7 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
     _downloadStore.abort();
     return false;
   }
+  const uint32_t sdWriteMs = _downloadStore.writeElapsedMs();
   if (!_downloadStore.commit(downloadedPath, error)) {
     if (error == F("Unsupported file download")) {
       browserLog(F("download rejected: file signature does not match response format"));
@@ -709,7 +862,14 @@ bool BrowserTransport::readDownloadBody(WiFiClient &client, bool chunked,
     error = "Unsupported file download";
     return false;
   }
-  browserLog(String(F("download saved: bytes=")) + String(total) + F(", path=") + downloadedPath);
+  fullyConsumed = true;
+  const uint32_t elapsedMs = millis() - downloadStartedMs;
+  const uint32_t kibPerSecond = elapsedMs ? (total * 1000UL) / elapsedMs / 1024UL : 0;
+  browserLog(String(F("download saved: bytes=")) + String(total) + F(", path=") + downloadedPath +
+             F(", httpChunks=") + String(chunkCount) + F(", largestChunk=") + String(largestChunk) +
+             F(", sdWriteMs=") + String(sdWriteMs));
+  browserLog(String(F("download throughput: elapsedMs=")) + String(elapsedMs) +
+             F(", KiB/s=") + String(kibPerSecond));
   return true;
 }
 

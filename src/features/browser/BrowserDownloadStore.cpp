@@ -31,6 +31,7 @@ BrowserDownloadStore::BrowserDownloadStore(SdCardController &sdCard)
       _format(FileFormats::Format::Unknown),
       _byteLimit(0),
       _bytesWritten(0),
+      _writeElapsedMs(0),
       _active(false) {}
 
 BrowserDownloadStore::~BrowserDownloadStore() {
@@ -193,6 +194,7 @@ bool BrowserDownloadStore::begin(FileFormats::Format format, const String &sugge
   _format = format;
   _byteLimit = byteLimit;
   _bytesWritten = 0;
+  _writeElapsedMs = 0;
   _active = true;
   return true;
 }
@@ -216,12 +218,15 @@ bool BrowserDownloadStore::write(const uint8_t *bytes, size_t length, String &er
   size_t offset = 0;
   while (offset < length) {
     const size_t remaining = length - offset;
-    const size_t amount = remaining > WriteChunkBytes ? WriteChunkBytes : remaining;
+    const size_t amount = remaining > BrowserLimits::SdWriteChunkBytes
+      ? BrowserLimits::SdWriteChunkBytes : remaining;
     if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
       error = "SD card is busy";
       return false;
     }
+    const uint32_t writeStartedMs = millis();
     const size_t written = _file.write(bytes + offset, amount);
+    _writeElapsedMs += millis() - writeStartedMs;
     SpiBusLock::unlock();
     if (written != amount) {
       error = "File download write failed";
@@ -318,5 +323,6 @@ void BrowserDownloadStore::reset() {
   _temporaryPath = "";
   _byteLimit = 0;
   _bytesWritten = 0;
+  _writeElapsedMs = 0;
   _active = false;
 }

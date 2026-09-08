@@ -56,12 +56,13 @@ Its browser-internal records and limits live in `BrowserTypes.h` and
 screen declaration.
 
 `BrowserTransport` owns the complete synchronous HTTP transfer boundary: its
-private HTTP client pair and serialization mutex, DNS and compatibility-mode
-TLS policy, request/response parsing, redirects, body framing, timeouts, and
-byte limits. It receives request policy, a cookie provider, and a transfer
-observer rather than Navigator, touch, or display dependencies. It drives an
-injected `BrowserDownloadStore` and returns one terminal result containing the
-final URL and either retained text or a verified committed download path.
+private HTTP client pair and serialization mutex, same-origin HTTP/1.1
+keep-alive state, DNS and compatibility-mode TLS policy, request/response
+parsing, redirects, body framing, timeouts, and byte
+limits. It receives request policy, a cookie provider, and a transfer observer
+rather than Navigator, touch, or display dependencies. It drives an injected
+`BrowserDownloadStore` and returns one terminal result containing the final
+URL and either retained text or a verified committed download path.
 `BrowserPersistentState` owns recents, favorites, cookies, and the plaintext
 browser-state file; it has no UI dependency. Neither transport nor persistence
 paints the display or navigates.
@@ -80,6 +81,14 @@ signature and ISO-BMFF validation, and atomic commit or cleanup. It is injected
 into `BrowserTransport`, which owns HTTP body framing, cancellation polling,
 and progress callbacks. The store contains all download-specific `SD`,
 `SpiBusLock`, and `FileFormats` policy.
+
+Browser transport allocates one bounded receive buffer in PSRAM and falls back
+to a 512-byte internal allocation only when necessary. The serialized transport
+is its sole user. Download and session-page-cache operations take the shared
+SPI lock only for bounded 4 KiB SD transactions, release it, and yield.
+`BrowserTransport::closeWhenIdle()` is UI-safe: it closes an idle connection
+immediately or asks the serialized worker to close after cancellation, so the
+UI never reaches into a live client object.
 
 `BrowserSessionCache` owns the Browser session's bounded page/image index,
 LRU accounting, and cache mutex. Its disposable files remain under

@@ -40,4 +40,5 @@ Regenerate a derived asset only through its corresponding tool, review the gener
 - Keep `FileFormats`, decoder behavior, cache format documentation, and browser download behavior in sync when adding a media type.
 - Treat cache header/version updates as persistent-format changes: deliberately invalidate incompatible old data and document the migration behavior.
 - Preserve responsive touch: worker code may perform decoding or network/file I/O, but UI painting happens on the UI task and shared SD/touch SPI use stays granular.
+- For browser throughput changes, record Browser Serial timings for cold/warm page loads and fixed/chunked HTTPS downloads. Tune the receive buffer before SD transaction size, use medians of three runs, then require ten successful cancel/retry cycles with touch polling before adopting a larger value.
 - When adding a screen, follow [ui-kit.md](ui-kit.md) and [architecture.md](architecture.md), register it in the composition root, and give it only the controllers it needs.

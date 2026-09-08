@@ -57,6 +57,9 @@ public:
                                    Browser::TransferObserver &observer,
                                    const Browser::CookieProvider &cookieProvider);
   bool discardDownload(const String &path);
+  // Safe from the UI task: an active worker closes the socket after it
+  // observes cancellation; an idle transport closes it immediately.
+  void closeWhenIdle();
 
   static bool normalizeUrl(const String &value, String &normalized, String &error);
   static bool parseUrl(const String &value, Browser::Url &url);
@@ -70,6 +73,8 @@ private:
     String contentDisposition;
     bool chunked;
     bool compressed;
+    bool connectionClose;
+    bool fullyConsumed;
     int32_t contentLength;
   };
 
@@ -77,26 +82,35 @@ private:
   BrowserDownloadStore &_downloadStore;
   WiFiClient _plainClient;
   WiFiClientSecure _secureClient;
+  Browser::Url _connectionUrl;
+  bool _connectionOpen;
+  bool _connectionSecure;
+  volatile bool _closeRequested;
+  uint8_t *_transferBuffer;
+  size_t _transferBufferBytes;
   SemaphoreHandle_t _mutex;
 
   void stopClients();
+  void clearConnection();
+  bool reusableConnectionFor(const Browser::Url &url) const;
+  void retainConnection(const Browser::Url &url);
   bool requestOne(const Browser::Url &url, Browser::HttpMethod method,
                   const String &requestBody, const String &userAgent,
                   const String &cookieHeader, HttpResponse &response,
                   WiFiClient *&client, Browser::TransferObserver &observer,
-                  String &error);
+                  bool &reusedConnection, String &error);
   bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs,
                 Browser::TransferObserver &observer, bool discardLongLine = false,
                 bool *lineTruncated = nullptr);
-  int readByte(WiFiClient &client, uint32_t timeoutMs,
-               Browser::TransferObserver &observer);
+  int readSome(WiFiClient &client, uint8_t *buffer, size_t capacity,
+               uint32_t timeoutMs, Browser::TransferObserver &observer);
   bool readBody(WiFiClient &client, bool chunked, int32_t contentLength,
                 uint32_t bodyLimit, String &body,
-                Browser::TransferObserver &observer, String &error);
+                Browser::TransferObserver &observer, bool &fullyConsumed, String &error);
   bool readDownloadBody(WiFiClient &client, bool chunked, int32_t contentLength,
                         FileFormats::Format format, const String &suggestedFileName,
                         uint32_t downloadLimit, String &downloadedPath,
-                        Browser::TransferObserver &observer, String &error);
+                        Browser::TransferObserver &observer, bool &fullyConsumed, String &error);
 
   static String trimCopy(const String &value);
   static String lower(const String &value);

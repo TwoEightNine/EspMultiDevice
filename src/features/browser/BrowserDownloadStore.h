@@ -25,9 +25,9 @@ public:
   bool commit(String &finalPath, String &error);
   void abort();
   bool discard(const String &path);
+  uint32_t writeElapsedMs() const { return _writeElapsedMs; }
 
 private:
-  static constexpr uint16_t WriteChunkBytes = 512;
   static constexpr uint16_t MaxNameBytes = 96;
   static constexpr uint16_t MaxNameAttempts = 1000;
 
@@ -38,6 +38,7 @@ private:
   String _temporaryPath;
   uint32_t _byteLimit;
   uint32_t _bytesWritten;
+  uint32_t _writeElapsedMs;
   bool _active;
 
   bool validateTemporaryFile();
