@@ -20,6 +20,12 @@ Keep normal peripherals within GPIO 0–21, 35–42, and 45–48. Avoid GPIO 0, 
 
 The TFT is preferred on GPIO 4–16 because TFT_eSPI’s fast parallel path uses low GPIOs. Do **not** connect the TFT module `SDO`/`MISO` to the SD SPI bus: many ILI9488 modules fail to release it when deselected.
 
+### SD SPI rate and throughput testing
+
+The firmware explicitly mounts SD storage at 25 MHz. This is the effective maximum for the Arduino-ESP32 SPI SD backend used by this project: requests above 25 MHz are clamped by that backend for non-UHS cards. Changing the sketch to request 40 MHz therefore does not increase the real bus rate.
+
+`RUN_SD_THROUGHPUT_BENCHMARK` in `esp_media.ino` is a disabled-by-default development diagnostic. Enable it for three cold boots with the target card, capture the serial write/read MiB/s results, and confirm each run reports verification success and temporary-file removal. It writes a verified 4 MiB file at `/.system/sd_benchmark.tmp` in 4 KiB SPI transactions, then removes it; if `/.system` did not already exist, it removes that empty directory too. Restore the flag to `false` after testing.
+
 Set `SD_CARD_DETECT_PIN` in `esp_media.ino` only if a card-detect switch is wired. The common active-low detect switch matches the controller default; use `-1` without it.
 
 ## TFT_eSPI configuration

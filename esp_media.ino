@@ -31,6 +31,9 @@
 
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
+// Development-only diagnostic. Enable for three cold boots with a target card,
+// then restore false before normal use.
+static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
 
 // Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
 static const int BATTERY_ADC_PIN = 3;
@@ -202,6 +205,9 @@ void setup() {
 
   if (sdCard->begin()) {
     Serial.println(F("SD card mounted."));
+    if (RUN_SD_THROUGHPUT_BENCHMARK) {
+      sdCard->runThroughputBenchmark();
+    }
     if (touch->loadCalibration()) {
       Serial.println(F("Touch mesh calibration loaded."));
     }

@@ -28,12 +28,17 @@ public:
   bool isCardPresent() const;
 
   bool runReadWriteTest(const char *path = "/sd_rw_test.txt");
+  // Development-only diagnostic. It creates, verifies, and removes a
+  // temporary file while reporting serial read/write throughput.
+  bool runThroughputBenchmark();
 
 private:
-  // Long sequential animation-cache reads exposed marginal signal integrity
-  // on otherwise mountable cards at 40 MHz. Keep the bus at the ESP32 SD
-  // library's conservative, proven rate for reliable playback.
-  static const uint32_t SpiFrequency = 40000000;
+  // Arduino-ESP32's SPI SD backend clamps non-UHS cards to 25 MHz. Request
+  // that effective rate explicitly so diagnostics and source agree.
+  static const uint32_t SpiFrequency = 25000000;
+  static const uint32_t BenchmarkBytes = 4UL * 1024UL * 1024UL;
+  static const size_t BenchmarkChunkBytes = 4096;
+  static const uint32_t BenchmarkLockTimeoutMs = 100;
   static const uint32_t MountRetryIntervalMs = 1000;
   // Without a physical CD pin the only way to find an inserted card is to
   // retry initialization. Keep this slow enough to avoid hammering an absent

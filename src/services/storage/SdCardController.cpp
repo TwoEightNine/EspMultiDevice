@@ -7,6 +7,29 @@
 
 #include "../../core/SpiBusLock.h"
 
+namespace {
+const char *BenchmarkDirectoryPath = "/.system";
+const char *BenchmarkPath = "/.system/sd_benchmark.tmp";
+
+uint8_t benchmarkByte(uint32_t offset) {
+  return static_cast<uint8_t>((offset * 37UL + 17UL) ^ (offset >> 5));
+}
+
+uint32_t updateBenchmarkChecksum(uint32_t checksum, const uint8_t *bytes, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    checksum ^= bytes[i];
+    checksum *= 16777619UL;
+  }
+  return checksum;
+}
+
+float mebibytesPerSecond(uint32_t bytes, uint32_t elapsedMs) {
+  if (elapsedMs == 0) elapsedMs = 1;
+  return (static_cast<float>(bytes) * 1000.0f) /
+         (1024.0f * 1024.0f * static_cast<float>(elapsedMs));
+}
+}
+
 SdCardController::SdCardController(int sckPin,
                                    int misoPin,
                                    int mosiPin,
@@ -110,6 +133,169 @@ bool SdCardController::runReadWriteTest(const char *path) {
   return content.indexOf(firstLine) >= 0 && content.indexOf(secondLine) >= 0;
 }
 
+bool SdCardController::runThroughputBenchmark() {
+  if (!_mounted) {
+    Serial.println(F("SD throughput benchmark skipped: card is not mounted."));
+    return false;
+  }
+
+  bool directoryExisted = false;
+  bool createdDirectory = false;
+  bool success = false;
+  File file;
+  static uint8_t buffer[BenchmarkChunkBytes];
+  uint32_t writeChecksum = 2166136261UL;
+  uint32_t readChecksum = 2166136261UL;
+  uint32_t writeElapsedMs = 0;
+  uint32_t readElapsedMs = 0;
+  uint32_t writeStartedMs = 0;
+  uint32_t readStartedMs = 0;
+  const __FlashStringHelper *failure = nullptr;
+
+  Serial.println(F("SD throughput benchmark: 4 MiB, 4 KiB SPI transactions."));
+
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    failure = F("SPI bus busy while checking benchmark directory");
+    goto cleanup;
+  }
+  directoryExisted = SD.exists(BenchmarkDirectoryPath);
+  SpiBusLock::unlock();
+
+  if (!directoryExisted) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      failure = F("SPI bus busy while creating benchmark directory");
+      goto cleanup;
+    }
+    createdDirectory = SD.mkdir(BenchmarkDirectoryPath);
+    SpiBusLock::unlock();
+    if (!createdDirectory) {
+      failure = F("could not create benchmark directory");
+      goto cleanup;
+    }
+  }
+
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    failure = F("SPI bus busy while opening benchmark file for writing");
+    goto cleanup;
+  }
+  SD.remove(BenchmarkPath);
+  file = SD.open(BenchmarkPath, FILE_WRITE);
+  SpiBusLock::unlock();
+  if (!file) {
+    failure = F("could not open benchmark file for writing");
+    goto cleanup;
+  }
+
+  writeStartedMs = millis();
+  for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
+    for (size_t i = 0; i < BenchmarkChunkBytes; i++) {
+      buffer[i] = benchmarkByte(offset + i);
+    }
+    writeChecksum = updateBenchmarkChecksum(writeChecksum, buffer, BenchmarkChunkBytes);
+
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      failure = F("SPI bus busy during benchmark write");
+      goto cleanup;
+    }
+    size_t written = file.write(buffer, BenchmarkChunkBytes);
+    SpiBusLock::unlock();
+    if (written != BenchmarkChunkBytes) {
+      failure = F("short write during benchmark");
+      goto cleanup;
+    }
+    yield();
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    failure = F("SPI bus busy while flushing benchmark write");
+    goto cleanup;
+  }
+  file.flush();
+  file.close();
+  SpiBusLock::unlock();
+  writeElapsedMs = millis() - writeStartedMs;
+
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    failure = F("SPI bus busy while opening benchmark file for reading");
+    goto cleanup;
+  }
+  file = SD.open(BenchmarkPath, FILE_READ);
+  SpiBusLock::unlock();
+  if (!file) {
+    failure = F("could not open benchmark file for reading");
+    goto cleanup;
+  }
+
+  readStartedMs = millis();
+  for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      failure = F("SPI bus busy during benchmark read");
+      goto cleanup;
+    }
+    size_t read = file.read(buffer, BenchmarkChunkBytes);
+    SpiBusLock::unlock();
+    if (read != BenchmarkChunkBytes) {
+      failure = F("short read during benchmark");
+      goto cleanup;
+    }
+    for (size_t i = 0; i < BenchmarkChunkBytes; i++) {
+      if (buffer[i] != benchmarkByte(offset + i)) {
+        failure = F("data verification failed");
+        goto cleanup;
+      }
+    }
+    readChecksum = updateBenchmarkChecksum(readChecksum, buffer, BenchmarkChunkBytes);
+    yield();
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    failure = F("SPI bus busy while closing benchmark read");
+    goto cleanup;
+  }
+  file.close();
+  SpiBusLock::unlock();
+  readElapsedMs = millis() - readStartedMs;
+
+  if (readChecksum != writeChecksum) {
+    failure = F("checksum verification failed");
+    goto cleanup;
+  }
+  success = true;
+
+cleanup:
+  if (file) {
+    if (SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      file.close();
+      SpiBusLock::unlock();
+    }
+  }
+
+  bool cleanupComplete = false;
+  if (SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+    bool removedFile = !SD.exists(BenchmarkPath) || SD.remove(BenchmarkPath);
+    bool removedDirectory = !createdDirectory || SD.rmdir(BenchmarkDirectoryPath);
+    cleanupComplete = removedFile && removedDirectory;
+    SpiBusLock::unlock();
+  }
+
+  if (!success) {
+    Serial.print(F("SD throughput benchmark failed: "));
+    Serial.println(failure ? failure : F("unknown error"));
+    if (!cleanupComplete) Serial.println(F("SD throughput benchmark cleanup incomplete."));
+    return false;
+  }
+
+  Serial.print(F("SD benchmark write: elapsedMs="));
+  Serial.print(writeElapsedMs);
+  Serial.print(F(", MiB/s="));
+  Serial.println(mebibytesPerSecond(BenchmarkBytes, writeElapsedMs), 2);
+  Serial.print(F("SD benchmark read: elapsedMs="));
+  Serial.print(readElapsedMs);
+  Serial.print(F(", MiB/s="));
+  Serial.println(mebibytesPerSecond(BenchmarkBytes, readElapsedMs), 2);
+  Serial.println(cleanupComplete ? F("SD throughput benchmark passed; temporary file removed.")
+                                 : F("SD throughput benchmark passed, but temporary-file cleanup was incomplete."));
+  return cleanupComplete;
+}
+
 bool SdCardController::writeTextFile(const char *path, const char *content) {
   if (!_mounted) {
     return false;
@@ -203,7 +389,7 @@ bool SdCardController::mount() {
     }
     return false;
   }
-  Serial.println(F("SD mounted at 20 MHz."));
+  Serial.println(F("SD mounted at 25 MHz SPI."));
 
   if (SD.cardType() == CARD_NONE) {
     SD.end();

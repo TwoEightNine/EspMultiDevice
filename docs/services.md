@@ -2,6 +2,10 @@
 
 ## Files and protected storage
 
+SD storage uses the Arduino-ESP32 SPI backend at an explicit 25 MHz effective clock. Although the API accepts a requested frequency, this backend clamps non-UHS SPI cards above 25 MHz; do not treat a higher request as a throughput increase. Long reads and writes remain bounded and release the shared SD/touch `SpiBusLock` between transactions.
+
+For controlled card testing, the disabled `RUN_SD_THROUGHPUT_BENCHMARK` boot diagnostic writes, flushes, reads, and verifies 4 MiB using 4 KiB transactions, prints separate write/read throughput to Serial, and removes its temporary file. Run it three times from cold boot before considering any I/O-buffer change. Keep the existing 4 KiB production chunks unless a relevant workload improves by at least 10% at the median and completes ten touch-active stress cycles without corruption, missed touch input, or card loss.
+
 Files keeps an LRU of up to eight directories during one Files-screen visit. Listings are enumerated once and sorted directories-first with case-insensitive natural A–Z sorting. Returning to a cached folder avoids a filesystem read. The cache survives a player or keyboard round trip and is discarded when Files closes or SD state changes.
 
 The bottom pager has Previous, Page, and Next controls. Ordinary files and folders have a three-dot menu: Rename opens the keyboard with its complete name, and Delete requires a one-second hold. Folder deletion is recursive.
