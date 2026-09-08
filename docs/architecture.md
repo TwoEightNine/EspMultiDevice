@@ -106,8 +106,10 @@ job/result queues, other-core task, generation cancellation, image transfer and
 session-cache workflow, and all temporary or completed pixel allocations. It
 consumes copied jobs created by `BrowserDocument`, returns copied result records
 to `BrowserScreen::tick()`, and never draws, navigates, reflows, or mutates the
-document. The screen attaches accepted borrowed pixels to the document on the
-UI task and invalidates the worker generation before clearing those descriptors.
+document. The screen marks accepted borrowed pixels before attaching them on the
+UI task. Destructive document replacement invalidates the generation and frees
+accepted buffers; in-page user cancellation invalidates only unfinished work so
+already drawn previews remain valid.
 
 Before submitting a page load, `BrowserScreen` invalidates embedded-image work
 and waits for any active decoder through successive non-blocking `tick()` calls.

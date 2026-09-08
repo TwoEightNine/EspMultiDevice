@@ -22,7 +22,7 @@ const uint16_t FooterButtonColor = 0x2965;
 const uint16_t DefaultTextColor = TFT_BLACK;
 const uint16_t ImagePlaceholderColor = TFT_DARKGREY;
 const uint16_t LinkImageColor = TFT_BLUE;
-const char *ImagePlaceholderLabel = "image";
+constexpr int16_t ImagePlaceholderWidth = 20;
 // Some file hosts route unknown clients to an informational page instead of
 // returning the requested media. The menu can temporarily present this
 // conventional mobile identity so servers use their normal mobile response.
@@ -446,7 +446,7 @@ BrowserDocumentLayout BrowserScreen::documentLayout() const {
     TextRowHeight,
     FormControlHeight,
     FormTextareaHeight,
-    imageWidth("")
+    imagePlaceholderWidth()
   };
 }
 
@@ -542,11 +542,13 @@ void BrowserScreen::drawPageMenu() {
                TFT_WHITE, TFT_BLACK, UiText::Size::Compact, ML_DATUM);
 }
 
-void BrowserScreen::drawDocument() {
+void BrowserScreen::drawDocument(int16_t redrawTop) {
   TFT_eSPI &tft = _display.tft();
   const uint16_t documentBackground = _foregroundLoading ? TFT_WHITE : _document.backgroundColor();
-  tft.fillRect(0, HeaderHeight, _display.width(),
-               _display.height() - HeaderHeight - ControlsHeight, documentBackground);
+  const int16_t documentBottom = _display.height() - ControlsHeight;
+  if (redrawTop < HeaderHeight) redrawTop = HeaderHeight;
+  if (redrawTop > documentBottom) redrawTop = documentBottom;
+  tft.fillRect(0, redrawTop, _display.width(), documentBottom - redrawTop, documentBackground);
   const int16_t textTop = HeaderHeight + DocumentPadding;
   if (_foregroundLoading) {
     drawLoadingPanel(true, true);
@@ -576,12 +578,16 @@ void BrowserScreen::drawDocument() {
     if (!rowRecord) break;
     const VisualRow &row = *rowRecord;
     const int16_t height = _document.rowHeight(index, documentLayout());
+    if (y + height <= redrawTop) {
+      y += height;
+      continue;
+    }
     if (row.formControlIndex >= 0) {
       drawFormControl(index, y);
     } else if (row.image) {
       uint16_t color = row.imageLink ? LinkImageColor : ImagePlaceholderColor;
       const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : documentBackground;
-      int16_t width = imageWidth(row.imageLabel);
+      int16_t width = imagePlaceholderWidth();
       const EmbeddedImage *image = row.imageIndex >= 0 ? _document.image(row.imageIndex) : nullptr;
       const bool hasThumbnail = image && image->pixels;
       if (hasThumbnail) {
@@ -600,8 +606,6 @@ void BrowserScreen::drawDocument() {
         UiKit::drawAlphaIcon(tft, DocumentSidePadding + 2, y + 2,
                              ic_image_16_width, ic_image_16_height, ic_image_16_alpha,
                              color, imageBackground);
-        BrowserText::draw(tft, ImagePlaceholderLabel,
-                          DocumentSidePadding + 22, y + 3, color, rowBackground);
       }
     } else {
       const uint16_t rowBackground = row.style.hasBlockBackground ? row.style.blockBackgroundColor : documentBackground;
@@ -625,8 +629,6 @@ void BrowserScreen::drawDocument() {
             UiKit::drawAlphaIcon(tft, x + 2, y + 3,
                                  ic_image_16_width, ic_image_16_height, ic_image_16_alpha,
                                  color, run.style.hasBackground ? run.style.backgroundColor : rowBackground);
-            BrowserText::draw(tft, ImagePlaceholderLabel, x + 22, y + 3, color,
-                              run.style.hasBackground ? run.style.backgroundColor : rowBackground, run.style.size);
           }
           continue;
         }
@@ -687,12 +689,12 @@ void BrowserScreen::drawLoadingPanel(bool redrawPhase, bool drawBarFrame) {
   _lastLoadingKnownSize = knownSize;
 }
 
-void BrowserScreen::redrawDocument() {
+void BrowserScreen::redrawDocument(int16_t redrawTop) {
   if (!_display.isReady()) return;
   BrowserDisplayLock lock;
   if (!lock.locked()) return;
   BrowserText::begin(_display.tft());
-  drawDocument();
+  drawDocument(redrawTop);
   BrowserText::end(_display.tft());
 }
 
@@ -767,7 +769,6 @@ bool BrowserScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
 
 bool BrowserScreen::isLoading() const {
   if (_foregroundLoading) return true;
-  if (_imageWorker.active()) return true;
   return _imageWorker.available() && _document.hasUnfinishedImages(_imageWorker.generation());
 }
 
@@ -820,8 +821,8 @@ void BrowserScreen::refreshLoadingDisplay(bool force) {
 
 void BrowserScreen::cancelLoading() {
   browserLog(F("cancelling active transfer and image jobs"));
-  releaseEmbeddedImages();
   if (_foregroundLoading && _pendingNavigation.active) {
+    releaseEmbeddedImages();
     if (_pendingNavigation.submitted) {
       _pageLoader.cancel();
       setLoadingPhase(F("Cancelling"));
@@ -834,7 +835,10 @@ void BrowserScreen::cancelLoading() {
     draw();
     return;
   }
-  draw();
+  if (isLoading()) {
+    cancelPendingImageLoads();
+    drawControls();
+  }
 }
 
 void BrowserScreen::startPendingPageLoad(uint32_t nowMs) {
@@ -1298,6 +1302,13 @@ void BrowserScreen::releaseEmbeddedImages() {
   _nextImageToQueue = 0;
 }
 
+void BrowserScreen::cancelPendingImageLoads() {
+  _imageWorker.cancelPending();
+  // Every descriptor now belongs to an invalidated generation. Keep accepted
+  // pixels drawable, but do not submit the remaining placeholders again.
+  _nextImageToQueue = _document.imageCount();
+}
+
 void BrowserScreen::pumpImageJobs() {
   if (_showStart || _message.length()) return;
   const uint32_t generation = _imageWorker.generation();
@@ -1324,14 +1335,19 @@ void BrowserScreen::pumpImageJobs() {
 
 void BrowserScreen::collectImageResults() {
   bool redraw = false;
-  bool redrawCurrentPage = false;
+  int16_t redrawTop = -1;
   const bool wasLoading = isLoading();
   ImageResult result{};
   while (_imageWorker.take(result)) {
+    const int16_t imageTop = imageIsVisibleOnCurrentPage(result.imageIndex)
+      ? _document.imageTopOnPage(_page, result.imageIndex, documentLayout()) : -1;
     if (result.generation == _imageWorker.generation() && result.pixels && result.width && result.height &&
+        _imageWorker.adopt(result) &&
         _document.setImageResult(result.imageIndex, result.generation, result.pixels,
                                  result.width, result.height)) {
-      if (imageIsVisibleOnCurrentPage(result.imageIndex)) redrawCurrentPage = true;
+      if (imageTop >= HeaderHeight && (redrawTop < HeaderHeight || imageTop < redrawTop)) {
+        redrawTop = imageTop;
+      }
       browserLog(String(F("image preview ready #")) + String(result.imageIndex + 1) + F(" (") +
                  String(result.width) + F("x") + String(result.height) + F(")"));
       redraw = true;
@@ -1347,7 +1363,7 @@ void BrowserScreen::collectImageResults() {
     reflowDocument();
     // Do not repaint a page that has no visible placeholder to replace. It
     // avoids a perceptible flash while images below or above this page load.
-    if (redrawCurrentPage) redrawDocument();
+    if (redrawTop >= HeaderHeight) redrawDocument(redrawTop);
   }
   if (wasLoading != isLoading() && !_showStart) {
     BrowserDisplayLock lock;
@@ -1378,9 +1394,8 @@ String BrowserScreen::lower(const String &value) const {
   return result;
 }
 
-int16_t BrowserScreen::imageWidth(const String &label) const {
-  (void)label;
-  return 26 + BrowserText::measure(ImagePlaceholderLabel);
+int16_t BrowserScreen::imagePlaceholderWidth() const {
+  return ImagePlaceholderWidth;
 }
 
 void BrowserScreen::addHistory(const String &url) {

@@ -33,10 +33,18 @@ public:
   // worker-owned: BrowserDocument may borrow it after acceptance, while a
   // rejected result must be returned through discard().
   bool take(Browser::ImageResult &result);
+  // Marks a completion as borrowed by the current document. Pending-only
+  // cancellation retains this allocation so an already drawn preview stays
+  // valid, while discard() and destructive cancellation still release it.
+  bool adopt(const Browser::ImageResult &result);
   void discard(const Browser::ImageResult &result);
   // Invalidates queued/active work and releases every completed allocation.
   // The UI task must clear its borrowed document descriptors immediately.
   void cancel();
+  // Invalidates queued/active work without releasing document-adopted pixel
+  // buffers. Use this for an in-page user cancellation that leaves the
+  // current document on screen.
+  void cancelPending();
 
 private:
   static constexpr uint16_t UserAgentMaxLength = 192;
@@ -50,6 +58,7 @@ private:
     uint16_t imageIndex;
     uint32_t generation;
     uint16_t *pixels;
+    bool adopted;
   };
 
   BrowserTransport &_transport;
@@ -69,6 +78,7 @@ private:
   void deactivate(uint32_t generation);
   bool isCurrent(uint32_t generation) const;
   bool retainCompleted(const Browser::ImageResult &result);
+  void cancel(bool releaseAdopted);
   void releaseCompleted(uint16_t imageIndex, uint32_t generation, uint16_t *pixels);
   bool fetch(const String &url, const String &userAgent, uint16_t backgroundColor,
              bool useSessionCache, uint16_t *&pixels, uint8_t &width, uint8_t &height);

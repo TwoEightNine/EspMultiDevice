@@ -49,6 +49,11 @@ public:
   uint16_t pageStart(uint8_t page) const;
   uint16_t pageEnd(uint8_t page) const;
   int16_t rowHeight(uint16_t rowIndex, const BrowserDocumentLayout &layout) const;
+  // Returns the top of an image's containing row on the requested page, or
+  // -1 when it is not visible there. The screen uses this before reflowing an
+  // arriving preview so it can redraw only the affected lower page region.
+  int16_t imageTopOnPage(uint8_t page, uint16_t imageIndex,
+                         const BrowserDocumentLayout &layout) const;
   String linkAt(uint8_t page, int16_t x, int16_t y, const BrowserDocumentLayout &layout) const;
   int8_t formAt(uint8_t page, int16_t x, int16_t y, const BrowserDocumentLayout &layout) const;
   bool imageVisibleOnPage(uint8_t page, uint16_t imageIndex) const;
@@ -113,6 +118,7 @@ private:
   void applyBackground(TextStyle &style, const String &value) const;
   String decodeEntities(const String &value) const;
   bool isBlockTag(const String &tag) const;
+  void appendHtmlText(const String &text);
   void appendText(const String &text);
   void appendBreak();
   void appendImage(const String &label, const TextStyle &style, bool linked, uint8_t linkIndex,

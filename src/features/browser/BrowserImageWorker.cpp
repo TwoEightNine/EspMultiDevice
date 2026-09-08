@@ -376,6 +376,29 @@ void BrowserImageWorker::discard(const Browser::ImageResult &result) {
 }
 
 void BrowserImageWorker::cancel() {
+  cancel(true);
+}
+
+void BrowserImageWorker::cancelPending() {
+  cancel(false);
+}
+
+bool BrowserImageWorker::adopt(const Browser::ImageResult &result) {
+  if (!_stateMutex || !result.pixels) return false;
+  bool adopted = false;
+  xSemaphoreTake(_stateMutex, portMAX_DELAY);
+  for (auto &image : _completed) {
+    if (image.pixels != result.pixels || image.imageIndex != result.imageIndex ||
+        image.generation != result.generation) continue;
+    image.adopted = true;
+    adopted = true;
+    break;
+  }
+  xSemaphoreGive(_stateMutex);
+  return adopted;
+}
+
+void BrowserImageWorker::cancel(bool releaseAdopted) {
   if (!_stateMutex) {
     ++_generation;
     if (_generation == 0) _generation = 1;
@@ -387,7 +410,8 @@ void BrowserImageWorker::cancel() {
   ++_generation;
   if (_generation == 0) _generation = 1;
   for (auto &image : _completed) {
-    if (image.pixels) released[releaseCount++] = image.pixels;
+    if (!image.pixels || (!releaseAdopted && image.adopted)) continue;
+    released[releaseCount++] = image.pixels;
     image = {};
   }
   xSemaphoreGive(_stateMutex);

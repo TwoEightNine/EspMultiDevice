@@ -68,4 +68,4 @@ Rounded controls are fill-only smooth rounded rectangles: use `fillSmoothRoundRe
 
 Input fields are smooth rounded rectangles whose interiors are cleared without overwriting the antialiased outline. Leave at least 6px below the app bar. PIN labels are `Enter PIN` and entered digits are 10px antialiased circles, not asterisks.
 
-Use `UiKit::drawProgressBar()` and `updateProgressBar()` for progress. For icon-only footer controls, the entire visual cell is the target. Active controls use active fill/foreground; inactive controls retain the ordinary footer background and a gray icon—do not invent an inactive fill.
+Use `UiKit::drawProgressBar()` and `updateProgressBar()` for progress. Both helpers use antialiased TFT_eSPI smooth rounded primitives for their pill frame, track, and fill; pass the true immediate background colour so edges blend correctly. For icon-only footer controls, the entire visual cell is the target. Active controls use active fill/foreground; inactive controls retain the ordinary footer background and a gray icon—do not invent an inactive fill.

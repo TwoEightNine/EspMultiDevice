@@ -143,7 +143,7 @@ void BrowserDocument::parseHtml(const String &html, const BrowserDocumentContext
     else if (textareaControl >= 0) textareaText += text;
     else if (inOption) optionText += text;
     else if (buttonControl >= 0) buttonText += text;
-    else if (!inScript && !inStyle) appendText(text);
+    else if (!inScript && !inStyle) appendHtmlText(text);
     if (nextTag < 0) break;
     int endTag = findTagEnd(html, nextTag + 1);
     if (endTag < 0) break;
@@ -405,6 +405,22 @@ int16_t BrowserDocument::rowHeight(uint16_t rowIndex, const BrowserDocumentLayou
     }
   }
   return height > layout.textRowHeight ? height : layout.textRowHeight;
+}
+
+int16_t BrowserDocument::imageTopOnPage(uint8_t page, uint16_t imageIndex,
+                                        const BrowserDocumentLayout &layout) const {
+  if (page >= _pageCount) return -1;
+  int16_t y = layout.documentTop;
+  for (uint16_t rowIndex = pageStart(page); rowIndex < pageEnd(page); ++rowIndex) {
+    const Browser::VisualRow &row = _rows[rowIndex];
+    if (row.image && row.imageIndex == static_cast<int16_t>(imageIndex)) return y;
+    for (uint8_t runIndex = 0; runIndex < row.runCount; ++runIndex) {
+      if (row.runs[runIndex].image &&
+          row.runs[runIndex].imageIndex == static_cast<int16_t>(imageIndex)) return y;
+    }
+    y += rowHeight(rowIndex, layout);
+  }
+  return -1;
 }
 
 void BrowserDocument::reflow(const BrowserDocumentLayout &layout) {
@@ -1186,6 +1202,27 @@ bool BrowserDocument::isBlockTag(const String &tag) const {
          tag == "ol" || tag == "li" || tag == "table" || tag == "tr" || tag == "td" || tag == "th" ||
          tag == "blockquote" || tag == "hr";
 }
+
+void BrowserDocument::appendHtmlText(const String &text) {
+  String decoded = decodeEntities(text);
+  String word;
+  for (uint16_t i = 0; i < decoded.length(); i++) {
+    const char value = decoded[i];
+    if (value != ' ' && value != '\r' && value != '\n' && value != '\t') {
+      word += value;
+      continue;
+    }
+    if (word.length()) {
+      appendWord(word, _currentStyle);
+      word = "";
+    }
+    // HTML collapses ordinary source whitespace, including line endings.
+    // Explicit breaks are added only by <br> and block formatting.
+    _pendingSpace = true;
+  }
+  if (word.length()) appendWord(word, _currentStyle);
+}
+
 void BrowserDocument::appendText(const String &text) {
   String decoded = decodeEntities(text);
   String word;

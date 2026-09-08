@@ -125,10 +125,10 @@ private:
   void draw();
   void drawHeader();
   void drawStartPage();
-  void drawDocument();
+  void drawDocument(int16_t redrawTop = -1);
   void drawPageMenu();
   void drawLoadingPanel(bool redrawPhase, bool drawBarFrame);
-  void redrawDocument();
+  void redrawDocument(int16_t redrawTop = -1);
   void drawControls();
   void drawPageControls();
   void layout();
@@ -178,6 +178,7 @@ private:
   void drawThumbnail(int16_t imageIndex, int16_t x, int16_t y) const;
   static bool resolveDocumentUrl(void *context, const String &reference, String &resolved);
   void releaseEmbeddedImages();
+  void cancelPendingImageLoads();
   void pumpImageJobs();
   void collectImageResults();
   bool imageIsVisibleOnCurrentPage(uint16_t imageIndex) const;
@@ -187,7 +188,7 @@ private:
   bool hasNextPage() const;
   String shortText(const String &value, int16_t maxWidth) const;
   String lower(const String &value) const;
-  int16_t imageWidth(const String &label) const;
+  int16_t imagePlaceholderWidth() const;
   void addHistory(const String &url);
   void addRecent(const String &url, const String &title);
 
