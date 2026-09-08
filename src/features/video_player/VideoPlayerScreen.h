@@ -145,7 +145,11 @@ private:
   bool writeFrameRgb444(const uint16_t *pixels, uint32_t delayMs);
   bool readCacheHeader(uint32_t &frames, uint32_t &duration);
   bool parseAacConfig();
+  const __FlashStringHelper *videoCodecLabel() const;
+  void logVideoTrack() const;
+  void logVideoSampleTable() const;
   void logAudioTrack() const;
+  void logBuildFailure(const __FlashStringHelper *stage) const;
   uint32_t timestampMs(uint32_t timestamp, uint32_t timeScale) const;
   uint32_t presentationTimestampMs(int64_t timestamp, uint32_t timeScale) const;
   uint32_t playbackElapsedMs(uint32_t nowMs) const;

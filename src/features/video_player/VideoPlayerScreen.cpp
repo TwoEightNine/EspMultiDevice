@@ -79,6 +79,17 @@ int comparePresentationPoints(const void *left, const void *right) {
   const VideoPresentationPoint &b = *static_cast<const VideoPresentationPoint *>(right);
   return a.timestamp < b.timestamp ? -1 : (a.timestamp > b.timestamp ? 1 : 0);
 }
+
+const __FlashStringHelper *cacheResultLabel(MediaCache::Result result) {
+  switch (result) {
+    case MediaCache::Result::Complete: return F("complete");
+    case MediaCache::Result::More: return F("more");
+    case MediaCache::Result::Busy: return F("busy");
+    case MediaCache::Result::Missing: return F("missing");
+    case MediaCache::Result::Failed: return F("failed");
+  }
+  return F("unknown");
+}
 }
 
 VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touch,
@@ -173,6 +184,7 @@ void VideoPlayerScreen::tick(uint32_t nowMs) {
     if (!buildStep()) {
       if (_state != State::Error) {
         const String &decoderError = _videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError();
+        logBuildFailure(F("build step"));
         fail(decoderError.length() ? decoderError : String(F("Video conversion failed")));
       }
       draw();
@@ -244,6 +256,12 @@ bool VideoPlayerScreen::openSource() {
   _sourceSize = fingerprint.size;
   _sourceWriteTime = fingerprint.modified;
   if (_sourceSize < 12) return fail(F("Invalid MP4/3GP file"));
+  Serial.print(F("Video source: path="));
+  Serial.print(_path);
+  Serial.print(F(" size="));
+  Serial.print(_sourceSize);
+  Serial.print(F(" modified="));
+  Serial.println(_sourceWriteTime);
   return true;
 }
 
@@ -286,6 +304,8 @@ bool VideoPlayerScreen::inspectSource() {
       _sourceHeight = (uint16_t)track.SampleDescription.video.height;
       videoFound = _videoSamples > 0 && _videoTimeScale > 0;
       if (track.duration_lo) _durationMs = timestampMs(track.duration_lo, _videoTimeScale);
+      logVideoTrack();
+      logVideoSampleTable();
     } else if (_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 && _audioCodec != AudioCodec::AmrNb &&
                track.handler_type == MP4D_HANDLER_TYPE_SOUN) {
       _audioTrack = index;
@@ -360,6 +380,59 @@ bool VideoPlayerScreen::parseAacConfig() {
   _audioSampleRate = AacSampleRates[rateIndex];
   _audioChannels = channels;
   return true;
+}
+
+const __FlashStringHelper *VideoPlayerScreen::videoCodecLabel() const {
+  switch (_videoCodec) {
+    case VideoCodec::H264: return F("H.264");
+    case VideoCodec::H263: return F("H.263");
+    case VideoCodec::Mpeg4Part2: return F("MPEG-4 Part 2");
+    default: return F("unknown");
+  }
+}
+
+void VideoPlayerScreen::logVideoTrack() const {
+  if (!_demux || _videoTrack >= _demux->track_count) return;
+  const MP4D_track_t &track = _demux->track[_videoTrack];
+  Serial.print(F("Video video track: index="));
+  Serial.print(_videoTrack);
+  Serial.print(F(" codec="));
+  Serial.print(videoCodecLabel());
+  Serial.print(F(" entry="));
+  Serial.print(sampleEntryLabel(track.sample_entry));
+  Serial.print(F(" object=0x"));
+  Serial.print(track.object_type_indication, HEX);
+  Serial.print(F(" config="));
+  Serial.print(track.dsi_bytes);
+  Serial.print(F("B geometry="));
+  Serial.print(_sourceWidth);
+  Serial.print('x');
+  Serial.print(_sourceHeight);
+  Serial.print(F(" samples="));
+  Serial.print(_videoSamples);
+  Serial.print(F(" timescale="));
+  Serial.print(_videoTimeScale);
+  Serial.print(F(" duration="));
+  Serial.print(_durationMs);
+  Serial.println(F("ms"));
+}
+
+void VideoPlayerScreen::logVideoSampleTable() const {
+  if (!_demux || _videoTrack >= _demux->track_count) return;
+  const MP4D_track_t &track = _demux->track[_videoTrack];
+  Serial.print(F("Video sample table: chunks="));
+  Serial.print(track.chunk_count);
+  Serial.print(F(" stsc="));
+  Serial.print(track.sample_to_chunk_count);
+  Serial.print(F(" entrySizes="));
+  Serial.print(track.entry_size ? F("present") : F("missing"));
+  Serial.print(F(" firstSize="));
+  Serial.print(track.entry_size && track.sample_count ? track.entry_size[0] : 0);
+  Serial.print(F(" firstChunkOffset="));
+  Serial.print(track.chunk_offset && track.chunk_count ? (uint32_t)track.chunk_offset[0] : 0);
+  Serial.print(F(" firstChunkSamples="));
+  Serial.println(track.sample_to_chunk && track.sample_to_chunk_count
+                   ? track.sample_to_chunk[0].samples_per_chunk : 0);
 }
 
 void VideoPlayerScreen::logAudioTrack() const {
@@ -451,9 +524,28 @@ bool VideoPlayerScreen::beginBuild() {
   uint8_t header[AnimationCache::HeaderBytes];
   AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth,
                                _sourceHeight, 0, -1, _drawWidth, _drawHeight);
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
-      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete ||
-      _mediaCache.write(_cacheWriter, header, sizeof(header)) != MediaCache::Result::Complete) {
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
+    Serial.println(F("Video cache build: unable to derive cache paths"));
+    return fail(F("Cannot start video cache"));
+  }
+  Serial.print(F("Video cache build: path="));
+  Serial.print(paths.finalPath);
+  Serial.print(F(" temp="));
+  Serial.print(paths.temporaryPath);
+  Serial.print(F(" timeline="));
+  Serial.print(_presentationCount);
+  Serial.println(F(" frames"));
+  MediaCache::Result cacheResult = _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter);
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: begin write result="));
+    Serial.println(cacheResultLabel(cacheResult));
+    _mediaCache.abort(_cacheWriter);
+    return fail(F("Cannot start video cache"));
+  }
+  cacheResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: header write result="));
+    Serial.println(cacheResultLabel(cacheResult));
     _mediaCache.abort(_cacheWriter);
     return fail(F("Cannot start video cache"));
   }
@@ -537,14 +629,46 @@ bool VideoPlayerScreen::ensureAnnexBuffer(uint32_t bytes) {
 bool VideoPlayerScreen::readSample(uint32_t track, uint32_t sample, uint32_t &bytes,
                                     uint32_t &timestamp, uint32_t &duration) {
   bytes = timestamp = duration = 0;
-  if (!_demux || track >= _demux->track_count || sample >= _demux->track[track].sample_count) return false;
+  if (!_demux || track >= _demux->track_count || sample >= _demux->track[track].sample_count) {
+    Serial.print(F("Video sample read: invalid request track="));
+    Serial.print(track);
+    Serial.print(F(" sample="));
+    Serial.println(sample);
+    return false;
+  }
   unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
   MP4D_file_offset_t offset = MP4D_frame_offset(_demux, track, sample, &sampleBytes, &sampleTimestamp, &sampleDuration);
-  if (!sampleBytes || offset > 0xffffffffULL || !ensureSampleBuffer(sampleBytes) ||
-      !SpiBusLock::lock(pdMS_TO_TICKS(100))) return false;
+  if (!sampleBytes || offset > 0xffffffffULL || !ensureSampleBuffer(sampleBytes)) {
+    Serial.print(F("Video sample read: metadata/buffer failed track="));
+    Serial.print(track);
+    Serial.print(F(" sample="));
+    Serial.print(sample);
+    Serial.print(F(" offset="));
+    Serial.print((uint32_t)offset);
+    Serial.print(F(" bytes="));
+    Serial.println(sampleBytes);
+    return false;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+    Serial.print(F("Video sample read: SPI lock timeout track="));
+    Serial.print(track);
+    Serial.print(F(" sample="));
+    Serial.println(sample);
+    return false;
+  }
   bool ok = _source.seek((uint32_t)offset) && _source.read(_sampleBuffer, sampleBytes) == sampleBytes;
   SpiBusLock::unlock();
-  if (!ok) return false;
+  if (!ok) {
+    Serial.print(F("Video sample read: SD read failed track="));
+    Serial.print(track);
+    Serial.print(F(" sample="));
+    Serial.print(sample);
+    Serial.print(F(" offset="));
+    Serial.print((uint32_t)offset);
+    Serial.print(F(" bytes="));
+    Serial.println(sampleBytes);
+    return false;
+  }
   bytes = sampleBytes;
   timestamp = sampleTimestamp;
   duration = sampleDuration;
@@ -600,10 +724,32 @@ bool VideoPlayerScreen::decodedFrame(const VideoH264::Frame &frame, void *contex
 bool VideoPlayerScreen::captureDecodedFrame(const VideoH264::Frame &frame) {
   if (!_presentationTimeline || _presentationIndex >= _presentationCount || !_pendingFrame ||
       !frame.y || !frame.u || !frame.v || frame.width != _sourceWidth || frame.height != _sourceHeight ||
-      frame.yStride < frame.width || frame.uStride < frame.width / 2 || frame.vStride < frame.width / 2) return false;
+      frame.yStride < frame.width || frame.uStride < frame.width / 2 || frame.vStride < frame.width / 2) {
+    Serial.print(F("Video frame capture rejected: input="));
+    Serial.print(_videoSample);
+    Serial.print(F(" output="));
+    Serial.print(_presentationIndex);
+    Serial.print('/');
+    Serial.print(_presentationCount);
+    Serial.print(F(" geometry="));
+    Serial.print(frame.width);
+    Serial.print('x');
+    Serial.print(frame.height);
+    Serial.print(F(" strides="));
+    Serial.print(frame.yStride);
+    Serial.print('/');
+    Serial.print(frame.uStride);
+    Serial.print('/');
+    Serial.println(frame.vStride);
+    return false;
+  }
   uint32_t timestamp = presentationTimestampMs(_presentationTimeline[_presentationIndex++].timestamp, _videoTimeScale);
   bool keep = !_hasPendingFrame || timestamp - _buildLastTimestamp >= MinFrameDelayMs;
-  if (keep && _hasPendingFrame && !appendPendingFrame(timestamp - _buildLastTimestamp)) return false;
+  if (keep && _hasPendingFrame && !appendPendingFrame(timestamp - _buildLastTimestamp)) {
+    Serial.print(F("Video frame capture: cache append failed at output="));
+    Serial.println(_presentationIndex - 1);
+    return false;
+  }
   if (!keep) return true;
   for (uint16_t y = 0; y < _drawHeight; y++) {
     uint16_t sourceY = _drawHeight > 1 ? (uint32_t)y * (frame.height - 1) / (_drawHeight - 1) : 0;
@@ -625,11 +771,18 @@ bool VideoPlayerScreen::captureDecodedFrame(const VideoH264::Frame &frame) {
 }
 
 bool VideoPlayerScreen::writeFrameRgb444(const uint16_t *pixels, uint32_t delayMs) {
-  if (!_cacheWriter.active || !pixels) return false;
+  if (!_cacheWriter.active || !pixels) {
+    Serial.println(F("Video cache frame write: inactive writer or missing pixels"));
+    return false;
+  }
   uint8_t delay[4];
   AnimationCache::writeLe32(delay, delayMs);
-  bool delayWritten = _mediaCache.write(_cacheWriter, delay, sizeof(delay)) == MediaCache::Result::Complete;
-  if (!delayWritten) return false;
+  MediaCache::Result result = _mediaCache.write(_cacheWriter, delay, sizeof(delay));
+  if (result != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache frame write: delay result="));
+    Serial.println(cacheResultLabel(result));
+    return false;
+  }
   const uint32_t total = AnimationCache::rgb444Bytes(_drawWidth, _drawHeight);
   for (uint32_t base = 0; base < total; ) {
     uint16_t count = total - base > IoChunkBytes ? IoChunkBytes : (uint16_t)(total - base);
@@ -644,8 +797,18 @@ bool VideoPlayerScreen::writeFrameRgb444(const uint16_t *pixels, uint32_t delayM
       _cacheChunk[i] = position % 3 == 0 ? (uint8_t)(a >> 4) :
                        (position % 3 == 1 ? (uint8_t)((a << 4) | (b >> 8)) : (uint8_t)b);
     }
-    bool written = _mediaCache.write(_cacheWriter, _cacheChunk, count) == MediaCache::Result::Complete;
-    if (!written) return false;
+    result = _mediaCache.write(_cacheWriter, _cacheChunk, count);
+    if (result != MediaCache::Result::Complete) {
+      Serial.print(F("Video cache frame write: payload result="));
+      Serial.print(cacheResultLabel(result));
+      Serial.print(F(" frame="));
+      Serial.print(_buildFrames);
+      Serial.print(F(" offset="));
+      Serial.print(base);
+      Serial.print('/');
+      Serial.println(total);
+      return false;
+    }
     base += count;
     taskYIELD();
   }
@@ -666,10 +829,22 @@ bool VideoPlayerScreen::buildStep() {
   if (_videoSample >= _videoSamples) {
     if (!_buildFlushed) {
       _buildFlushed = true;
+      Serial.print(F("Video cache build: input complete; flushing "));
+      Serial.print(videoCodecLabel());
+      Serial.print(F(" decoded="));
+      Serial.print(_presentationIndex);
+      Serial.print('/');
+      Serial.println(_presentationCount);
       if (_videoCodec == VideoCodec::H264 ? !_h264.flush(decodedFrame, this)
                                           : !_legacy.flush(decodedFrame, this)) return false;
     }
-    if (_presentationIndex != _presentationCount) return fail(F("Video output is incomplete"));
+    if (_presentationIndex != _presentationCount) {
+      Serial.print(F("Video cache build: incomplete decoder output="));
+      Serial.print(_presentationIndex);
+      Serial.print('/');
+      Serial.println(_presentationCount);
+      return fail(F("Video output is incomplete"));
+    }
     return finishBuild();
   }
   uint32_t bytes, timestamp, duration;
@@ -691,22 +866,70 @@ bool VideoPlayerScreen::buildStep() {
 
 bool VideoPlayerScreen::finishBuild() {
   uint32_t finalDelay = _durationMs > _buildLastTimestamp ? _durationMs - _buildLastTimestamp : _buildLastDelay;
+  Serial.print(F("Video cache build: finalizing decoded="));
+  Serial.print(_presentationIndex);
+  Serial.print(F(" cached="));
+  Serial.print(_buildFrames);
+  Serial.print(F(" pending="));
+  Serial.print(_hasPendingFrame ? F("yes") : F("no"));
+  Serial.print(F(" finalDelay="));
+  Serial.println(finalDelay);
+  if (!appendPendingFrame(finalDelay) || !_buildFrames) {
+    Serial.println(F("Video cache build: final frame append failed or no frames were cached"));
+    return false;
+  }
+  // The final decoded picture remains pending until its duration is known.
+  // Encode the persistent count only after appending it, otherwise the cache
+  // header describes one fewer frame than the payload and fails validation.
+  const uint32_t headerFrames = _buildFrames;
   uint8_t header[AnimationCache::HeaderBytes];
   AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth, _sourceHeight,
-                               _buildFrames, -1, _drawWidth, _drawHeight);
-  if (!appendPendingFrame(finalDelay) || !_buildFrames ||
-      _mediaCache.seek(_cacheWriter, 0) != MediaCache::Result::Complete ||
-      _mediaCache.write(_cacheWriter, header, sizeof(header)) != MediaCache::Result::Complete ||
-      _mediaCache.commit(_cacheWriter) != MediaCache::Result::Complete) return false;
+                               headerFrames, -1, _drawWidth, _drawHeight);
+  MediaCache::Result cacheResult = _mediaCache.seek(_cacheWriter, 0);
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: header seek result="));
+    Serial.println(cacheResultLabel(cacheResult));
+    return false;
+  }
+  cacheResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: final header write result="));
+    Serial.println(cacheResultLabel(cacheResult));
+    return false;
+  }
+  cacheResult = _mediaCache.commit(_cacheWriter);
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: commit result="));
+    Serial.println(cacheResultLabel(cacheResult));
+    return false;
+  }
+  Serial.print(F("Video cache build: committed headerFrames="));
+  Serial.print(headerFrames);
+  Serial.print(F(" writtenFrames="));
+  Serial.println(_buildFrames);
   _h264.end();
   _legacy.end();
   if (_source) _source.close();
   releaseDemux();
   CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
-      _mediaCache.openRead(paths, _secretAccess, _cacheRead) != MediaCache::Result::Complete) return false;
+  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
+    Serial.println(F("Video cache build: cannot derive reopen path"));
+    return false;
+  }
+  cacheResult = _mediaCache.openRead(paths, _secretAccess, _cacheRead);
+  if (cacheResult != MediaCache::Result::Complete) {
+    Serial.print(F("Video cache build: reopen result="));
+    Serial.println(cacheResultLabel(cacheResult));
+    return false;
+  }
   uint32_t frames = 0, duration = 0;
-  if (!_cacheRead || !readCacheHeader(frames, duration)) return false;
+  if (!_cacheRead || !readCacheHeader(frames, duration)) {
+    Serial.print(F("Video cache build: post-commit validation failed headerFrames="));
+    Serial.print(headerFrames);
+    Serial.print(F(" writtenFrames="));
+    Serial.println(_buildFrames);
+    return false;
+  }
   _playFrameBuffer = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
   if (!_playFrameBuffer) return false;
   _playFrames = frames;
@@ -976,11 +1199,47 @@ uint32_t VideoPlayerScreen::playbackElapsedMs(uint32_t nowMs) const {
 }
 
 bool VideoPlayerScreen::fail(const String &message) {
+  Serial.print(F("Video player failure: message="));
+  Serial.print(message);
+  Serial.print(F(" codec="));
+  Serial.print(videoCodecLabel());
+  Serial.print(F(" sample="));
+  Serial.print(_videoSample);
+  Serial.print('/');
+  Serial.print(_videoSamples);
+  Serial.print(F(" decoded="));
+  Serial.print(_presentationIndex);
+  Serial.print('/');
+  Serial.print(_presentationCount);
+  Serial.print(F(" cached="));
+  Serial.println(_buildFrames);
   stopSpeaker();
   if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
   _error = message;
   _state = State::Error;
   return false;
+}
+
+void VideoPlayerScreen::logBuildFailure(const __FlashStringHelper *stage) const {
+  const String &decoderError = _videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError();
+  Serial.print(F("Video cache build failure: stage="));
+  Serial.print(stage);
+  Serial.print(F(" codec="));
+  Serial.print(videoCodecLabel());
+  Serial.print(F(" input="));
+  Serial.print(_videoSample);
+  Serial.print('/');
+  Serial.print(_videoSamples);
+  Serial.print(F(" decoded="));
+  Serial.print(_presentationIndex);
+  Serial.print('/');
+  Serial.print(_presentationCount);
+  Serial.print(F(" cached="));
+  Serial.print(_buildFrames);
+  Serial.print(F(" pending="));
+  Serial.print(_hasPendingFrame ? F("yes") : F("no"));
+  Serial.print(F(" decoderError="));
+  Serial.println(decoderError.length() ? decoderError : String(F("none")));
 }
 
 bool VideoPlayerScreen::fail(const __FlashStringHelper *message) {
