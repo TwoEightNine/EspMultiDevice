@@ -42,7 +42,8 @@ String ellipsize(const String &text, int16_t maxWidth, UiText::Size size) {
 void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,
                    const String &title,
-                   NavigationIcon icon) {
+                   NavigationIcon icon,
+                   AppBarAction action) {
   tft.fillRect(0, 0, width, AppBarHeight, AppBarColor);
   const int16_t iconCenterX = NavigationIconLeft + NavigationIconSize / 2;
   const int16_t iconCenterY = NavigationIconTop + NavigationIconSize / 2;
@@ -52,11 +53,17 @@ void drawTopAppBar(TFT_eSPI &tft,
     drawCloseIcon(tft, iconCenterX, iconCenterY, TFT_WHITE, AppBarColor);
   }
 
-  const int16_t titleWidth = width - TitleX - ContentPadding;
+  const int16_t actionWidth = action == AppBarAction::None ? 0 : AppBarHeight;
+  const int16_t titleWidth = width - TitleX - ContentPadding - actionWidth;
   if (titleWidth > 0 && title.length() > 0) {
     UiText::draw(tft, UiKit::ellipsize(title, titleWidth, UiText::Size::Title),
                  TitleX, TitleCenterY, TFT_WHITE, AppBarColor,
                  UiText::Size::Title, ML_DATUM);
+  }
+  if (action != AppBarAction::None) {
+    const int16_t actionCenterX = width - AppBarHeight / 2;
+    drawZoomIcon(tft, actionCenterX, iconCenterY, action == AppBarAction::ZoomOut,
+                 action == AppBarAction::ZoomOut ? TFT_CYAN : TFT_WHITE, AppBarColor);
   }
 }
 
@@ -76,6 +83,25 @@ void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    strokeWidth, color, backgroundColor);
   tft.drawWideLine(centerX - 10, centerY, centerX, centerY + wing,
                    strokeWidth, color, backgroundColor);
+}
+
+void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  bool zoomed, uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.5f;
+  constexpr int16_t lensOffset = 3;
+  constexpr int16_t lensRadius = 7;
+  tft.drawSmoothCircle(centerX - lensOffset, centerY - lensOffset, lensRadius,
+                       color, backgroundColor);
+  tft.drawWideLine(centerX + 2, centerY + 2, centerX + 9, centerY + 9,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - lensOffset - 3, centerY - lensOffset,
+                   centerX - lensOffset + 3, centerY - lensOffset,
+                   strokeWidth, color, backgroundColor);
+  if (!zoomed) {
+    tft.drawWideLine(centerX - lensOffset, centerY - lensOffset - 3,
+                     centerX - lensOffset, centerY - lensOffset + 3,
+                     strokeWidth, color, backgroundColor);
+  }
 }
 
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

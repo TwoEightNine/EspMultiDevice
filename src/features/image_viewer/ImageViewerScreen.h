@@ -47,7 +47,7 @@ private:
   static const uint16_t MaxPaletteEntries = 256;
   static const uint16_t CacheWidth = 480;
   static const uint16_t CacheHeight = 320;
-  static const uint16_t CacheHeaderSize = 24;
+  static const uint16_t CacheHeaderSize = 32;
   static const uint16_t AnimationCacheHeaderSize = 40;
   static const uint32_t MaxPngScanlineBytes = 4096UL * 4UL;
   // Animated cache records use packed RGB444 pixels. They are expanded into
@@ -78,6 +78,7 @@ private:
   };
 
   enum class ImageFormat : uint8_t { Unknown, Bmp, Png, Jpeg, Gif, Webp };
+  enum class ViewMode : uint8_t { Informative, FullScreen };
 
   struct PaletteEntry {
     uint8_t r;
@@ -114,6 +115,7 @@ private:
   WebPAnimDecoder *_webpAnimDecoder;
   WebPAnimInfo _webpAnimInfo;
   bool _webpAnimated;
+  bool _animationSource;
   uint32_t _webpPreviousTimestamp;
   String _path;
   String _previousImagePath;
@@ -121,6 +123,8 @@ private:
   String _error;
   String _cachePath;
   String _cacheTempPath;
+  String _zoomCachePath;
+  String _zoomCacheTempPath;
   uint32_t _sourceFileSize;
   uint32_t _sourceWriteTime;
   uint32_t _cacheOffset;
@@ -151,6 +155,14 @@ private:
   int16_t _top;
   uint16_t _drawWidth;
   uint16_t _drawHeight;
+  uint32_t _sourceCropX;
+  uint32_t _sourceCropY;
+  uint32_t _sourceCropWidth;
+  uint32_t _sourceCropHeight;
+  ViewMode _viewMode;
+  bool _cropZoom;
+  bool _imageReady;
+  bool _writeCacheAfterRender;
   int32_t _nextDrawY;
   uint32_t _lastSourceY;
   uint16_t *_frameBuffer;
@@ -207,6 +219,7 @@ private:
   uint32_t _gifNextFrameAt;
   uint32_t _gifCanvasPixels;
   const uint16_t *_gifPresentFrame;
+  const uint16_t *_gifDisplayedFrame;
   uint16_t _gifPresentY;
   bool _gifPresentActive;
   uint16_t _gifPresentBuffer[GifPhotoMaxWidth * GifPresentBandRows];
@@ -225,7 +238,14 @@ private:
 
   void reset();
   void draw();
-  void drawCloseIcon();
+  void drawChrome();
+  void presentStaticFrame();
+  String filename() const;
+  bool isStaticImage() const;
+  bool zoomAvailable() const;
+  bool reloadStaticRender(bool cropZoom);
+  void setCropZoom(bool cropZoom);
+  void toggleViewMode();
   void drawError();
   void drawLoading(uint8_t percent);
   void drawGifLoading(uint8_t percent);
@@ -237,7 +257,7 @@ private:
   bool prepareRender();
   bool decodeRasterImage();
   bool prepareCachePaths(FileFormats::Format format);
-  bool loadCache();
+  bool loadCache(bool cropZoom);
   bool loadAnimationCache();
   bool readAnimationCacheHeader(StorageFile &file, uint32_t &frameCount, int32_t &loopCount,
                                 uint32_t &sourceWidth, uint32_t &sourceHeight,
@@ -295,7 +315,7 @@ private:
   void writeCacheChunk();
   void finishCacheWrite(bool success);
   bool writeCacheHeader();
-  bool readCacheHeader(StorageFile &file) const;
+  bool readCacheHeader(StorageFile &file, uint32_t &sourceWidth, uint32_t &sourceHeight) const;
   void writeLe16(uint8_t *buffer, uint16_t value) const;
   void writeLe32(uint8_t *buffer, uint32_t value) const;
   bool renderRows(uint8_t maxRows);
@@ -309,6 +329,7 @@ private:
                       uint32_t sourceX16,
                       uint32_t sourceY16) const;
   uint8_t extractChannel(uint32_t value, uint32_t mask, uint8_t shift) const;
+  void releaseRenderScratch();
   void releaseBuffers();
   uint16_t readLe16(const uint8_t *buffer) const;
   uint32_t readLe32(const uint8_t *buffer) const;

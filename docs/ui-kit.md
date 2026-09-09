@@ -1,6 +1,6 @@
 # UI Kit contract
 
-`src/ui/UiKit.h/.cpp` and `UiText.h/.cpp` are the mandatory shared drawing contract for application screens. Do not copy primitive app-bar, icon, button, list-row, or progress-bar drawing into a screen. Home, Splash, and the full-screen Image Viewer are intentional layout exceptions; the viewer still uses the shared close affordance.
+`src/ui/UiKit.h/.cpp` and `UiText.h/.cpp` are the mandatory shared drawing contract for application screens. Do not copy primitive app-bar, icon, button, list-row, or progress-bar drawing into a screen. Home, Splash, and the Image Viewer canvas are intentional layout exceptions: the viewer overlays its shared informative-mode app bar over image content and hides it in full-screen mode.
 
 ## App bars and navigation
 
@@ -10,7 +10,7 @@ Clear the screen, then draw the bar before screen content:
 UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
 ```
 
-The helper draws a 48px `#111` bar. Its close glyph uses the generated 40×40 alpha asset, centered inside the 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history.
+The helper draws a 48px `#111` bar. Its close glyph uses the generated 40×40 alpha asset, centered inside the 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history. A screen can reserve the trailing 48×48 cell through `UiKit::AppBarAction`; the title then ellipsizes before that complete action target. The built-in zoom action uses antialiased zoom-in/zoom-out glyphs.
 
 Reserve y=0–47. Make the entire 48×48 cell tappable:
 

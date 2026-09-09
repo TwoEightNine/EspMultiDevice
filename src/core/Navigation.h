@@ -22,13 +22,14 @@ struct ScreenData {
   String initialText;
   String previousImagePath;
   String nextImagePath;
+  bool imageFullscreen;
   bool maskInput;
   FileAccessMode fileAccess;
   uint16_t pin;
   TextInputMode inputMode;
 
   ScreenData() : kind(ScreenDataKind::None), text(), initialText(), previousImagePath(), nextImagePath(),
-                 maskInput(false),
+                 imageFullscreen(false), maskInput(false),
                  fileAccess(FileAccessMode::Normal), pin(0), inputMode(TextInputMode::Text) {
   }
 

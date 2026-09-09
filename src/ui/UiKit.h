@@ -27,6 +27,14 @@ enum class NavigationIcon : uint8_t {
   Close
 };
 
+// Optional trailing action for a top app bar.  The action occupies the full
+// 48px trailing cell, and the title is ellipsized before that cell.
+enum class AppBarAction : uint8_t {
+  None,
+  ZoomIn,
+  ZoomOut
+};
+
 bool navigationIconContains(int16_t x, int16_t y);
 
 String ellipsize(const String &text,
@@ -36,7 +44,8 @@ String ellipsize(const String &text,
 void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,
                    const String &title,
-                   NavigationIcon icon = NavigationIcon::Close);
+                   NavigationIcon icon = NavigationIcon::Close,
+                   AppBarAction action = AppBarAction::None);
 
 // Anti-aliased 24px navigation/control icons. Pass the colour immediately
 // behind an icon so edge pixels blend correctly without display readback.
@@ -44,6 +53,8 @@ void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    uint16_t color, uint16_t backgroundColor);
 void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
+void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  bool zoomed, uint16_t color, uint16_t backgroundColor);
 // 40px assets used by Files and Browser footer controls. The visual canvas
 // fills the 40px-tall footer cells while their complete cells remain tappable.
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

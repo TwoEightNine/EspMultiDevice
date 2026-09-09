@@ -4,11 +4,13 @@
 
 `src/media/FileFormats.h` is the sole source of truth for media classification. It resolves extensions, HTTP content types, and file signatures for BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4/M4V, and 3GP/3GPP. Browser and Files must use it consistently.
 
-`.eth1`, `.em16`, `.emga`, and `.empa` are internal cache files. They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
+`.eth1`, `.em16`, `.em16z`, `.emga`, and `.empa` are internal cache files. They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
 
 ## Image viewer
 
 The viewer supports BMP, static non-interlaced PNG, baseline JPEG, simple/extended WebP, GIF87a/GIF89a, and animated WebP. Animated PNG and progressive JPEG are unsupported. Source images render aspect-fit on the 480 × 320 display.
+
+Images open in informative mode with an opaque 48px top bar showing the source filename. Tapping the central image area toggles informative and full-screen modes; full screen hides the bar. The left and right 48px edges move through adjacent images, except that the informative bar owns its close target and, when available, its top-right zoom target. Eligible still images whose aspect ratio differs from the 480 × 320 screen ratio by more than 10% expose a centered crop-to-fill zoom toggle. Crop state persists while switching modes. Edge navigation preserves full-screen mode but resets zoom; every newly opened image starts aspect-fit in informative mode. Animated images do not expose crop zoom.
 
 From Files, tapping the left or right 48px edge moves to the previous or next supported image from the naturally sorted folder listing; navigation wraps. The Image Viewer itself has no navigation arrows.
 
@@ -46,7 +48,9 @@ Files thumbnails use an `ETH1` version-1 file: a 20-byte little-endian header fo
 
 ### `.em16`: static canvas
 
-BMP, PNG, and JPEG images use an `EM16` version-1 file: a 24-byte little-endian header followed by a fixed 480 × 320 RGB565 canvas (307,200 bytes). The header contains magic, version, encoding (`0`, little-endian RGB565), canvas geometry, source byte size, source modification time, and payload size. The canvas contains the complete aspect-fit image and black letterboxing, so playback needs no image decoder.
+BMP, PNG, JPEG, and static WebP images use an `EM16` version-2 file: a 32-byte little-endian header followed by a fixed 480 × 320 RGB565 canvas (307,200 bytes). The header contains magic, version, encoding (`0`, little-endian RGB565), canvas geometry, source byte size, source modification time, payload size, and source width/height. The canvas contains the complete aspect-fit image and black letterboxing, so playback needs no image decoder. Version-1 files are rejected and rebuilt.
+
+Eligible crop-zoom renders use a separate `.em16z` sidecar with the same validated version-2 header and RGB565 canvas. The fit and crop sidecars are independently cached, so switching either view can display without decoding or showing a loading indicator.
 
 ### `.emga`: animation and video frames
 

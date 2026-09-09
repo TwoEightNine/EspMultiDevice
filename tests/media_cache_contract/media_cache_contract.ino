@@ -16,6 +16,7 @@ const PathCase PathCases[] = {
   {"/Photo.JPG", FileFormats::Format::Eth1, "/.cache", "/.cache/Photo.JPG.eth1", "/.cache/Photo.JPG.eth1.tmp"},
   {"/media/song.MP3", FileFormats::Format::Empa, "/media/.cache", "/media/.cache/song.MP3.empa", "/media/.cache/song.MP3.empa.tmp"},
   {"/.configs/abcd", FileFormats::Format::Em16, "/.configs/.cache", "/.configs/.cache/abcd.em16", "/.configs/.cache/abcd.em16.tmp"},
+  {"/.configs/abcd", FileFormats::Format::Em16Zoom, "/.configs/.cache", "/.configs/.cache/abcd.em16z", "/.configs/.cache/abcd.em16z.tmp"},
   {"clip.v1.MP4", FileFormats::Format::Emga, "/.cache", "/.cache/clip.v1.MP4.emga", "/.cache/clip.v1.MP4.emga.tmp"}
 };
 
@@ -41,7 +42,7 @@ void setup() {
   CachePaths invalid;
   expect(!CachePath::forSource("/photo.jpg", FileFormats::Format::Jpeg, invalid),
          F("source format accepted as cache format"));
-  expect(FileFormats::internalCacheCount() == 4, F("internal cache count mismatch"));
+  expect(FileFormats::internalCacheCount() == 5, F("internal cache count mismatch"));
   expect(FileFormats::fromSignature((const uint8_t *)"ETH1", 4) == FileFormats::Format::Eth1,
          F("ETH1 signature not recognized"));
   for (uint8_t index = 0; index < FileFormats::internalCacheCount(); index++) {

@@ -46,6 +46,7 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _webpAnimDecoder(nullptr),
     _webpAnimInfo{},
     _webpAnimated(false),
+    _animationSource(false),
     _webpPreviousTimestamp(0),
     _previousImagePath(),
     _nextImagePath(),
@@ -76,6 +77,14 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _top(0),
     _drawWidth(0),
     _drawHeight(0),
+    _sourceCropX(0),
+    _sourceCropY(0),
+    _sourceCropWidth(0),
+    _sourceCropHeight(0),
+    _viewMode(ViewMode::Informative),
+    _cropZoom(false),
+    _imageReady(false),
+    _writeCacheAfterRender(true),
     _nextDrawY(-1),
     _lastSourceY(InvalidSourceRow),
     _frameBuffer(nullptr),
@@ -132,6 +141,7 @@ ImageViewerScreen::ImageViewerScreen(Navigator &navigator,
     _gifNextFrameAt(0),
     _gifCanvasPixels(0),
     _gifPresentFrame(nullptr),
+    _gifDisplayedFrame(nullptr),
     _gifPresentY(0),
     _gifPresentActive(false),
     _lastTouchDown(false),
@@ -158,11 +168,11 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   _path = data.text;
   _previousImagePath = data.previousImagePath;
   _nextImagePath = data.nextImagePath;
+  _viewMode = data.imageFullscreen ? ViewMode::FullScreen : ViewMode::Informative;
   // Put a real frame on the panel before touching SD or allocating decode
   // buffers.  Animated formats continue their build incrementally in tick(),
   // and this prevents a blank/previous Files screen during header/cache work.
   draw();
-  drawLoading(0);
   yield();
   if (!_sdCard.isMounted()) {
     _error = F("SD card unavailable");
@@ -185,6 +195,7 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   _sourceWriteTime = fingerprint.modified;
   if (isGifSource()) {
     _format = ImageFormat::Gif;
+    _animationSource = true;
     if (!prepareCachePaths(FileFormats::Format::Emga)) {
       _error = F("Invalid cache path");
       drawError();
@@ -198,27 +209,36 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
       drawError();
       return;
     }
+    _animationSource = _webpAnimated;
     if (!prepareCachePaths(_webpAnimated ? FileFormats::Format::Emga : FileFormats::Format::Em16)) {
       _error = F("Invalid cache path");
       drawError();
       return;
     }
     if (_webpAnimated && loadAnimationCache()) return;
+    if (!_webpAnimated && !prepareCachePaths(FileFormats::Format::Em16Zoom)) {
+      _error = F("Invalid zoom cache path");
+      drawError();
+      return;
+    }
   } else {
     if (!prepareCachePaths(FileFormats::Format::Em16)) {
       _error = F("Invalid cache path");
       drawError();
       return;
     }
+    if (!prepareCachePaths(FileFormats::Format::Em16Zoom)) {
+      _error = F("Invalid zoom cache path");
+      drawError();
+      return;
+    }
   }
-  if (loadCache()) {
+  if (loadCache(false)) {
     Serial.print(F("Image cache hit: "));
     Serial.println(_cachePath);
-    draw();
-    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
-    releaseBuffers();
+    _imageReady = true;
+    presentStaticFrame();
     releaseWebpDecoder();
-    drawCloseIcon();
     return;
   }
   if (!readRasterHeader() || !prepareRender()) {
@@ -227,7 +247,6 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     drawError();
     return;
   }
-  draw();
   drawLoading(0);
   if (_format == ImageFormat::Gif || (_format == ImageFormat::Webp && _webpAnimated)) {
     bool started = _format == ImageFormat::Gif ? startGifBuild() : startWebpBuild();
@@ -241,7 +260,6 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
       drawError();
       return;
     }
-    drawCloseIcon();
     return;
   }
   if (_format != ImageFormat::Bmp && !decodeRasterImage()) {
@@ -253,13 +271,11 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
   }
   _rendering = _format == ImageFormat::Bmp;
   if (!_rendering) {
-    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
+    _imageReady = true;
+    presentStaticFrame();
     startCacheWrite();
-    if (!_cacheWriting) {
-      releaseBuffers();
-      releaseWebpDecoder();
-    }
-    drawCloseIcon();
+    releaseRenderScratch();
+    releaseWebpDecoder();
     return;
   }
   if (!renderRows(16)) {
@@ -269,7 +285,6 @@ void ImageViewerScreen::onEnter(const ScreenData &data) {
     drawError();
     return;
   }
-  drawCloseIcon();
 }
 
 void ImageViewerScreen::onExit() {
@@ -328,26 +343,39 @@ void ImageViewerScreen::handleTouch(const TouchPoint &point) {
   }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
-  // The full 48 px app-bar navigation target remains responsive while an
-  // animation is sharing the SPI bus.
-  if (point.x < CloseTapSize && point.y < CloseTapSize) {
+  const bool informative = _viewMode == ViewMode::Informative;
+  if (informative && point.x < CloseTapSize && point.y < CloseTapSize) {
     _navigator.pop();
     return;
   }
 
+  // The app-bar action deliberately wins over the otherwise overlapping
+  // right-edge next-image target.
+  if (informative && zoomAvailable() && point.y < UiKit::AppBarHeight &&
+      point.x >= _display.width() - UiKit::AppBarHeight) {
+    setCropZoom(!_cropZoom);
+    return;
+  }
+
   String target;
-  if (point.x < EdgeTapWidth) {
+  const bool isAppBar = informative && point.y < UiKit::AppBarHeight;
+  if (!isAppBar && point.x < EdgeTapWidth) {
     target = _previousImagePath;
-  } else if (point.x >= _display.width() - EdgeTapWidth) {
+  } else if (!isAppBar && point.x >= _display.width() - EdgeTapWidth) {
     target = _nextImagePath;
   }
-  if (target.length() == 0) return;
-
-  FilesScreen *files = static_cast<FilesScreen *>(_navigator.screenFor(ScreenId::Files));
-  ScreenData data;
-  if (files && files->imageViewerDataFor(target, data)) {
-    _navigator.replace(ScreenId::ImageViewer, data);
+  if (target.length() > 0) {
+    FilesScreen *files = static_cast<FilesScreen *>(_navigator.screenFor(ScreenId::Files));
+    ScreenData data;
+    if (files && files->imageViewerDataFor(target, data)) {
+      data.imageFullscreen = _viewMode == ViewMode::FullScreen;
+      _navigator.replace(ScreenId::ImageViewer, data);
+    }
+    return;
   }
+
+  if (_imageReady && !isAppBar && point.x >= EdgeTapWidth &&
+      point.x < _display.width() - EdgeTapWidth) toggleViewMode();
 }
 
 void ImageViewerScreen::reset() {
@@ -364,12 +392,18 @@ void ImageViewerScreen::reset() {
   if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
   (void)removeGifTemp;
   _cacheWriting = false;
+  _viewMode = ViewMode::Informative;
+  _cropZoom = false;
+  _imageReady = false;
+  _writeCacheAfterRender = true;
   releaseGifBuffers();
   releaseBuffers();
   _path = "";
   _error = "";
   _cachePath = "";
   _cacheTempPath = "";
+  _zoomCachePath = "";
+  _zoomCacheTempPath = "";
   _sourceFileSize = 0;
   _sourceWriteTime = 0;
   _cacheOffset = 0;
@@ -380,6 +414,7 @@ void ImageViewerScreen::reset() {
   _gifBuildWriteOffset = 0;
   _gifBuildDelay = 0;
   _webpPreviousTimestamp = 0;
+  _animationSource = false;
   _gifFrameCount = 0;
   _gifPlaybackFrame = 0;
   _gifPlaybackDelay = 0;
@@ -409,6 +444,7 @@ void ImageViewerScreen::reset() {
   _gifNextFrameAt = 0;
   _gifCanvasPixels = 0;
   _gifPresentFrame = nullptr;
+  _gifDisplayedFrame = nullptr;
   _gifPresentY = 0;
   _gifPresentActive = false;
   _format = ImageFormat::Unknown;
@@ -417,6 +453,10 @@ void ImageViewerScreen::reset() {
   _pixelOffset = 0;
   _sourceWidth = 0;
   _sourceHeight = 0;
+  _sourceCropX = 0;
+  _sourceCropY = 0;
+  _sourceCropWidth = 0;
+  _sourceCropHeight = 0;
   _rowStride = 0;
   _dibSize = 0;
   _bitsPerPixel = 0;
@@ -435,15 +475,111 @@ void ImageViewerScreen::reset() {
 }
 
 void ImageViewerScreen::draw() {
-  if (_display.isReady()) _display.tft().fillScreen(TFT_BLACK);
+  if (!_display.isReady()) return;
+  _display.tft().fillScreen(TFT_BLACK);
+  // Chrome is painted once per full-screen refresh. Incremental loader
+  // updates only touch their bounded content area, so they cannot flash the
+  // app bar while source rows are being decoded.
+  drawChrome();
 }
 
-void ImageViewerScreen::drawCloseIcon() {
-  if (!_display.isReady()) return;
-  TFT_eSPI &tft = _display.tft();
-  tft.fillRect(0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight, TFT_BLACK);
-  // The image viewer deliberately remains full-screen; draw only the kit's close affordance.
-  UiKit::drawTopAppBar(tft, UiKit::AppBarHeight, String(), UiKit::NavigationIcon::Close);
+String ImageViewerScreen::filename() const {
+  int slash = _path.lastIndexOf('/');
+  return slash >= 0 ? _path.substring(slash + 1) : _path;
+}
+
+bool ImageViewerScreen::isStaticImage() const {
+  return _sourceWidth > 0 && _sourceHeight > 0 && !_animationSource;
+}
+
+bool ImageViewerScreen::zoomAvailable() const {
+  if (!_imageReady || !isStaticImage() || _display.height() == 0 || _sourceHeight == 0) return false;
+  const uint64_t imageRatio = (uint64_t)_sourceWidth * _display.height();
+  const uint64_t screenRatio = (uint64_t)_sourceHeight * _display.width();
+  const uint64_t difference = imageRatio > screenRatio ? imageRatio - screenRatio : screenRatio - imageRatio;
+  return difference * 10ULL > screenRatio;
+}
+
+void ImageViewerScreen::drawChrome() {
+  if (!_display.isReady() || _viewMode == ViewMode::FullScreen) return;
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), filename(), UiKit::NavigationIcon::Close,
+                       zoomAvailable() ? (_cropZoom ? UiKit::AppBarAction::ZoomOut
+                                                     : UiKit::AppBarAction::ZoomIn)
+                                       : UiKit::AppBarAction::None);
+}
+
+void ImageViewerScreen::presentStaticFrame() {
+  if (!_display.isReady() || !_frameBuffer) return;
+  _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
+  drawChrome();
+}
+
+bool ImageViewerScreen::reloadStaticRender(bool cropZoom) {
+  if (!isStaticImage()) return false;
+  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
+  _cacheWriting = false;
+  _cacheOffset = 0;
+  _rendering = false;
+  _nextDrawY = -1;
+  releaseBuffers();
+  releaseWebpDecoder();
+  _cropZoom = cropZoom;
+  _imageReady = false;
+  _writeCacheAfterRender = true;
+  _error = "";
+
+  if (!readRasterHeader() || !prepareRender()) {
+    if (_error.length() == 0) _error = F("Unable to render image");
+    releaseWebpDecoder();
+    drawError();
+    return false;
+  }
+  draw();
+  drawLoading(0);
+  if (_format != ImageFormat::Bmp && !decodeRasterImage()) {
+    if (_error.length() == 0) _error = F("Could not decode image");
+    releaseBuffers();
+    releaseWebpDecoder();
+    drawError();
+    return false;
+  }
+  _rendering = _format == ImageFormat::Bmp;
+  if (_rendering) return true;
+
+  _imageReady = true;
+  presentStaticFrame();
+  if (_writeCacheAfterRender) startCacheWrite();
+  releaseRenderScratch();
+  releaseWebpDecoder();
+  return true;
+}
+
+void ImageViewerScreen::setCropZoom(bool cropZoom) {
+  if (!zoomAvailable() || cropZoom == _cropZoom) return;
+  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
+  _cacheWriting = false;
+  _cacheOffset = 0;
+  releaseBuffers();
+  releaseWebpDecoder();
+  _cropZoom = cropZoom;
+  _imageReady = false;
+  _writeCacheAfterRender = true;
+  if (loadCache(cropZoom)) {
+    _imageReady = true;
+    presentStaticFrame();
+    return;
+  }
+  (void)reloadStaticRender(cropZoom);
+}
+
+void ImageViewerScreen::toggleViewMode() {
+  _viewMode = _viewMode == ViewMode::Informative ? ViewMode::FullScreen : ViewMode::Informative;
+  if (isStaticImage()) {
+    presentStaticFrame();
+    return;
+  }
+  draw();
+  if (_gifDisplayedFrame) presentGifFullFrame(_gifDisplayedFrame);
 }
 
 void ImageViewerScreen::drawError() {
@@ -460,11 +596,9 @@ void ImageViewerScreen::drawError() {
                    String(_sourceWidth) + F("x") + String(_sourceHeight);
   UiText::draw(tft, details, centerX, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
-  String filename = _path;
-  int slash = filename.lastIndexOf('/');
-  if (slash >= 0) filename = filename.substring(slash + 1);
-  if (filename.length() > 28) filename = String(F("...")) + filename.substring(filename.length() - 25);
-  UiText::draw(tft, filename, centerX, centerY + 36, TFT_LIGHTGREY, TFT_BLACK,
+  String imageFilename = filename();
+  if (imageFilename.length() > 28) imageFilename = String(F("...")) + imageFilename.substring(imageFilename.length() - 25);
+  UiText::draw(tft, imageFilename, centerX, centerY + 36, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
   Serial.print(F("Image viewer error: format="));
   Serial.print(formatName());
@@ -476,7 +610,6 @@ void ImageViewerScreen::drawError() {
   Serial.print(_path);
   Serial.print(F(" reason="));
   Serial.println(_error);
-  drawCloseIcon();
 }
 
 const char *ImageViewerScreen::formatName() const {
@@ -495,13 +628,11 @@ void ImageViewerScreen::drawLoading(uint8_t percent) {
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
-  tft.fillRect(centerX - 100, centerY - 28, 200, 58, TFT_BLACK);
-  String progress = String(percent) + F("%");
-  UiText::draw(tft, F("Loading image"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+  tft.fillRect(centerX - 110, centerY - 26, 220, 52, TFT_BLACK);
+  UiText::draw(tft, F("Loading image"), centerX, centerY - 11, TFT_WHITE, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
-  UiText::draw(tft, progress, centerX, centerY + 14, TFT_LIGHTGREY, TFT_BLACK,
-               UiText::Size::Compact, MC_DATUM);
-  drawCloseIcon();
+  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, percent, false,
+                         TFT_BLUE, TFT_DARKGREY, TFT_BLACK);
 }
 
 void ImageViewerScreen::updateDecodeProgress(uint8_t percent) {
@@ -760,40 +891,54 @@ bool ImageViewerScreen::readRasterHeader() {
 bool ImageViewerScreen::prepareCachePaths(FileFormats::Format format) {
   CachePaths paths;
   if (!CachePath::forSource(_path, format, paths)) return false;
-  _cachePath = paths.finalPath;
-  _cacheTempPath = paths.temporaryPath;
+  if (format == FileFormats::Format::Em16Zoom) {
+    _zoomCachePath = paths.finalPath;
+    _zoomCacheTempPath = paths.temporaryPath;
+  } else {
+    _cachePath = paths.finalPath;
+    _cacheTempPath = paths.temporaryPath;
+  }
   return true;
 }
 
-bool ImageViewerScreen::readCacheHeader(StorageFile &file) const {
+bool ImageViewerScreen::readCacheHeader(StorageFile &file,
+                                        uint32_t &sourceWidth,
+                                        uint32_t &sourceHeight) const {
   uint32_t fileBytes = 0;
   if (!file || _mediaCache.fileSize(file, fileBytes) != MediaCache::Result::Complete ||
       fileBytes != CacheHeaderSize + CachePixelBytes) return false;
   uint8_t header[CacheHeaderSize];
   if (_mediaCache.read(file, header, sizeof(header)) != MediaCache::Result::Complete) return false;
   if (header[0] != 'E' || header[1] != 'M' || header[2] != '1' || header[3] != '6' ||
-      header[4] != 1 || header[5] != 0 || readLe16(header + 8) != CacheWidth ||
+      header[4] != 2 || header[5] != 0 || readLe16(header + 8) != CacheWidth ||
       readLe16(header + 10) != CacheHeight ||
       !MediaCache::matches({readLe32(header + 12), readLe32(header + 16)},
                            {_sourceFileSize, _sourceWriteTime}) ||
-      readLe32(header + 20) != CachePixelBytes) {
+      readLe32(header + 20) != CachePixelBytes || readLe32(header + 24) == 0 ||
+      readLe32(header + 28) == 0) {
     return false;
   }
+  sourceWidth = readLe32(header + 24);
+  sourceHeight = readLe32(header + 28);
   return true;
 }
 
-bool ImageViewerScreen::loadCache() {
-  // JPG, PNG, and BMP intentionally probe their .em16 cache before parsing
-  // the source header, so their format is still Unknown here.  Only animated
+bool ImageViewerScreen::loadCache(bool cropZoom) {
+  // Still formats intentionally probe their static cache before parsing the
+  // source header, so their format is still Unknown here. Only animated
   // sources use the separate .emga cache path.
   if (_format == ImageFormat::Gif ||
       (_format == ImageFormat::Webp && _webpAnimated)) return false;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) return false;
   CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Em16, paths)) return false;
+  const FileFormats::Format cacheFormat = cropZoom ? FileFormats::Format::Em16Zoom
+                                                     : FileFormats::Format::Em16;
+  if (!CachePath::forSource(_path, cacheFormat, paths)) return false;
   StorageFile cache;
   if (_mediaCache.openRead(paths, _secretAccess, cache) != MediaCache::Result::Complete) return false;
-  if (!cache || !readCacheHeader(cache)) {
+  uint32_t sourceWidth = 0;
+  uint32_t sourceHeight = 0;
+  if (!cache || !readCacheHeader(cache, sourceWidth, sourceHeight)) {
     _mediaCache.close(cache);
     return false;
   }
@@ -831,6 +976,8 @@ bool ImageViewerScreen::loadCache() {
     return false;
   }
   _mediaCache.close(cache);
+  _sourceWidth = sourceWidth;
+  _sourceHeight = sourceHeight;
   return true;
 }
 
@@ -1060,12 +1207,11 @@ void ImageViewerScreen::drawGifLoading(uint8_t percent) {
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
-  tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
-  UiText::draw(tft, F("Converting animation"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+  tft.fillRect(centerX - 130, centerY - 26, 260, 52, TFT_BLACK);
+  UiText::draw(tft, F("Converting animation"), centerX, centerY - 11, TFT_WHITE, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
-  UiText::draw(tft, String(percent) + F("%"), centerX, centerY + 14,
-               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
-  drawCloseIcon();
+  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, percent, false,
+                         TFT_BLUE, TFT_DARKGREY, TFT_BLACK);
 }
 
 void ImageViewerScreen::drawGifPreloading(uint8_t percent) {
@@ -1073,12 +1219,11 @@ void ImageViewerScreen::drawGifPreloading(uint8_t percent) {
   TFT_eSPI &tft = _display.tft();
   int16_t centerX = _display.width() / 2;
   int16_t centerY = _display.height() / 2;
-  tft.fillRect(centerX - 130, centerY - 30, 260, 62, TFT_BLACK);
-  UiText::draw(tft, F("Loading"), centerX, centerY - 12, TFT_WHITE, TFT_BLACK,
+  tft.fillRect(centerX - 130, centerY - 26, 260, 52, TFT_BLACK);
+  UiText::draw(tft, F("Loading"), centerX, centerY - 11, TFT_WHITE, TFT_BLACK,
                UiText::Size::Compact, MC_DATUM);
-  UiText::draw(tft, String(percent) + F("%"), centerX, centerY + 14,
-               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
-  drawCloseIcon();
+  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, percent, false,
+                         TFT_BLUE, TFT_DARKGREY, TFT_BLACK);
 }
 
 void ImageViewerScreen::scaleGifFrame() {
@@ -1088,13 +1233,15 @@ void ImageViewerScreen::scaleGifFrame() {
   memset(_frameBuffer, 0, (size_t)_display.width() * _display.height() * sizeof(uint16_t));
   for (uint32_t dy = 0; dy < _drawHeight; dy++) {
     uint32_t sourceY = _drawHeight > 1
-      ? (uint32_t)(((uint64_t)dy * (_sourceHeight - 1)) / (_drawHeight - 1)) : 0;
+      ? _sourceCropY + (uint32_t)(((uint64_t)dy * (_sourceCropHeight - 1)) / (_drawHeight - 1))
+      : _sourceCropY;
     uint16_t *destination = _frameBuffer +
       (size_t)(_top + dy) * _display.width() + _left;
     const uint16_t *sourceRow = source + (size_t)sourceY * _sourceWidth;
     for (uint32_t dx = 0; dx < _drawWidth; dx++) {
       uint32_t sourceX = _drawWidth > 1
-        ? (uint32_t)(((uint64_t)dx * (_sourceWidth - 1)) / (_drawWidth - 1)) : 0;
+        ? _sourceCropX + (uint32_t)(((uint64_t)dx * (_sourceCropWidth - 1)) / (_drawWidth - 1))
+        : _sourceCropX;
       destination[dx] = sourceRow[sourceX];
     }
   }
@@ -1398,6 +1545,7 @@ void ImageViewerScreen::presentGifFullFrame(const uint16_t *frame) {
   // the centered photo rectangle, which leaves the close control's black
   // corner untouched even when the animation itself has a black background.
   _gifPresentFrame = frame;
+  _gifDisplayedFrame = frame;
   _gifPresentY = 0;
   _gifPresentActive = true;
 }
@@ -1436,6 +1584,9 @@ bool ImageViewerScreen::tickGifPresentation() {
   }
   _display.tft().pushImage(_left, _top + _gifPresentY, _drawWidth, rows,
                             _gifPresentBuffer);
+  const int16_t bandTop = _top + _gifPresentY;
+  if (_viewMode == ViewMode::Informative && bandTop < UiKit::AppBarHeight &&
+      bandTop + rows > 0) drawChrome();
   _gifPresentY += rows;
   if (_gifPresentY == _drawHeight) {
     _gifPresentFrame = nullptr;
@@ -1616,8 +1767,8 @@ bool ImageViewerScreen::beginGifResidentPlayback() {
   _gifPlaybackFrame = 0;
   _gifPlaybackDelay = _gifResidentDelays[0];
   if (_gifResidentStates) _gifResidentStates[0] = (uint8_t)GifSlotState::Displaying;
+  _imageReady = true;
   draw();
-  drawCloseIcon();
   presentGifFrame(gifResidentFrame(0), nullptr, true);
   _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs);
   _gifCyclesCompleted = 0;
@@ -1905,13 +2056,15 @@ void ImageViewerScreen::scaleWebpRgba(const uint8_t *rgba) {
   memset(_frameBuffer, 0, (size_t)_display.width() * _display.height() * sizeof(uint16_t));
   for (uint32_t dy = 0; dy < _drawHeight; dy++) {
     uint32_t sourceY = _drawHeight > 1
-      ? (uint32_t)(((uint64_t)dy * (_sourceHeight - 1)) / (_drawHeight - 1)) : 0;
+      ? _sourceCropY + (uint32_t)(((uint64_t)dy * (_sourceCropHeight - 1)) / (_drawHeight - 1))
+      : _sourceCropY;
     uint16_t *destination = _frameBuffer +
       (size_t)(_top + dy) * _display.width() + _left;
     const uint8_t *sourceRow = rgba + (size_t)sourceY * _sourceWidth * 4;
     for (uint32_t dx = 0; dx < _drawWidth; dx++) {
       uint32_t sourceX = _drawWidth > 1
-        ? (uint32_t)(((uint64_t)dx * (_sourceWidth - 1)) / (_drawWidth - 1)) : 0;
+        ? _sourceCropX + (uint32_t)(((uint64_t)dx * (_sourceCropWidth - 1)) / (_drawWidth - 1))
+        : _sourceCropX;
       const uint8_t *pixel = sourceRow + sourceX * 4;
       uint8_t alpha = pixel[3];
       uint8_t red = (uint8_t)(((uint16_t)pixel[0] * alpha + 127) / 255);
@@ -2107,18 +2260,24 @@ void ImageViewerScreen::releaseWebpDecoder() {
 bool ImageViewerScreen::writeCacheHeader() {
   uint8_t header[CacheHeaderSize] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = '1'; header[3] = '6';
-  header[4] = 1; // cache format version
+  header[4] = 2; // cache format version
   header[5] = 0; // RGB565 little-endian
   writeLe16(header + 8, CacheWidth);
   writeLe16(header + 10, CacheHeight);
   writeLe32(header + 12, _sourceFileSize);
   writeLe32(header + 16, _sourceWriteTime);
   writeLe32(header + 20, CachePixelBytes);
+  writeLe32(header + 24, _sourceWidth);
+  writeLe32(header + 28, _sourceHeight);
   return _mediaCache.write(_cacheWriter, header, sizeof(header)) == MediaCache::Result::Complete;
 }
 
 void ImageViewerScreen::startCacheWrite() {
-  if (_cacheWriting || !_frameBuffer || _cachePath.length() == 0) return;
+  const FileFormats::Format cacheFormat = _cropZoom ? FileFormats::Format::Em16Zoom
+                                                     : FileFormats::Format::Em16;
+  const String &cachePath = _cropZoom ? _zoomCachePath : _cachePath;
+  const String &cacheTempPath = _cropZoom ? _zoomCacheTempPath : _cacheTempPath;
+  if (!_writeCacheAfterRender || _cacheWriting || !_frameBuffer || cachePath.length() == 0) return;
   if (!cacheNeedsRotation() && (_display.width() != CacheWidth || _display.height() != CacheHeight)) {
     Serial.print(F("Image cache: skipped, display is "));
     Serial.print(_display.width());
@@ -2127,9 +2286,9 @@ void ImageViewerScreen::startCacheWrite() {
     return;
   }
   Serial.print(F("Image cache: preparing "));
-  Serial.println(_cachePath);
+  Serial.println(cachePath);
   CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Em16, paths) ||
+  if (!CachePath::forSource(_path, cacheFormat, paths) ||
       _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete) {
     Serial.print(F("Image cache: cannot create "));
     Serial.println(paths.directory);
@@ -2137,14 +2296,14 @@ void ImageViewerScreen::startCacheWrite() {
   }
   if (!writeCacheHeader()) {
     Serial.print(F("Image cache: cannot start "));
-    Serial.println(_cacheTempPath);
+    Serial.println(cacheTempPath);
     _mediaCache.abort(_cacheWriter);
     return;
   }
   _cacheOffset = 0;
   _cacheWriting = true;
   Serial.print(F("Image cache: writing "));
-  Serial.println(_cacheTempPath);
+  Serial.println(cacheTempPath);
 }
 
 void ImageViewerScreen::writeCacheChunk() {
@@ -2175,7 +2334,7 @@ void ImageViewerScreen::writeCacheChunk() {
   if (writeResult == MediaCache::Result::Busy) return;
   if (writeResult != MediaCache::Result::Complete) {
     Serial.print(F("Image cache: write failed "));
-    Serial.println(_cacheTempPath);
+    Serial.println(_cropZoom ? _zoomCacheTempPath : _cacheTempPath);
     finishCacheWrite(false);
     return;
   }
@@ -2198,16 +2357,15 @@ void ImageViewerScreen::finishCacheWrite(bool success) {
     _mediaCache.abort(_cacheWriter);
     if (success) {
       Serial.print(F("Image cache: commit failed "));
-      Serial.println(_cachePath);
+      Serial.println(_cropZoom ? _zoomCachePath : _cachePath);
     }
   }
   _cacheWriting = false;
   _cacheOffset = 0;
   if (committed) {
     Serial.print(F("Image cache ready: "));
-    Serial.println(_cachePath);
+    Serial.println(_cropZoom ? _zoomCachePath : _cachePath);
   }
-  releaseBuffers();
 }
 
 bool ImageViewerScreen::prepareRender() {
@@ -2219,12 +2377,39 @@ bool ImageViewerScreen::prepareRender() {
   uint32_t screenHeight = _display.height();
   if (_format == ImageFormat::Gif || (_format == ImageFormat::Webp && _webpAnimated)) {
     prepareGifDrawRect();
+    _sourceCropX = 0;
+    _sourceCropY = 0;
+    _sourceCropWidth = _sourceWidth;
+    _sourceCropHeight = _sourceHeight;
+  } else if (_cropZoom) {
+    _drawWidth = (uint16_t)screenWidth;
+    _drawHeight = (uint16_t)screenHeight;
+    _sourceCropX = 0;
+    _sourceCropY = 0;
+    _sourceCropWidth = _sourceWidth;
+    _sourceCropHeight = _sourceHeight;
+    if ((uint64_t)screenWidth * _sourceHeight > (uint64_t)screenHeight * _sourceWidth) {
+      _sourceCropHeight = (uint32_t)(((uint64_t)_sourceWidth * screenHeight) / screenWidth);
+      if (_sourceCropHeight == 0) _sourceCropHeight = 1;
+      _sourceCropY = (_sourceHeight - _sourceCropHeight) / 2;
+    } else {
+      _sourceCropWidth = (uint32_t)(((uint64_t)_sourceHeight * screenWidth) / screenHeight);
+      if (_sourceCropWidth == 0) _sourceCropWidth = 1;
+      _sourceCropX = (_sourceWidth - _sourceCropWidth) / 2;
+    }
   } else if ((uint64_t)screenWidth * _sourceHeight <= (uint64_t)screenHeight * _sourceWidth) {
     _drawWidth = screenWidth;
     _drawHeight = (uint16_t)(((uint64_t)screenWidth * _sourceHeight) / _sourceWidth);
   } else {
     _drawHeight = screenHeight;
     _drawWidth = (uint16_t)(((uint64_t)screenHeight * _sourceWidth) / _sourceHeight);
+  }
+  if (!_cropZoom && _format != ImageFormat::Gif &&
+      !(_format == ImageFormat::Webp && _webpAnimated)) {
+    _sourceCropX = 0;
+    _sourceCropY = 0;
+    _sourceCropWidth = _sourceWidth;
+    _sourceCropHeight = _sourceHeight;
   }
   if (_drawWidth == 0) _drawWidth = 1;
   if (_drawHeight == 0) _drawHeight = 1;
@@ -2261,7 +2446,9 @@ bool ImageViewerScreen::prepareRender() {
   if (_format != ImageFormat::Gif) {
     for (uint32_t dx = 0; dx < _drawWidth; dx++) {
       _xCoordinates[dx] = _drawWidth > 1
-        ? (uint32_t)(((uint64_t)dx * (_sourceWidth - 1) << 16) / (_drawWidth - 1)) : 0;
+        ? _sourceCropX + (uint32_t)(((uint64_t)dx * (_sourceCropWidth - 1) << 16) /
+                                    (_drawWidth - 1))
+        : _sourceCropX;
     }
   } else {
     if ((uint64_t)_sourceWidth * _sourceHeight > 0xffffffffULL) {
@@ -2318,11 +2505,18 @@ bool ImageViewerScreen::decodeRasterImage() {
 }
 
 void ImageViewerScreen::storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color) {
-  if (!_frameBuffer || sourceX >= _sourceWidth || sourceY >= _sourceHeight) return;
-  uint32_t dx0 = (uint32_t)(((uint64_t)sourceX * _drawWidth) / _sourceWidth);
-  uint32_t dx1 = (uint32_t)((((uint64_t)(sourceX + 1) * _drawWidth) + _sourceWidth - 1) / _sourceWidth);
-  uint32_t dy0 = (uint32_t)(((uint64_t)sourceY * _drawHeight) / _sourceHeight);
-  uint32_t dy1 = (uint32_t)((((uint64_t)(sourceY + 1) * _drawHeight) + _sourceHeight - 1) / _sourceHeight);
+  if (!_frameBuffer || sourceX >= _sourceWidth || sourceY >= _sourceHeight ||
+      sourceX < _sourceCropX || sourceY < _sourceCropY ||
+      sourceX >= _sourceCropX + _sourceCropWidth ||
+      sourceY >= _sourceCropY + _sourceCropHeight) return;
+  uint32_t cropX = sourceX - _sourceCropX;
+  uint32_t cropY = sourceY - _sourceCropY;
+  uint32_t dx0 = (uint32_t)(((uint64_t)cropX * _drawWidth) / _sourceCropWidth);
+  uint32_t dx1 = (uint32_t)((((uint64_t)(cropX + 1) * _drawWidth) + _sourceCropWidth - 1) /
+                             _sourceCropWidth);
+  uint32_t dy0 = (uint32_t)(((uint64_t)cropY * _drawHeight) / _sourceCropHeight);
+  uint32_t dy1 = (uint32_t)((((uint64_t)(cropY + 1) * _drawHeight) + _sourceCropHeight - 1) /
+                             _sourceCropHeight);
   if (dx1 <= dx0) dx1 = dx0 + 1;
   if (dy1 <= dy0) dy1 = dy0 + 1;
   if (dx1 > _drawWidth) dx1 = _drawWidth;
@@ -2446,7 +2640,9 @@ bool ImageViewerScreen::renderRows(uint8_t maxRows) {
   while (done < maxRows && _nextDrawY >= 0) {
     uint32_t dy = (uint32_t)_nextDrawY;
     uint32_t y16 = _drawHeight > 1
-      ? (uint32_t)(((uint64_t)dy * (_sourceHeight - 1) << 16) / (_drawHeight - 1)) : 0;
+      ? _sourceCropY + (uint32_t)(((uint64_t)dy * (_sourceCropHeight - 1) << 16) /
+                                   (_drawHeight - 1))
+      : _sourceCropY;
     uint32_t y0 = y16 >> 16;
     if (_rle) {
       if (_lastSourceY == InvalidSourceRow || y0 != _lastSourceY) {
@@ -2469,10 +2665,10 @@ bool ImageViewerScreen::renderRows(uint8_t maxRows) {
   }
   if (_nextDrawY < 0) {
     _rendering = false;
-    _display.tft().pushImage(0, 0, _display.width(), _display.height(), _frameBuffer);
-    startCacheWrite();
-    if (!_cacheWriting) releaseBuffers();
-    drawCloseIcon();
+    _imageReady = true;
+    presentStaticFrame();
+    if (_writeCacheAfterRender) startCacheWrite();
+    releaseRenderScratch();
   }
   return true;
 }
@@ -2634,17 +2830,21 @@ uint16_t ImageViewerScreen::blendPixel(const uint8_t *row0,
   return (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (bl >> 3));
 }
 
-void ImageViewerScreen::releaseBuffers() {
-  if (_frameBuffer) free(_frameBuffer);
+void ImageViewerScreen::releaseRenderScratch() {
   if (_xCoordinates) free(_xCoordinates);
   if (_rawRow) free(_rawRow);
   if (_row0) free(_row0);
   if (_row1) free(_row1);
-  _frameBuffer = nullptr;
   _xCoordinates = nullptr;
   _rawRow = nullptr;
   _row0 = nullptr;
   _row1 = nullptr;
+}
+
+void ImageViewerScreen::releaseBuffers() {
+  if (_frameBuffer) free(_frameBuffer);
+  _frameBuffer = nullptr;
+  releaseRenderScratch();
 }
 
 uint16_t ImageViewerScreen::readLe16(const uint8_t *buffer) const {

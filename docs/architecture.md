@@ -25,7 +25,7 @@ All screens inherit `Screen`, which receives shared references to `Navigator`, `
 - `onResult(const ScreenResult&)` receives a result from `pop(result)`.
 - `handleTouch()` receives a changed `TouchPoint`; `tick()` must stay non-blocking.
 
-Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Image payloads can carry adjacent image paths for edge navigation. `ScreenResult::withText()` returns keyboard text to the caller. Do not introduce direct cross-screen calls for new navigation flows.
+Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Image payloads can carry adjacent image paths for edge navigation and the full-screen state to retain during an adjacent-image replacement; image zoom never transfers. `ScreenResult::withText()` returns keyboard text to the caller. Do not introduce direct cross-screen calls for new navigation flows.
 
 ## Core services
 

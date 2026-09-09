@@ -31,7 +31,8 @@ public:
     Empa,
     // Keep new values after the persisted source-format values above. ETH1
     // stores a FileFormats::Format byte in its version-1 header.
-    Eth1
+    Eth1,
+    Em16Zoom
   };
 
   static Format fromPath(const String &path) {
@@ -52,6 +53,7 @@ public:
     if (suffix == F(".mp4") || suffix == F(".m4v")) return Format::Mp4;
     if (suffix == F(".3gp") || suffix == F(".3gpp")) return Format::ThreeGp;
     if (suffix == F(".em16")) return Format::Em16;
+    if (suffix == F(".em16z")) return Format::Em16Zoom;
     if (suffix == F(".emga")) return Format::Emga;
     if (suffix == F(".empa")) return Format::Empa;
     if (suffix == F(".eth1")) return Format::Eth1;
@@ -114,6 +116,7 @@ public:
       case Format::Gif:
       case Format::Webp:
       case Format::Em16:
+      case Format::Em16Zoom:
       case Format::Emga:
       case Format::Eth1:
         return Group::Image;
@@ -150,11 +153,12 @@ public:
   }
 
   static bool isInternal(Format format) {
-    return format == Format::Em16 || format == Format::Emga || format == Format::Empa ||
+    return format == Format::Em16 || format == Format::Em16Zoom ||
+           format == Format::Emga || format == Format::Empa ||
            format == Format::Eth1;
   }
 
-  static uint8_t internalCacheCount() { return 4; }
+  static uint8_t internalCacheCount() { return 5; }
 
   static Format internalCacheAt(uint8_t index) {
     switch (index) {
@@ -162,6 +166,7 @@ public:
       case 1: return Format::Em16;
       case 2: return Format::Emga;
       case 3: return Format::Empa;
+      case 4: return Format::Em16Zoom;
       default: return Format::Unknown;
     }
   }
@@ -178,6 +183,7 @@ public:
       case Format::Mp4: return ".mp4";
       case Format::ThreeGp: return ".3gp";
       case Format::Em16: return ".em16";
+      case Format::Em16Zoom: return ".em16z";
       case Format::Emga: return ".emga";
       case Format::Empa: return ".empa";
       case Format::Eth1: return ".eth1";
