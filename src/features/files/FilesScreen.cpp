@@ -1884,6 +1884,7 @@ bool FilesScreen::prepareMoveTarget(const Entry &entry) {
   _movePromoted = false;
   _moveCachesCleaned = false;
   _cacheCleanup = MediaCache::Cleanup();
+  _cacheRelocation = MediaCache::Relocation();
   _moveBytes = 0;
   _operationFailure = "";
   clearTasks();
@@ -1907,8 +1908,14 @@ void FilesScreen::updateOperation() {
     updateMovePreflight();
   } else if (_operationState == OperationState::MoveCopying) {
     updateMoveCopy();
+  } else if (_operationState == OperationState::MoveCacheRelocation) {
+    updateMoveCacheRelocation();
   } else if (_operationState == OperationState::MoveCommit) {
     updateMoveCommit();
+  } else if (_operationState == OperationState::MovePublishCaches) {
+    updateMovePublishCaches();
+  } else if (_operationState == OperationState::MoveDiscardDestinationCacheTemps) {
+    updateMoveDiscardDestinationCacheTemps();
   }
 }
 
@@ -2008,7 +2015,15 @@ void FilesScreen::updateMoveCopy() {
     return;
   }
   if (_taskIndex >= _taskCount) {
-    _operationState = OperationState::MoveCommit;
+    if (_moveSourceDirectory) {
+      _operationState = OperationState::MoveCommit;
+      return;
+    }
+    _mediaCache.beginRelocation(_moveSourcePath, _moveStagedPath, _moveTargetPath,
+                                _moveOutOfSecret, !_moveOutOfSecret,
+                                _cacheRelocation);
+    _operationState = OperationState::MoveCacheRelocation;
+    showMessage(F("Moving media caches..."), 60000);
     return;
   }
   const PathTask &task = _tasks[_taskIndex];
@@ -2033,6 +2048,17 @@ void FilesScreen::updateMoveCopy() {
   }
 }
 
+void FilesScreen::updateMoveCacheRelocation() {
+  const MediaCache::Result result = _mediaCache.relocationStep(_cacheRelocation,
+                                                                 _moveBuffer,
+                                                                 sizeof(_moveBuffer));
+  if (result == MediaCache::Result::Busy || result == MediaCache::Result::More) return;
+  // Cache sidecars are reproducible. A relocation failure never prevents the
+  // staged primary file from committing; source cleanup removes old sidecars
+  // and temporary artifacts only after the move has been published.
+  _operationState = OperationState::MoveCommit;
+}
+
 void FilesScreen::updateMoveCommit() {
   if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) return;
   // Recheck immediately before publication so an intervening file creation
@@ -2042,16 +2068,32 @@ void FilesScreen::updateMoveCommit() {
   if (committed) SD.rmdir(_moveStagePath.c_str());
   SpiBusLock::unlock();
   if (!committed) {
-    failMove(_moveOutOfSecret ? String(F("Decrypted copy commit failed"))
-                               : String(F("Secret move commit failed")));
+    _operationFailure = _moveOutOfSecret ? String(F("Decrypted copy commit failed"))
+                                         : String(F("Secret move commit failed"));
+    _cacheRelocation.nextPublish = 0;
+    _operationState = OperationState::MoveDiscardDestinationCacheTemps;
     return;
   }
   _movePromoted = true;
   _moveStageCreated = false;
+  _cacheRelocation.nextPublish = 0;
+  _operationState = OperationState::MovePublishCaches;
+  showMessage(F("Publishing media caches..."), 60000);
+}
+
+void FilesScreen::updateMovePublishCaches() {
+  const MediaCache::Result result = _mediaCache.publishRelocationStep(_cacheRelocation);
+  if (result == MediaCache::Result::Busy || result == MediaCache::Result::More) return;
   _operationState = OperationState::MoveRemoveSource;
   clearTasks();
   _taskIndex = 0;
   showMessage(_moveOutOfSecret ? F("Removing encrypted original...") : F("Removing original..."), 60000);
+}
+
+void FilesScreen::updateMoveDiscardDestinationCacheTemps() {
+  const MediaCache::Result result = _mediaCache.discardRelocationStep(_cacheRelocation);
+  if (result == MediaCache::Result::Busy || result == MediaCache::Result::More) return;
+  failMove(_operationFailure.length() ? _operationFailure : String(F("Secret move commit failed")));
 }
 
 void FilesScreen::updateRecursiveDelete() {
@@ -2205,6 +2247,7 @@ void FilesScreen::finishOperation(bool success, const String &message) {
   _renameSourcePath = "";
   _renameTargetPath = "";
   _cacheCleanup = MediaCache::Cleanup();
+  _mediaCache.abandonRelocation(_cacheRelocation);
   showMessage(message);
   refreshListing();
 }
@@ -2235,6 +2278,7 @@ void FilesScreen::handleSdCardEvent(SdCardEvent event) {
     _renameSourcePath = "";
     _renameTargetPath = "";
     _cacheCleanup = MediaCache::Cleanup();
+    _mediaCache.abandonRelocation(_cacheRelocation);
     showMessage(F("SD card removed; operation stopped"), 3000);
   }
   closeMenu();

@@ -36,7 +36,7 @@ Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Im
 | `SpiBusLock` | FreeRTOS mutex for the SPI wires shared by SD and XPT2046. Concurrent work locks only individual transactions. |
 | `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. Its displayed percentage can only decrease for the controller's runtime; runtime charging support is not available. |
 | `SdCardController` | Mounts, monitors, and remounts FAT storage. `update()` is called from the main loop and consumers obtain pending `Mounted`, `Removed`, or `MountFailed` state through `takeEvent()`. |
-| `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, and incremental sidecar cleanup. Cache codecs retain their format-specific header and payload validation. |
+| `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, incremental sidecar cleanup, and staged sidecar relocation across encryption boundaries. Cache codecs retain their format-specific header and payload validation. |
 
 Without a card-detect pin, `SdCardController` probes an attached card every 500 ms and retries an absent card every three seconds. With card detect, mount attempts occur after the physical state changes. SD screens must react to events from their `tick()` methods, not assume a mounted card remains available.
 
@@ -46,7 +46,7 @@ The UI loop must continue to process touch and redraw while expensive work is un
 
 SD and touch share clock/data lines. Long media reads are deliberately chunked, acquire `SpiBusLock` only around a read, and release it between chunks. Media decoders and frame rings rely on PSRAM. The supported N16R8 profile is not optional for the full animated-image/video feature set.
 
-`MediaCache` is constructed once in the composition root and shared by Files, Image Viewer, Audio Player, and Video Player. Its reader, writer, and cleanup operations report busy separately from failure. Screen work retries incremental cleanup from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
+`MediaCache` is constructed once in the composition root and shared by Files, Image Viewer, Audio Player, and Video Player. Its reader, writer, cleanup, and relocation operations report busy separately from failure. Screen work retries incremental cleanup or relocation from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
 
 ## Browser internal boundaries
 

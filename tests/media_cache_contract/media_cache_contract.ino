@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "../../src/media/CachePath.h"
+#include "../../src/media/MediaCache.h"
 #include "../../src/media/SourceFingerprint.h"
 
 namespace {
@@ -20,12 +21,30 @@ const PathCase PathCases[] = {
   {"clip.v1.MP4", FileFormats::Format::Emga, "/.cache", "/.cache/clip.v1.MP4.emga", "/.cache/clip.v1.MP4.emga.tmp"}
 };
 
+struct FingerprintCase {
+  FileFormats::Format format;
+  uint8_t offset;
+};
+
+const FingerprintCase FingerprintCases[] = {
+  {FileFormats::Format::Eth1, 8},
+  {FileFormats::Format::Empa, 8},
+  {FileFormats::Format::Em16, 12},
+  {FileFormats::Format::Em16Zoom, 12},
+  {FileFormats::Format::Emga, 12}
+};
+
 uint16_t failures = 0;
 
 void expect(bool condition, const __FlashStringHelper *message) {
   if (condition) return;
   failures++;
   Serial.println(message);
+}
+
+uint32_t readLe32(const uint8_t *bytes) {
+  return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+         ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
 }
 }  // namespace
 
@@ -56,6 +75,24 @@ void setup() {
   expect(original.matches({1234, 0}), F("equal fingerprint rejected"));
   expect(!original.matches({1235, 0}), F("size change accepted"));
   expect(!original.matches({1234, 1}), F("timestamp change accepted"));
+
+  const SourceFingerprint moved{0x12345678, 0x9abcdef0};
+  for (const FingerprintCase &test : FingerprintCases) {
+    uint8_t header[40] = {};
+    expect(MediaCache::rewriteFingerprint(test.format, header, sizeof(header), moved),
+           F("cache fingerprint rewrite rejected"));
+    expect(readLe32(header + test.offset) == moved.size,
+           F("cache fingerprint size rewrite mismatch"));
+    expect(readLe32(header + test.offset + 4) == moved.modified,
+           F("cache fingerprint timestamp rewrite mismatch"));
+  }
+  uint8_t shortHeader[15] = {};
+  expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Emga, shortHeader,
+                                         sizeof(shortHeader), moved),
+         F("short cache header accepted"));
+  expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Jpeg, shortHeader,
+                                         sizeof(shortHeader), moved),
+         F("source format accepted for fingerprint rewrite"));
 
   Serial.println(failures == 0 ? F("media cache contract: PASS")
                                : F("media cache contract: FAIL"));

@@ -105,7 +105,10 @@ private:
     Deleting,
     MovePreflight,
     MoveCopying,
+    MoveCacheRelocation,
     MoveCommit,
+    MovePublishCaches,
+    MoveDiscardDestinationCacheTemps,
     MoveRemoveSource,
     MoveCleanupStage
   };
@@ -185,6 +188,7 @@ private:
   bool _movePromoted;
   bool _moveCachesCleaned;
   MediaCache::Cleanup _cacheCleanup;
+  MediaCache::Relocation _cacheRelocation;
   uint8_t _moveBuffer[4096];
 
   void draw();
@@ -248,7 +252,10 @@ private:
   void updateRecursiveDelete();
   void updateMovePreflight();
   void updateMoveCopy();
+  void updateMoveCacheRelocation();
   void updateMoveCommit();
+  void updateMovePublishCaches();
+  void updateMoveDiscardDestinationCacheTemps();
   void finishOperation(bool success, const String &message);
   void failMove(const String &message);
   void refreshListing();
