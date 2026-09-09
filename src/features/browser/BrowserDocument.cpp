@@ -381,6 +381,15 @@ uint16_t BrowserDocument::pageEnd(uint8_t page) const {
   return page + 1 < _pageCount ? _pageStarts[page + 1] : _rowCount;
 }
 
+uint8_t BrowserDocument::pageContainingRow(uint16_t rowIndex) const {
+  if (_pageCount == 0 || _rowCount == 0) return 0;
+  if (rowIndex >= _rowCount) rowIndex = _rowCount - 1;
+  for (uint8_t page = 1; page < _pageCount; ++page) {
+    if (rowIndex < _pageStarts[page]) return page - 1;
+  }
+  return _pageCount - 1;
+}
+
 int16_t BrowserDocument::rowHeight(uint16_t rowIndex, const BrowserDocumentLayout &layout) const {
   if (rowIndex >= _rowCount) return 0;
   const Browser::VisualRow &source = _rows[rowIndex];

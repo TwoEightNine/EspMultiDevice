@@ -66,7 +66,11 @@ private:
   BrowserImageWorker _imageWorker;
   BrowserDocument _document;
   int8_t _editingFormControl;
-  String _historyUrls[MaxHistory];
+  struct HistoryEntry {
+    String url;
+    uint16_t anchorRow;
+  };
+  HistoryEntry _history[MaxHistory];
   uint8_t _historyCount;
   bool _loaded;
   BrowserLifecycleWorker _lifecycle;
@@ -78,6 +82,7 @@ private:
   bool _lastTouchDown;
   bool _foregroundLoading;
   uint16_t _page;
+  uint16_t _viewAnchorRow;
   String _currentUrl;
   String _title;
   String _message;
@@ -116,6 +121,8 @@ private:
     bool addedPreviousPageToHistory = false;
     bool addToRecent = false;
     bool popHistoryOnSuccess = false;
+    bool restoreHistoryAnchor = false;
+    uint16_t historyAnchorRow = 0;
     uint32_t waitStartedMs = 0;
     String previousUrl;
     HttpRequest request;
@@ -184,12 +191,12 @@ private:
   bool imageIsVisibleOnCurrentPage(uint16_t imageIndex) const;
   void startLifecycleLoad();
   void runBrowserLifecycle(uint32_t generation) override;
-  void reflowDocument();
+  bool reflowDocument();
   bool hasNextPage() const;
   String shortText(const String &value, int16_t maxWidth) const;
   String lower(const String &value) const;
   int16_t imagePlaceholderWidth() const;
-  void addHistory(const String &url);
+  void addHistory(const String &url, uint16_t anchorRow);
   void addRecent(const String &url, const String &title);
 
   void loadState();

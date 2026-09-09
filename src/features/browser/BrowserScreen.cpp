@@ -99,6 +99,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _lastTouchDown(false),
     _foregroundLoading(false),
     _page(0),
+    _viewAnchorRow(0),
     _currentUrl(),
     _title(),
     _message(),
@@ -264,6 +265,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     _message = "";
     _document.clear();
     _page = 0;
+    _viewAnchorRow = 0;
     _showStart = true;
     _showFavorites = false;
     _startListScroll = 0;
@@ -300,6 +302,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
     if (isLoading()) releaseEmbeddedImages();
     _showStart = true;
     _page = 0;
+    _viewAnchorRow = 0;
     _message = "";
     _showFavorites = false;
     _startListScroll = 0;
@@ -337,6 +340,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   if (!_showStart && contains(_previousBounds, point.x, point.y)) {
     if (_page > 0) {
       _page--;
+      _viewAnchorRow = _document.pageStart(_page);
       browserLog(String(F("moved to page ")) + String(_page + 1));
       redrawDocument();
       drawPageControls();
@@ -346,6 +350,7 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
   if (!_showStart && contains(_nextBounds, point.x, point.y)) {
     if (hasNextPage()) {
       _page++;
+      _viewAnchorRow = _document.pageStart(_page);
       browserLog(String(F("moved to page ")) + String(_page + 1));
       redrawDocument();
       drawPageControls();
@@ -1044,7 +1049,7 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   const bool addedPreviousPageToHistory = addToHistory && hadDocument && previousUrl != url;
   if (addedPreviousPageToHistory) {
     browserLog(F("saving current page to back history"));
-    addHistory(previousUrl);
+    addHistory(previousUrl, _viewAnchorRow);
   }
 
   // Invalidates queued image jobs before a new page takes the shared HTTP
@@ -1064,6 +1069,7 @@ bool BrowserScreen::openRequest(const HttpRequest &initialRequest, bool addToHis
   _message = "";
   _title = "";
   _page = 0;
+  _viewAnchorRow = 0;
   _pendingNavigation = {};
   _pendingNavigation.active = true;
   _pendingNavigation.hadDocument = hadDocument;
@@ -1094,7 +1100,7 @@ void BrowserScreen::handlePageLoadResult(PageLoadResult &result) {
     if (result.error == F("Connect to Wi-Fi first")) {
       _currentUrl = navigation.previousUrl;
       if (navigation.addedPreviousPageToHistory && _historyCount > 0 &&
-          _historyUrls[_historyCount - 1] == navigation.previousUrl) --_historyCount;
+          _history[_historyCount - 1].url == navigation.previousUrl) --_historyCount;
     }
     if (result.errorKind == Browser::PageLoadErrorKind::TextEncoding) {
       _currentUrl = result.finalUrl.length() ? result.finalUrl : navigation.request.url;
@@ -1123,7 +1129,7 @@ void BrowserScreen::handlePageLoadResult(PageLoadResult &result) {
     const FileFormats::Format format = FileFormats::fromPath(result.downloadPath);
     const FileFormats::Group group = FileFormats::group(format);
     if (navigation.addedPreviousPageToHistory && _historyCount > 0 &&
-        _historyUrls[_historyCount - 1] == navigation.previousUrl) {
+        _history[_historyCount - 1].url == navigation.previousUrl) {
       --_historyCount;
     }
     if (navigation.popHistoryOnSuccess && _historyCount > 0) --_historyCount;
@@ -1150,6 +1156,10 @@ void BrowserScreen::handlePageLoadResult(PageLoadResult &result) {
                         result.contentType.length() == 0;
   if (htmlPage) renderDocument(result.textBody);
   else renderPlainText(result.textBody, "Text page");
+  if (navigation.restoreHistoryAnchor) {
+    _viewAnchorRow = navigation.historyAnchorRow;
+    _page = _document.pageContainingRow(_viewAnchorRow);
+  }
   if (navigation.popHistoryOnSuccess && _historyCount > 0) {
     --_historyCount;
     browserLog(F("back navigation complete"));
@@ -1170,14 +1180,17 @@ void BrowserScreen::goBack() {
     releaseEmbeddedImages();
     _showStart = true;
     _page = 0;
+    _viewAnchorRow = 0;
     _message = "";
     draw();
     return;
   }
-  const String target = _historyUrls[_historyCount - 1];
-  browserLog(String(F("loading previous page: ")) + target);
-  if (openUrl(target, false, false, true)) {
+  const HistoryEntry target = _history[_historyCount - 1];
+  browserLog(String(F("loading previous page: ")) + target.url);
+  if (openUrl(target.url, false, false, true)) {
     _pendingNavigation.popHistoryOnSuccess = true;
+    _pendingNavigation.restoreHistoryAnchor = true;
+    _pendingNavigation.historyAnchorRow = target.anchorRow;
   }
 }
 
@@ -1361,10 +1374,11 @@ void BrowserScreen::collectImageResults() {
     _imageWorker.discard(result);
   }
   if (redraw && !_showStart && _message.length() == 0) {
-    reflowDocument();
+    const bool pageChanged = reflowDocument();
     // Do not repaint a page that has no visible placeholder to replace. It
     // avoids a perceptible flash while images below or above this page load.
-    if (redrawTop >= HeaderHeight) redrawDocument(redrawTop);
+    if (pageChanged) redrawDocument();
+    else if (redrawTop >= HeaderHeight) redrawDocument(redrawTop);
   }
   if (wasLoading != isLoading() && !_showStart) {
     BrowserDisplayLock lock;
@@ -1376,9 +1390,12 @@ bool BrowserScreen::imageIsVisibleOnCurrentPage(uint16_t imageIndex) const {
   return _document.imageVisibleOnPage(_page, imageIndex);
 }
 
-void BrowserScreen::reflowDocument() {
+bool BrowserScreen::reflowDocument() {
+  const uint8_t previousPage = _page;
+  const uint16_t previousPageStart = _document.pageStart(_page);
   _document.reflow(documentLayout());
-  if (_page >= _document.pageCount()) _page = 0;
+  _page = _document.pageContainingRow(_viewAnchorRow);
+  return _page != previousPage || _document.pageStart(_page) != previousPageStart;
 }
 
 bool BrowserScreen::hasNextPage() const {
@@ -1399,15 +1416,15 @@ int16_t BrowserScreen::imagePlaceholderWidth() const {
   return ImagePlaceholderWidth;
 }
 
-void BrowserScreen::addHistory(const String &url) {
+void BrowserScreen::addHistory(const String &url, uint16_t anchorRow) {
   if (url.length() == 0) return;
   if (_historyCount >= MaxHistory) {
     for (uint8_t index = 1; index < MaxHistory; index++) {
-      _historyUrls[index - 1] = _historyUrls[index];
+      _history[index - 1] = _history[index];
     }
     _historyCount = MaxHistory - 1;
   }
-  _historyUrls[_historyCount++] = url;
+  _history[_historyCount++] = {url, anchorRow};
   browserLog(String(F("history stored: entries=")) + String(_historyCount));
 }
 

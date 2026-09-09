@@ -48,6 +48,9 @@ public:
   uint8_t pageCount() const { return _pageCount; }
   uint16_t pageStart(uint8_t page) const;
   uint16_t pageEnd(uint8_t page) const;
+  // Maps a stable document-row anchor to its current reflowed page. Anchors
+  // beyond a changed document are clamped to the final readable row.
+  uint8_t pageContainingRow(uint16_t rowIndex) const;
   int16_t rowHeight(uint16_t rowIndex, const BrowserDocumentLayout &layout) const;
   // Returns the top of an image's containing row on the requested page, or
   // -1 when it is not visible there. The screen uses this before reflowing an
