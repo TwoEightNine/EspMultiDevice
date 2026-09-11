@@ -13,28 +13,31 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 
 ## Hardware profile
 
-The supported profile is an ESP32-S3 with 16 MiB flash, 8 MiB PSRAM, and a 240 MHz CPU. Select an application partition of at least 1.5 MiB; **16M Flash (3MB APP/9.9MB FATFS)** is known to work. The default 1.2 MiB application partition is too small.
+The supported profile is **ESP32S3 Dev Module**, 16 MiB flash, 8 MiB OPI PSRAM, and a 240 MHz CPU. Select the project **Custom** partition table: it provides two 6.25 MiB OTA application slots and 3.375 MiB SPIFFS. The default 1.2 MiB application partition is too small.
 
 The default pin map and important electrical constraints are in [docs/hardware.md](docs/hardware.md). In particular, configure TFT_eSPI at the library level before compiling.
 
 ## Setup and build
 
-1. Install the ESP32 board support in the Arduino IDE and select an ESP32-S3 N16R8-compatible board profile with PSRAM enabled.
+1. Install Arduino-ESP32 3.3.8 and select **ESP32S3 Dev Module**, **16MB Flash**, **OPI PSRAM**, **240MHz**, and **Custom** partition scheme.
 2. Install these Arduino libraries through Library Manager:
    - `TFT_eSPI`
    - `PNGdec`
    - `JPEGDEC`
 3. Configure the `TFT_eSPI` library’s `User_Setup.h` with the ILI9488 8-bit parallel pin block in [docs/hardware.md](docs/hardware.md#tft_espi-configuration).
-4. Open `esp_media.ino` as the sketch, select the partition profile above, then build and upload. `build_opt.h` is automatically read by Arduino and supplies the project’s decoder include paths and PNG buffer setting.
+4. Run `tools/build_esp32s3.sh`, or open `esp_media.ino` with the exact profile above and build/upload. The script additionally enforces the real 6,553,600-byte application limit, which Arduino's generic Custom profile does not. `build_opt.h` is read automatically.
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
 
-The project vendors the remaining decoders under `third_party/`; they compile through the controlled wrappers in `src/vendor_shims/`. Do not add those upstream source trees directly to the Arduino library search path.
+The first upload after changing from the old 3 MB/9.9 MB FATFS scheme must flash the new partition table. Preferences/NVS remains at the same offset and is compatible. Contents of the old, now-unused internal FATFS region are not preserved; ESP Media user media remains on SD.
+
+The project vendors its remaining decoders and Stage 0 assistant dependencies under `third_party/`; they compile through controlled wrappers in `src/vendor_shims/`. Do not add those upstream source trees directly to the Arduino library search path.
 
 ## Project layout
 
 ```text
 esp_media.ino      hardware composition, screen registration, main loop
 build_opt.h        Arduino compiler options for bundled decoders
+partitions.csv     16 MiB dual-OTA application/SPIFFS layout
 src/app/           Navigator and screen stack
 src/core/          display, touch, battery, SPI lock, base Screen contract
 src/features/      user-visible screens grouped by capability

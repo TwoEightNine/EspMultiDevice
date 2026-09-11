@@ -16,7 +16,7 @@ This is intentional lightweight obfuscation, not authenticated encryption or sec
 
 ## Wi-Fi and time
 
-`WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. The Settings flow owns the UI; Home reflects connection state.
+`WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. Before Wi-Fi's first initialization it selects Arduino-ESP32 static RX/TX buffers: this uses fixed driver memory instead of fragmenting the internal heap required for TLS. Do not change this mode after Wi-Fi has started; Arduino requires the radio to be off first. The Settings flow owns the UI; Home reflects connection state.
 
 `TimeController` begins SNTP only while Wi-Fi is connected, marks time available after a valid epoch, and reports a fixed UTC+4 local clock. Change `UtcOffsetSeconds` if the product’s local-time requirement changes.
 
@@ -25,6 +25,10 @@ This is intentional lightweight obfuscation, not authenticated encryption or sec
 `MicController` captures INMP441 audio at 16 kHz on I2S port 0. Its optional physical power-switch sense line makes the recorder unavailable while the mic is off and stops a recording safely if power is removed. `SpeakerController` uses I2S port 1, starts muted, controls the amplifier enable pin, applies global volume, and keeps output buffering local to protect playback from filesystem/cache jitter.
 
 Recording and speaker playback never run concurrently because they share I2S clock and word-select pins. Stop/mute the relevant component before repurposing the bus.
+
+The Stage 0 `SecureWebSocketClient` is the future assistant's bounded WSS layer over `NetworkClientSecure`. It requires a trust store and never uses the browser's HTTPS compatibility mode. Its connection handshake directs temporary TLS allocations to PSRAM so the internal-heap largest block remains available; future session code must perform this synchronous operation in worker-backed, non-UI work.
+
+The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960-sample) frames. Its decoder is initialized explicitly for 16 or 24 kHz, with maximum output of 960 or 1,440 samples respectively. Codec state lives in PSRAM. This dependency foundation does not capture, stream, or play audio in normal firmware; a future assistant must continue to arbitrate the shared BCLK and WS lines half-duplex through the microphone and speaker controllers.
 
 `AudioSettings` persists the speaker volume using ESP32 Preferences. `WorkoutScreen` has configurable work/rest periods in five-second steps from 5 to 600 seconds and plays audible stage cues using the shared speaker and volume setting.
 

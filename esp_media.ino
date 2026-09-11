@@ -1,4 +1,11 @@
 #include <Arduino.h>
+
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
+
+#include "tests/assistant_dependency_probe/assistant_dependency_probe.ino"
+
+#endif
+
 #include <esp_system.h>
 
 #include "src/core/BatteryController.h"
@@ -34,6 +41,11 @@ static const uint8_t DISPLAY_ROTATION = 4;
 // Development-only diagnostic. Enable for three cold boots with a target card,
 // then restore false before normal use.
 static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
+// Volatile keeps the complete production image linked into the diagnostic size
+// measurement while selecting the isolated probe at runtime.
+static volatile bool RUN_ASSISTANT_DEPENDENCY_PROBE = true;
+#endif
 
 // Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
 static const int BATTERY_ADC_PIN = 3;
@@ -152,6 +164,13 @@ void updateTouch() {
 }
 
 void setup() {
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
+  if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
+    assistantDependencyProbeSetup();
+    return;
+  }
+#endif
+
   Serial.begin(SERIAL_BAUD);
 
   Serial.println(F("ESP Media starting..."));
@@ -320,6 +339,13 @@ void setup() {
 }
 
 void loop() {
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
+  if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
+    assistantDependencyProbeLoop();
+    return;
+  }
+#endif
+
   updateTouch();
 
   // Keep hot-swap state current even while a screen that does not directly

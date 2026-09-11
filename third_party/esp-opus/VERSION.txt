@@ -1,0 +1,4 @@
+78/esp-opus 1.0.5
+Repository commit: 5854a9f7de06ab3505b8fe6e8943db581c2cbe70
+Source: https://components.espressif.com/components/78/esp-opus/versions/1.0.5
+Archive SHA-256: 216307d9acdc1f0dcd43fe4f5a0307a75760b2c4356f6756bc573cd912c49625

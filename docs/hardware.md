@@ -2,7 +2,9 @@
 
 ## Required board profile
 
-Use an ESP32-S3 with 16 MiB flash, 8 MiB PSRAM, 240 MHz CPU, and an application partition of at least 1.5 MiB. **16M Flash (3MB APP/9.9MB FATFS)** is the validated N16R8 choice. GIF playback needs at least three 480×320 RGB565 PSRAM frames plus a 512 KiB reserve.
+Use **ESP32S3 Dev Module** with 16 MiB flash, 8 MiB OPI PSRAM, a 240 MHz CPU, and the project **Custom** partition scheme. `partitions.csv` provides two 6.25 MiB (`0x640000`) OTA application slots, 3.375 MiB (`0x360000`) SPIFFS, and a 64 KiB core-dump partition. GIF playback needs at least three 480×320 RGB565 PSRAM frames plus a 512 KiB reserve.
+
+The NVS partition remains at offset `0x9000` with size `0x5000`, and OTA data remains at `0xe000`. Existing Arduino Preferences/NVS values are therefore compatible with the new layout. Changing from the former 3 MB/9.9 MB FATFS layout still requires flashing the partition table; data in the old internal FATFS region is not preserved. ESP Media stores user media on SD and does not use that internal FATFS.
 
 Keep normal peripherals within GPIO 0–21, 35–42, and 45–48. Avoid GPIO 0, 19/20, and 45/46 unless the exact board documents them as safe; they commonly affect bootstrapping or USB.
 

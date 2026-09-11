@@ -17,6 +17,11 @@ WiFiController::WiFiController()
 void WiFiController::begin() {
   // Keep the radio off during display/storage startup; the splash screen
   // enables it after Home has finished its first render.
+  // The default Arduino profile allocates Wi-Fi RX/TX buffers dynamically
+  // from internal heap. Static buffers avoid permanently fragmenting the
+  // largest internal block needed by TLS and assistant audio control paths.
+  // This must be selected before the first WiFi.mode() initialization.
+  WiFi.useStaticBuffers(true);
   _enabled = false;
   _reconnectAllowed = false;
   _scanInProgress = false;

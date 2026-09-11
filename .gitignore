@@ -1,2 +1,4 @@
 .DS_Store
 .idea
+tests/assistant_dependency_probe/ProbeConfig.h
+tests/assistant_dependency_probe/generated/

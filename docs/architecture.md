@@ -125,6 +125,25 @@ and waits for any active decoder through successive non-blocking `tick()` calls.
 The shared `BrowserTransport` mutex remains the final serialization boundary for
 page and preview HTTP transfers.
 
+## Assistant dependency boundary
+
+Stage 0 adds no assistant screen, session controller, Xiaozhi activation, or
+Xiaozhi network traffic. `SecureWebSocketClient` is the future assistant's
+narrow synchronous transport adapter: it implements bounded RFC 6455 framing
+over `NetworkClientSecure`, accepts a host/port/path endpoint, bounded custom
+headers, and a mandatory PEM CA or ESP certificate bundle; it exposes only
+connect, poll, text/binary send, close, state, and copied bounded events. Its
+connection handshake puts temporary TLS allocations in PSRAM. It never uses
+`BrowserTransport`, whose browser-specific HTTPS compatibility behavior is
+unsuitable for authenticated assistant traffic.
+
+`OpusCodec` is the future audio wire-format boundary. It accepts exactly 960
+mono PCM16 samples for each 60 ms, 16 kHz encode operation, caps packets at the
+Opus 1,275-byte maximum, and decodes one packet into a bounded 960-sample 16 kHz
+or 1,440-sample 24 kHz output. Codec state is allocated in PSRAM. Stage 1 must
+keep microphone capture and speaker playback half-duplex and place any
+network/codec loop on non-UI work rather than blocking `Screen::tick()`.
+
 ## File and source boundaries
 
 ```text
