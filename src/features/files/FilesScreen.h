@@ -128,6 +128,8 @@ private:
   bool _pendingRenameDirectory;
   String _renameSourcePath;
   String _renameTargetPath;
+  String _deleteSourcePath;
+  bool _deleteSourceDirectory;
   String _message;
   uint32_t _messageUntilMs;
   uint16_t _page;
@@ -210,6 +212,7 @@ private:
   void collectThumbnailResults();
   void clearThumbnails();
   void invalidateThumbnail(const String &path);
+  void invalidateThumbnailsAtOrBelow(const String &path);
   void ensureRowCapacity(uint8_t capacity);
   void layoutPaging();
   uint16_t firstEntryForPage(uint16_t page) const;
@@ -224,6 +227,16 @@ private:
   DirectoryCache *allocateCacheSlot();
   void releaseCache(DirectoryCache &cache);
   void clearCache();
+  void removeCachedEntry(const String &path);
+  void renameCachedEntry(const String &sourcePath, const String &targetPath, bool directory);
+  void discardCachedDirectory(const String &path);
+  void discardCachedDirectoriesAtOrBelow(const String &path);
+  void rebaseCachedDirectoryPaths(const String &sourcePath, const String &targetPath);
+  void applyRemovedPathToCache(const String &path, bool directory);
+  void applyRenamedPathToCache(const String &sourcePath, const String &targetPath, bool directory);
+  void finishListingMutation();
+  static String parentPathFor(const String &path);
+  static bool isPathAtOrBelow(const String &path, const String &ancestor);
   static int compareEntries(const Entry &left, const Entry &right);
   static int naturalCompare(const String &left, const String &right);
   static char folded(char value);
@@ -258,7 +271,6 @@ private:
   void updateMoveDiscardDestinationCacheTemps();
   void finishOperation(bool success, const String &message);
   void failMove(const String &message);
-  void refreshListing();
   void clearTasks();
   bool appendTask(const String &source, const String &target, bool directory, bool expanded = false);
   bool expandDeleteDirectory(const PathTask &task);

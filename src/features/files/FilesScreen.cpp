@@ -617,6 +617,8 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _pendingRenameDirectory(false),
     _renameSourcePath(),
     _renameTargetPath(),
+    _deleteSourcePath(),
+    _deleteSourceDirectory(false),
     _message(),
     _messageUntilMs(0),
     _page(0),
@@ -1226,6 +1228,15 @@ void FilesScreen::invalidateThumbnail(const String &path) {
   *thumbnail = {"", nullptr, 0, 0, false, false, false};
 }
 
+void FilesScreen::invalidateThumbnailsAtOrBelow(const String &path) {
+  for (uint8_t i = 0; i < MaxCachedThumbnails; i++) {
+    Thumbnail &thumbnail = _thumbnails[i];
+    if (!thumbnail.used || !isPathAtOrBelow(thumbnail.path, path)) continue;
+    if (thumbnail.pixels) free(thumbnail.pixels);
+    thumbnail = {"", nullptr, 0, 0, false, false, false};
+  }
+}
+
 void FilesScreen::ensureRowCapacity(uint8_t capacity) {
   if (capacity == 0 || capacity == _rowCapacity) return;
   Row *rows = new Row[capacity];
@@ -1454,6 +1465,142 @@ void FilesScreen::clearCache() {
   cancelDirectoryScan();
   for (uint8_t i = 0; i < MaxCachedDirectories; i++) releaseCache(_cache[i]);
   _listing = nullptr;
+}
+
+String FilesScreen::parentPathFor(const String &path) {
+  if (path.length() == 0 || path == "/") return "/";
+  const int16_t slash = path.lastIndexOf('/');
+  return slash <= 0 ? "/" : path.substring(0, slash);
+}
+
+bool FilesScreen::isPathAtOrBelow(const String &path, const String &ancestor) {
+  if (path == ancestor) return true;
+  if (ancestor == "/") return path.startsWith("/");
+  return path.startsWith(ancestor + "/");
+}
+
+void FilesScreen::removeCachedEntry(const String &path) {
+  DirectoryCache *cache = findCached(parentPathFor(path));
+  if (!cache) return;
+  // A FAT enumeration can change underneath an open directory handle. A
+  // partial cache therefore cannot be repaired reliably from one mutation.
+  if (!cache->complete) {
+    releaseCache(*cache);
+    return;
+  }
+
+  const String storageName = displayName(path);
+  for (uint16_t index = 0; index < cache->count; index++) {
+    if (cache->entries[index].storageName != storageName) continue;
+    for (uint16_t shifted = index + 1; shifted < cache->count; shifted++) {
+      cache->entries[shifted - 1] = cache->entries[shifted];
+    }
+    cache->count--;
+    cache->entries[cache->count] = {"", "", FileFormats::Format::Unknown, false};
+    cache->lastUsed = millis();
+    return;
+  }
+}
+
+void FilesScreen::renameCachedEntry(const String &sourcePath, const String &targetPath, bool directory) {
+  DirectoryCache *cache = findCached(parentPathFor(sourcePath));
+  if (!cache) return;
+  if (!cache->complete) {
+    releaseCache(*cache);
+    return;
+  }
+
+  const String sourceName = displayName(sourcePath);
+  uint16_t sourceIndex = InvalidEntryIndex;
+  for (uint16_t index = 0; index < cache->count; index++) {
+    if (cache->entries[index].storageName == sourceName) {
+      sourceIndex = index;
+      break;
+    }
+  }
+  if (sourceIndex == InvalidEntryIndex) return;
+
+  Entry renamed = cache->entries[sourceIndex];
+  renamed.storageName = displayName(targetPath);
+  String decryptedName = renamed.storageName;
+  const String parent = parentPathFor(targetPath);
+  if (_secretMode && _secretStorage.isSecretPath(parent) &&
+      !_secretStorage.decryptName(renamed.storageName, decryptedName)) {
+    decryptedName = "?";
+  }
+  renamed.name = _secretMode && _secretStorage.isSecretPath(parent)
+    ? _secretStorage.displayName(decryptedName) : decryptedName;
+  renamed.directory = directory;
+  renamed.format = directory ? FileFormats::Format::Unknown : FileFormats::fromPath(decryptedName);
+
+  for (uint16_t shifted = sourceIndex + 1; shifted < cache->count; shifted++) {
+    cache->entries[shifted - 1] = cache->entries[shifted];
+  }
+  cache->count--;
+  uint16_t targetIndex = cache->count;
+  while (targetIndex > 0 && compareEntries(renamed, cache->entries[targetIndex - 1]) < 0) {
+    cache->entries[targetIndex] = cache->entries[targetIndex - 1];
+    targetIndex--;
+  }
+  cache->entries[targetIndex] = renamed;
+  cache->count++;
+  cache->lastUsed = millis();
+}
+
+void FilesScreen::discardCachedDirectory(const String &path) {
+  DirectoryCache *cache = findCached(path);
+  if (cache) releaseCache(*cache);
+}
+
+void FilesScreen::discardCachedDirectoriesAtOrBelow(const String &path) {
+  for (uint8_t i = 0; i < MaxCachedDirectories; i++) {
+    if (_cache[i].used && isPathAtOrBelow(_cache[i].path, path)) releaseCache(_cache[i]);
+  }
+}
+
+void FilesScreen::rebaseCachedDirectoryPaths(const String &sourcePath, const String &targetPath) {
+  // Complete descendants remain accurate after a directory rename because
+  // their entries are relative to their own directory path. An incomplete
+  // scan is instead discarded so it can be read from the renamed location.
+  for (uint8_t i = 0; i < MaxCachedDirectories; i++) {
+    DirectoryCache &cache = _cache[i];
+    if (cache.used && isPathAtOrBelow(cache.path, sourcePath) && !cache.complete) releaseCache(cache);
+  }
+  for (uint8_t i = 0; i < MaxCachedDirectories; i++) {
+    DirectoryCache &cache = _cache[i];
+    if (!cache.used || !isPathAtOrBelow(cache.path, sourcePath)) continue;
+    cache.path = targetPath + cache.path.substring(sourcePath.length());
+    cache.lastUsed = millis();
+  }
+}
+
+void FilesScreen::applyRemovedPathToCache(const String &path, bool directory) {
+  if (directory) discardCachedDirectoriesAtOrBelow(path);
+  removeCachedEntry(path);
+  if (directory) invalidateThumbnailsAtOrBelow(path);
+  else invalidateThumbnail(path);
+}
+
+void FilesScreen::applyRenamedPathToCache(const String &sourcePath, const String &targetPath, bool directory) {
+  renameCachedEntry(sourcePath, targetPath, directory);
+  if (directory) {
+    rebaseCachedDirectoryPaths(sourcePath, targetPath);
+    invalidateThumbnailsAtOrBelow(sourcePath);
+  } else {
+    invalidateThumbnail(sourcePath);
+  }
+}
+
+void FilesScreen::finishListingMutation() {
+  // A mutation can discard only the active incomplete cache. Recreate that
+  // one listing; all unrelated completed LRU entries stay available.
+  if (_sdMounted && !_listing && !ensureListing(_currentPath)) showMessage(F("Unable to list folder"));
+  if (_listing) {
+    _listing->lastUsed = millis();
+    updatePageCount();
+  }
+  _listingDirty = false;
+  _lastListingDrawMs = millis();
 }
 
 char FilesScreen::folded(char value) {
@@ -1732,7 +1879,9 @@ void FilesScreen::applyRename(const String &newName) {
     return;
   }
   showMessage(F("Renamed"));
-  refreshListing();
+  applyRenamedPathToCache(_pendingRenamePath, target, true);
+  finishListingMutation();
+  draw();
 }
 
 void FilesScreen::beginDeleteHold() {
@@ -1775,6 +1924,8 @@ void FilesScreen::startDeleteSelected() {
     draw();
     return;
   }
+  _deleteSourcePath = path;
+  _deleteSourceDirectory = directory;
   if (directory) {
     _operationState = OperationState::Deleting;
   } else {
@@ -2219,18 +2370,21 @@ void FilesScreen::failMove(const String &message) {
   finishOperation(false, message);
 }
 
-void FilesScreen::refreshListing() {
-  clearCache();
-  clearThumbnails();
-  _listingGeneration++;
-  if (_sdMounted && !ensureListing(_currentPath)) showMessage(F("Unable to list folder"));
-  draw();
-}
-
 void FilesScreen::finishOperation(bool success, const String &message) {
-  (void)success;
   if (_moveSource) _moveSource.close();
   if (_moveTarget) _moveTarget.close();
+  if (success) {
+    if (_renameSourcePath.length()) {
+      applyRenamedPathToCache(_renameSourcePath, _renameTargetPath, false);
+    } else if (_deleteSourcePath.length()) {
+      applyRemovedPathToCache(_deleteSourcePath, _deleteSourceDirectory);
+    } else if (_moveSourcePath.length()) {
+      applyRemovedPathToCache(_moveSourcePath, _moveSourceDirectory);
+      // Current move flows do not normally retain a destination listing, but
+      // never expose a stale cached destination if a future flow does.
+      discardCachedDirectory(parentPathFor(_moveTargetPath));
+    }
+  }
   _operationState = OperationState::None;
   clearTasks();
   _moveSourcePath = "";
@@ -2246,10 +2400,13 @@ void FilesScreen::finishOperation(bool success, const String &message) {
   _moveCachesCleaned = false;
   _renameSourcePath = "";
   _renameTargetPath = "";
+  _deleteSourcePath = "";
+  _deleteSourceDirectory = false;
   _cacheCleanup = MediaCache::Cleanup();
   _mediaCache.abandonRelocation(_cacheRelocation);
   showMessage(message);
-  refreshListing();
+  if (success) finishListingMutation();
+  draw();
 }
 
 void FilesScreen::showMessage(const String &message, uint32_t durationMs) {
@@ -2277,6 +2434,8 @@ void FilesScreen::handleSdCardEvent(SdCardEvent event) {
     _moveCachesCleaned = false;
     _renameSourcePath = "";
     _renameTargetPath = "";
+    _deleteSourcePath = "";
+    _deleteSourceDirectory = false;
     _cacheCleanup = MediaCache::Cleanup();
     _mediaCache.abandonRelocation(_cacheRelocation);
     showMessage(F("SD card removed; operation stopped"), 3000);
