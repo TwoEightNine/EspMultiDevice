@@ -13,16 +13,17 @@ public:
 
   void begin();
 
-  // Takes one three-sample median measurement, applies voltage stabilization,
-  // and returns the corresponding cell voltage and charge-curve percentage.
+  // Takes one three-sample median measurement. The returned value is retained
+  // at the lowest median voltage seen during this controller session, and its
+  // percentage is derived from that same returned voltage.
   BatteryReading read();
 
 private:
   static const uint8_t SampleCount = 3;
 
   int _adcPin;
-  bool _hasFilteredVoltage;
-  float _filteredVoltage;
+  bool _hasReturnedVoltage;
+  float _returnedVoltage;
 
   float readMedianVoltage();
   uint8_t percentageForVoltage(float voltage) const;

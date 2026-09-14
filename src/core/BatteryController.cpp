@@ -7,28 +7,33 @@ struct ChargePoint {
   uint8_t percentage;
 };
 
-const ChargePoint RestingChargeCurve[] = {
-  {3.20f, 0},
-  {3.50f, 5},
-  {3.60f, 10},
-  {3.70f, 20},
-  {3.80f, 40},
-  {3.90f, 60},
-  {4.00f, 80},
-  {4.10f, 90},
-  {4.20f, 100},
+// One point per 30-minute observation from the measured discharge session.
+// Percentages progress uniformly through that session: 4.00 V is full and
+// 3.30 V is empty. Values between points use linear interpolation.
+const ChargePoint DischargeCurve[] = {
+  {3.30f, 0},
+  {3.35f, 9},
+  {3.45f, 18},
+  {3.55f, 27},
+  {3.60f, 36},
+  {3.64f, 45},
+  {3.68f, 55},
+  {3.7025f, 64},
+  {3.75f, 73},
+  {3.81f, 82},
+  {3.90f, 91},
+  {4.00f, 100},
 };
 
-const uint8_t ChargePointCount = sizeof(RestingChargeCurve) / sizeof(RestingChargeCurve[0]);
+const uint8_t ChargePointCount = sizeof(DischargeCurve) / sizeof(DischargeCurve[0]);
 const float DividerMultiplier = 2.0f;
-const float VoltageEmaNewSampleWeight = 0.25f;
 
 }  // namespace
 
 BatteryController::BatteryController(int adcPin)
   : _adcPin(adcPin),
-    _hasFilteredVoltage(false),
-    _filteredVoltage(0.0f) {
+    _hasReturnedVoltage(false),
+    _returnedVoltage(0.0f) {
 }
 
 void BatteryController::begin() {
@@ -62,30 +67,30 @@ float BatteryController::readMedianVoltage() {
 
 BatteryReading BatteryController::read() {
   const float medianVoltage = readMedianVoltage();
-  if (!_hasFilteredVoltage) {
-    _filteredVoltage = medianVoltage;
-    _hasFilteredVoltage = true;
-  } else {
-    _filteredVoltage = VoltageEmaNewSampleWeight * medianVoltage +
-                       (1.0f - VoltageEmaNewSampleWeight) * _filteredVoltage;
+  if (!_hasReturnedVoltage || medianVoltage < _returnedVoltage) {
+    _returnedVoltage = medianVoltage;
+    _hasReturnedVoltage = true;
   }
 
-  return {_filteredVoltage, percentageForVoltage(_filteredVoltage)};
+  // Derive percentage from precisely the voltage returned to the caller.
+  // The strictly ascending curve and retained voltage keep both fields from
+  // increasing for the lifetime of this controller instance.
+  return {_returnedVoltage, percentageForVoltage(_returnedVoltage)};
 }
 
 uint8_t BatteryController::percentageForVoltage(float measuredVoltage) const {
-  if (measuredVoltage <= RestingChargeCurve[0].voltage) {
-    return RestingChargeCurve[0].percentage;
+  if (measuredVoltage <= DischargeCurve[0].voltage) {
+    return DischargeCurve[0].percentage;
   }
 
   for (uint8_t i = 1; i < ChargePointCount; ++i) {
-    const ChargePoint &lower = RestingChargeCurve[i - 1];
-    const ChargePoint &upper = RestingChargeCurve[i];
+    const ChargePoint &lower = DischargeCurve[i - 1];
+    const ChargePoint &upper = DischargeCurve[i];
     if (measuredVoltage <= upper.voltage) {
       const float position = (measuredVoltage - lower.voltage) / (upper.voltage - lower.voltage);
       return (uint8_t)(lower.percentage + position * (upper.percentage - lower.percentage) + 0.5f);
     }
   }
 
-  return RestingChargeCurve[ChargePointCount - 1].percentage;
+  return DischargeCurve[ChargePointCount - 1].percentage;
 }

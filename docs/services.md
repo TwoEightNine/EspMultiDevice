@@ -36,6 +36,21 @@ The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960
 
 The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
 
-The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. Home refreshes the controller every five seconds. Each refresh takes the median of exactly three ADC samples, then applies an exponential moving average with 25% weight for the new median sample; the first reading is unfiltered. The battery glyph displays the resulting cell voltage as `#.#V` and retains percentage-derived fill colors. The resting-curve percentage is calculated from the filtered voltage and may increase or decrease during one controller runtime. Under Wi-Fi/display/speaker load the resting-cell curve can report a lower transient percentage, but the filtered display reduces brief fluctuations.
+The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. Home refreshes the controller every five seconds. Each refresh takes the median of exactly three ADC samples. `BatteryController` retains the lowest median voltage seen during its in-memory session, so the voltage and percentage it returns never increase until the controller is recreated (normally at restart). The percentage is calculated from that same returned voltage, using linear interpolation through the measured 30-minute discharge checkpoints below; it is not calculated from a separate raw or inferred battery value. Home displays the percentage, without a `%` suffix, inside the battery glyph. Its battery fill is green at 66% and above, yellow from 33% through 65%, and red below 33%.
+
+| Voltage | Percentage |
+| ---: | ---: |
+| 4.000 V | 100% |
+| 3.900 V | 91% |
+| 3.810 V | 82% |
+| 3.750 V | 73% |
+| 3.7025 V | 64% |
+| 3.680 V | 55% |
+| 3.640 V | 45% |
+| 3.600 V | 36% |
+| 3.550 V | 27% |
+| 3.450 V | 18% |
+| 3.350 V | 9% |
+| 3.300 V | 0% |
 
 At boot the serial log (115200 baud) prints reset cause, CPU frequency, flash bytes, and total/free/largest PSRAM block. A reported brownout reset indicates supply sag rather than an application exception.

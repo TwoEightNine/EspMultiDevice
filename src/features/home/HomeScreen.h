@@ -77,7 +77,7 @@ private:
   void drawApps();
   void drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY);
   uint16_t batteryFillColor(uint8_t percentage) const;
-  String batteryVoltageText(float voltage) const;
+  String batteryPercentageText(uint8_t percentage) const;
   String clockText(const struct tm &localTime) const;
   String truncateLabel(const String &label, int16_t maxWidth);
   void setSdState(bool mounted);

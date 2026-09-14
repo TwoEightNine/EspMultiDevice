@@ -217,7 +217,7 @@ void HomeScreen::drawBattery() {
   tft.drawRect(x, y, 40, 16, TFT_WHITE);
   tft.fillRect(x + 40, y + 5, 3, 6, TFT_WHITE);
   tft.fillRect(x + 1, y + 1, 38, 14, fill);
-  UiText::draw(tft, batteryVoltageText(_batteryVoltage), x + 20, y + 8, TFT_WHITE, fill,
+  UiText::draw(tft, String(_batteryPercent), x + 20, y + 8, TFT_WHITE, fill,
                UiText::Size::Compact, MC_DATUM);
 }
 
@@ -288,12 +288,12 @@ String HomeScreen::clockText(const struct tm &localTime) const {
 }
 
 uint16_t HomeScreen::batteryFillColor(uint8_t percentage) const {
-  return percentage <= 20 ? COLOR_BATTERY_RED :
-         (percentage <= 50 ? COLOR_BATTERY_YELLOW : COLOR_BATTERY_GREEN);
+  return percentage >= 66 ? COLOR_BATTERY_GREEN :
+         (percentage >= 33 ? COLOR_BATTERY_YELLOW : COLOR_BATTERY_RED);
 }
 
-String HomeScreen::batteryVoltageText(float voltage) const {
-  return String(voltage, 1) + "V";
+String HomeScreen::batteryPercentageText(uint8_t percentage) const {
+  return String(percentage);
 }
 
 String HomeScreen::truncateLabel(const String &label, int16_t maxWidth) {
@@ -317,11 +317,11 @@ void HomeScreen::setWifiState(bool connected) {
 }
 
 void HomeScreen::setBatteryReading(const BatteryReading &reading) {
-  const String previousText = batteryVoltageText(_batteryVoltage);
+  const String previousPercentageText = batteryPercentageText(_batteryPercent);
   const uint16_t previousFill = batteryFillColor(_batteryPercent);
-  const String nextText = batteryVoltageText(reading.voltage);
+  const String nextPercentageText = batteryPercentageText(reading.percentage);
   const uint16_t nextFill = batteryFillColor(reading.percentage);
-  if (previousText == nextText && previousFill == nextFill) {
+  if (previousPercentageText == nextPercentageText && previousFill == nextFill) {
     return;
   }
   _batteryVoltage = reading.voltage;
