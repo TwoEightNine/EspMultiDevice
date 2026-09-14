@@ -56,6 +56,7 @@ private:
   BatteryController &_battery;
   bool _sdMounted;
   bool _wifiConnected;
+  float _batteryVoltage;
   uint8_t _batteryPercent;
   bool _lastTouchDown;
   bool _filesPressPending;
@@ -75,11 +76,13 @@ private:
   void drawBattery();
   void drawApps();
   void drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY);
+  uint16_t batteryFillColor(uint8_t percentage) const;
+  String batteryVoltageText(float voltage) const;
   String clockText(const struct tm &localTime) const;
   String truncateLabel(const String &label, int16_t maxWidth);
   void setSdState(bool mounted);
   void setWifiState(bool connected);
-  void setBatteryPercent(uint8_t percentage);
+  void setBatteryReading(const BatteryReading &reading);
   void refreshSdState();
   void handleSdCardEvent(SdCardEvent event);
 };

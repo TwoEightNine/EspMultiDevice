@@ -28,6 +28,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _battery(battery),
     _sdMounted(false),
     _wifiConnected(false),
+    _batteryVoltage(0.0f),
     _batteryPercent(0),
     _lastTouchDown(false),
     _filesPressPending(false),
@@ -47,7 +48,9 @@ HomeScreen::HomeScreen(Navigator &navigator,
 void HomeScreen::onEnter() {
   refreshSdState();
   _wifiConnected = _wifi.isConnected();
-  _batteryPercent = _battery.percentage();
+  const BatteryReading batteryReading = _battery.read();
+  _batteryVoltage = batteryReading.voltage;
+  _batteryPercent = batteryReading.percentage;
   _lastBatteryCheckMs = millis();
   _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
@@ -123,7 +126,7 @@ void HomeScreen::tick(uint32_t nowMs) {
   }
 
   if (nowMs - _lastBatteryCheckMs >= BatteryRefreshIntervalMs) {
-    setBatteryPercent(_battery.percentage());
+    setBatteryReading(_battery.read());
     _lastBatteryCheckMs = nowMs;
   }
 
@@ -187,7 +190,7 @@ void HomeScreen::drawClock(bool force) {
 
 void HomeScreen::drawSdIcon() {
   TFT_eSPI &tft = _display.tft();
-  const int16_t x = _display.width() - 82;
+  const int16_t x = _display.width() - 90;
   const int16_t y = 4;
   const uint16_t color = _sdMounted ? StatusActiveColor : StatusInactiveColor;
   tft.fillRect(x, y, ic_sd_card_width, ic_sd_card_height, TFT_BLACK);
@@ -197,7 +200,7 @@ void HomeScreen::drawSdIcon() {
 
 void HomeScreen::drawWifiIcon() {
   TFT_eSPI &tft = _display.tft();
-  const int16_t x = _display.width() - 58;
+  const int16_t x = _display.width() - 66;
   const int16_t y = 4;
   const uint16_t color = _wifiConnected ? StatusActiveColor : StatusInactiveColor;
   tft.fillRect(x, y, ic_wifi_width, ic_wifi_height, TFT_BLACK);
@@ -207,14 +210,14 @@ void HomeScreen::drawWifiIcon() {
 
 void HomeScreen::drawBattery() {
   TFT_eSPI &tft = _display.tft();
-  const int16_t x = _display.width() - 38;
+  const int16_t x = _display.width() - 46;
   const int16_t y = 4;
-  uint16_t fill = _batteryPercent <= 20 ? COLOR_BATTERY_RED : (_batteryPercent <= 50 ? COLOR_BATTERY_YELLOW : COLOR_BATTERY_GREEN);
-  tft.fillRect(x, y, 38, 16, TFT_BLACK);
-  tft.drawRect(x, y, 32, 16, TFT_WHITE);
-  tft.fillRect(x + 32, y + 5, 3, 6, TFT_WHITE);
-  tft.fillRect(x + 1, y + 1, 30, 14, fill);
-  UiText::draw(tft, String(_batteryPercent), x + 16, y + 8, TFT_WHITE, fill,
+  const uint16_t fill = batteryFillColor(_batteryPercent);
+  tft.fillRect(x, y, 46, 16, TFT_BLACK);
+  tft.drawRect(x, y, 40, 16, TFT_WHITE);
+  tft.fillRect(x + 40, y + 5, 3, 6, TFT_WHITE);
+  tft.fillRect(x + 1, y + 1, 38, 14, fill);
+  UiText::draw(tft, batteryVoltageText(_batteryVoltage), x + 20, y + 8, TFT_WHITE, fill,
                UiText::Size::Compact, MC_DATUM);
 }
 
@@ -284,6 +287,15 @@ String HomeScreen::clockText(const struct tm &localTime) const {
   return String(buffer);
 }
 
+uint16_t HomeScreen::batteryFillColor(uint8_t percentage) const {
+  return percentage <= 20 ? COLOR_BATTERY_RED :
+         (percentage <= 50 ? COLOR_BATTERY_YELLOW : COLOR_BATTERY_GREEN);
+}
+
+String HomeScreen::batteryVoltageText(float voltage) const {
+  return String(voltage, 1) + "V";
+}
+
 String HomeScreen::truncateLabel(const String &label, int16_t maxWidth) {
   return UiText::ellipsize(label, maxWidth, UiText::Size::Compact);
 }
@@ -304,11 +316,16 @@ void HomeScreen::setWifiState(bool connected) {
   drawWifiIcon();
 }
 
-void HomeScreen::setBatteryPercent(uint8_t percentage) {
-  if (_batteryPercent == percentage) {
+void HomeScreen::setBatteryReading(const BatteryReading &reading) {
+  const String previousText = batteryVoltageText(_batteryVoltage);
+  const uint16_t previousFill = batteryFillColor(_batteryPercent);
+  const String nextText = batteryVoltageText(reading.voltage);
+  const uint16_t nextFill = batteryFillColor(reading.percentage);
+  if (previousText == nextText && previousFill == nextFill) {
     return;
   }
-  _batteryPercent = percentage;
+  _batteryVoltage = reading.voltage;
+  _batteryPercent = reading.percentage;
   drawBattery();
 }
 

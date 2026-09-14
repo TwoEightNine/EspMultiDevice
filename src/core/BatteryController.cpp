@@ -21,13 +21,14 @@ const ChargePoint RestingChargeCurve[] = {
 
 const uint8_t ChargePointCount = sizeof(RestingChargeCurve) / sizeof(RestingChargeCurve[0]);
 const float DividerMultiplier = 2.0f;
+const float VoltageEmaNewSampleWeight = 0.25f;
 
 }  // namespace
 
 BatteryController::BatteryController(int adcPin)
   : _adcPin(adcPin),
-    _hasReportedPercentage(false),
-    _reportedPercentage(0) {
+    _hasFilteredVoltage(false),
+    _filteredVoltage(0.0f) {
 }
 
 void BatteryController::begin() {
@@ -35,10 +36,6 @@ void BatteryController::begin() {
   analogReadResolution(12);
   // The 100 kΩ / 100 kΩ divider reaches 2.1 V at a fully charged 4.2 V cell.
   analogSetPinAttenuation(_adcPin, ADC_11db);
-}
-
-float BatteryController::voltage() {
-  return readMedianVoltage();
 }
 
 float BatteryController::readMedianVoltage() {
@@ -63,18 +60,17 @@ float BatteryController::readMedianVoltage() {
   return millivolts[SampleCount / 2] * DividerMultiplier / 1000.0f;
 }
 
-uint8_t BatteryController::percentage() {
-  uint8_t measuredPercentage = percentageForVoltage(voltage());
-  if (!_hasReportedPercentage) {
-    _reportedPercentage = measuredPercentage;
-    _hasReportedPercentage = true;
-  } else if (measuredPercentage < _reportedPercentage) {
-    // Runtime charging support is not available yet: never raise a displayed
-    // percentage until the controller is recreated at the next boot.
-    _reportedPercentage = measuredPercentage;
+BatteryReading BatteryController::read() {
+  const float medianVoltage = readMedianVoltage();
+  if (!_hasFilteredVoltage) {
+    _filteredVoltage = medianVoltage;
+    _hasFilteredVoltage = true;
+  } else {
+    _filteredVoltage = VoltageEmaNewSampleWeight * medianVoltage +
+                       (1.0f - VoltageEmaNewSampleWeight) * _filteredVoltage;
   }
 
-  return _reportedPercentage;
+  return {_filteredVoltage, percentageForVoltage(_filteredVoltage)};
 }
 
 uint8_t BatteryController::percentageForVoltage(float measuredVoltage) const {
