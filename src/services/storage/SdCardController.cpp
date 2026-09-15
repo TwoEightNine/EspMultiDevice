@@ -5,6 +5,11 @@
 #include <SPI.h>
 #include <string.h>
 
+#include <sd_diskio.h>
+extern "C" {
+#include <diskio.h>
+}
+
 #include "../../core/SpiBusLock.h"
 
 namespace {
@@ -43,6 +48,10 @@ SdCardController::SdCardController(int sckPin,
     _cardDetectPin(cardDetectPin),
     _cardDetectActiveLow(cardDetectActiveLow),
     _mounted(false),
+    _owner(SdCardOwner::None),
+    _rawDrive(0xff),
+    _rawBlockCount(0),
+    _rawBlockSize(0),
     _lastMountAttemptMs(0),
     _nextMountAttemptMs(0),
     _lastHealthCheckMs(0),
@@ -55,6 +64,10 @@ bool SdCardController::begin() {
 }
 
 void SdCardController::update() {
+  if (_owner == SdCardOwner::UsbHost) {
+    return;
+  }
+
   uint32_t now = millis();
   bool present = isCardPresent();
 
@@ -95,7 +108,7 @@ SdCardEvent SdCardController::takeEvent() {
 }
 
 bool SdCardController::isMounted() const {
-  return _mounted;
+  return _mounted && _owner == SdCardOwner::Device;
 }
 
 bool SdCardController::isCardPresent() const {
@@ -105,6 +118,171 @@ bool SdCardController::isCardPresent() const {
 
   int value = digitalRead(_cardDetectPin);
   return _cardDetectActiveLow ? value == LOW : value == HIGH;
+}
+
+SdCardOwner SdCardController::owner() const {
+  return _owner;
+}
+
+bool SdCardController::beginUsbExport() {
+  if (_owner == SdCardOwner::UsbHost) {
+    return _rawDrive != 0xff && _rawBlockCount > 0 && _rawBlockSize == 512;
+  }
+  if (!_mounted || _owner != SdCardOwner::Device) {
+    return false;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(2000))) {
+    return false;
+  }
+
+  // Drop every FatFs/VFS structure before the host can access sector zero.
+  // The raw driver is then initialized without mounting a local filesystem,
+  // so there can be only one FAT owner during the USB session.
+  SD.end();
+  _mounted = false;
+  _owner = SdCardOwner::None;
+  _pendingEvent = SdCardEvent::None;
+
+  SPI.end();
+  delay(10);
+  configurePins();
+  SPI.begin(_sckPin, _misoPin, _mosiPin, _csPin);
+
+  _rawDrive = sdcard_init(_csPin, &SPI, SpiFrequency);
+  bool ready = _rawDrive != 0xff &&
+               (disk_initialize(_rawDrive) & STA_NOINIT) == 0;
+  if (ready) {
+    _rawBlockCount = sdcard_num_sectors(_rawDrive);
+    _rawBlockSize = static_cast<uint16_t>(sdcard_sector_size(_rawDrive));
+    ready = _rawBlockCount > 0 && _rawBlockSize == 512;
+  }
+
+  if (!ready) {
+    if (_rawDrive != 0xff) {
+      sdcard_uninit(_rawDrive);
+    }
+    _rawDrive = 0xff;
+    _rawBlockCount = 0;
+    _rawBlockSize = 0;
+    SpiBusLock::unlock();
+    return false;
+  }
+
+  _owner = SdCardOwner::UsbHost;
+  SpiBusLock::unlock();
+  return true;
+}
+
+void SdCardController::endUsbExport() {
+  if (_rawDrive != 0xff) {
+    if (SpiBusLock::lock(pdMS_TO_TICKS(2000))) {
+      sdcard_uninit(_rawDrive);
+      SpiBusLock::unlock();
+    }
+  }
+  _rawDrive = 0xff;
+  _rawBlockCount = 0;
+  _rawBlockSize = 0;
+  _mounted = false;
+  _owner = SdCardOwner::None;
+}
+
+bool SdCardController::isUsbExportActive() const {
+  return _owner == SdCardOwner::UsbHost && _rawDrive != 0xff;
+}
+
+uint32_t SdCardController::usbBlockCount() const {
+  return isUsbExportActive() ? _rawBlockCount : 0;
+}
+
+uint16_t SdCardController::usbBlockSize() const {
+  return isUsbExportActive() ? _rawBlockSize : 0;
+}
+
+bool SdCardController::validateUsbRange(uint32_t lba, uint32_t offset,
+                                        uint32_t byteCount) const {
+  if (!isUsbExportActive() || _rawBlockSize == 0 || byteCount == 0) {
+    return false;
+  }
+  const uint64_t start = static_cast<uint64_t>(lba) * _rawBlockSize + offset;
+  const uint64_t capacity = static_cast<uint64_t>(_rawBlockCount) * _rawBlockSize;
+  return start < capacity && byteCount <= capacity - start;
+}
+
+bool SdCardController::readRawSector(uint32_t lba, uint8_t *buffer) {
+  if (!buffer || !isUsbExportActive() || lba >= _rawBlockCount ||
+      !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
+    return false;
+  }
+  const bool read = sd_read_raw(_rawDrive, buffer, lba);
+  SpiBusLock::unlock();
+  return read;
+}
+
+bool SdCardController::writeRawSector(uint32_t lba, const uint8_t *buffer) {
+  if (!buffer || !isUsbExportActive() || lba >= _rawBlockCount ||
+      !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
+    return false;
+  }
+  const bool written = sd_write_raw(_rawDrive, const_cast<uint8_t *>(buffer), lba);
+  SpiBusLock::unlock();
+  return written;
+}
+
+int32_t SdCardController::readUsbBlocks(uint32_t lba, uint32_t offset,
+                                        void *buffer, uint32_t byteCount) {
+  if (!buffer || !validateUsbRange(lba, offset, byteCount)) {
+    return -1;
+  }
+
+  uint8_t *destination = static_cast<uint8_t *>(buffer);
+  uint8_t sector[512];
+  lba += offset / _rawBlockSize;
+  offset %= _rawBlockSize;
+  uint32_t completed = 0;
+  while (completed < byteCount) {
+    const uint32_t available = _rawBlockSize - offset;
+    const uint32_t chunk = min(available, byteCount - completed);
+    if (offset == 0 && chunk == _rawBlockSize) {
+      if (!readRawSector(lba, destination + completed)) return -1;
+    } else {
+      if (!readRawSector(lba, sector)) return -1;
+      memcpy(destination + completed, sector + offset, chunk);
+    }
+    completed += chunk;
+    offset = 0;
+    lba++;
+    taskYIELD();
+  }
+  return static_cast<int32_t>(completed);
+}
+
+int32_t SdCardController::writeUsbBlocks(uint32_t lba, uint32_t offset,
+                                         const uint8_t *buffer, uint32_t byteCount) {
+  if (!buffer || !validateUsbRange(lba, offset, byteCount)) {
+    return -1;
+  }
+
+  uint8_t sector[512];
+  lba += offset / _rawBlockSize;
+  offset %= _rawBlockSize;
+  uint32_t completed = 0;
+  while (completed < byteCount) {
+    const uint32_t available = _rawBlockSize - offset;
+    const uint32_t chunk = min(available, byteCount - completed);
+    if (offset == 0 && chunk == _rawBlockSize) {
+      if (!writeRawSector(lba, buffer + completed)) return -1;
+    } else {
+      if (!readRawSector(lba, sector)) return -1;
+      memcpy(sector + offset, buffer + completed, chunk);
+      if (!writeRawSector(lba, sector)) return -1;
+    }
+    completed += chunk;
+    offset = 0;
+    lba++;
+    taskYIELD();
+  }
+  return static_cast<int32_t>(completed);
 }
 
 bool SdCardController::runReadWriteTest(const char *path) {
@@ -402,6 +580,7 @@ bool SdCardController::mount() {
   }
 
   _mounted = true;
+  _owner = SdCardOwner::Device;
   _lastHealthCheckMs = millis();
   return true;
 }
@@ -409,6 +588,7 @@ bool SdCardController::mount() {
 void SdCardController::unmount() {
   SD.end();
   _mounted = false;
+  _owner = SdCardOwner::None;
 }
 
 bool SdCardController::mountedCardStillResponds() {

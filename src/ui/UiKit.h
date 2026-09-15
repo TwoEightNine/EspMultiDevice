@@ -130,6 +130,18 @@ void drawListCell(TFT_eSPI &tft,
                   uint16_t iconColor,
                   const String &trailingText = String());
 
+// Shared fill-only rounded text button. The caller owns hit testing for the
+// complete rectangle and supplies the immediate screen background.
+void drawFilledButton(TFT_eSPI &tft,
+                      int16_t x,
+                      int16_t y,
+                      int16_t width,
+                      int16_t height,
+                      const String &label,
+                      uint16_t fillColor,
+                      uint16_t textColor = TFT_WHITE,
+                      uint16_t backgroundColor = TFT_BLACK);
+
 // Draws a compact progress bar. Call with drawFrame=false to update only the
 // moving fill while retaining the existing border and avoiding visible flicker.
 // When indeterminate is true, value is ignored and a moving segment is shown.

@@ -10,9 +10,9 @@ tools/build_assistant_dependency_probe.sh
 
 Without local configuration the image runs the deterministic 1,000-frame Opus
 benchmarks at 16 and 24 kHz and proves that an absent WebSocket trust store is
-rejected. The diagnostic profile enables **USB CDC On Boot**, so capture its
-115200-baud `Serial` output from the ESP32-S3 USB port. This setting applies
-only to the probe build, not normal firmware.
+rejected. The diagnostic uses the production two-port profile, so capture its
+115200-baud `Serial` output from the board's USB-to-UART connector. Native USB
+CDC remains disabled.
 
 ## Local WSS fixture
 

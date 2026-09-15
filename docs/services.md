@@ -14,6 +14,18 @@ Holding the Home Files tile for one second opens a four-digit PIN input. The PIN
 
 This is intentional lightweight obfuscation, not authenticated encryption or secure password protection. An incorrect PIN opens unusable names/content. `SecretStorage` never overwrites a malformed existing key, and it locks whenever the SD card unmounts.
 
+Files hides common macOS bookkeeping entries (`._*`, `.DS_Store`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, and `.DocumentRevisions-V100`) without deleting them. They can still exist on the card and remain visible when Finder is configured to show hidden files.
+
+## USB Drive mode
+
+**Settings → USB Drive** records a one-shot Preferences flag and restarts into an isolated transfer boot. That boot does not create any media, browser, download, recording, or cache workers. It explicitly starts an MSC-only TinyUSB device on the native GPIO 19/20 connector. Before marking its medium present, it closes FatFs and reinitializes the Arduino-ESP32 3.3.8 SPI SD driver as an unmounted raw 512-byte block device. The physical card, including its MBR and FAT32 partition, is then exposed as writable USB mass storage named `ESP Media SD`; the filesystem volume label itself is preserved. UART0 remains available for logs and recovery through the separate USB-to-UART connector.
+
+While the Mac owns the card, device-side filesystem access is unavailable. Raw transfers validate the full byte range, handle partial-sector requests with read/modify/write, and release `SpiBusLock` between sectors for touch polling. The screen can be cancelled before host block access starts. Once active, eject the volume in Finder; the host stop/eject command withdraws the medium, deinitializes raw storage, and restarts into normal mode. A USB disconnect also returns to normal mode when the device remains externally powered. Suspend/resume is not treated as eject.
+
+FAT32 limits a single file to less than 4 GiB. Abrupt USB/card removal or power loss during a write can corrupt the filesystem, just as with any external drive. PIN-offset protected entries are exposed only as their obfuscated on-card names and bytes; USB Drive never decrypts them and does not make `SecretStorage` secure.
+
+The boot request is consumed before transfer setup, so pressing reset or power-cycling recovers directly to the normal UI if transfer mode cannot start. A failed TinyUSB start is reported separately from an SD I/O failure. After an unsafe removal, stop writing to the card and use macOS Disk Utility First Aid; if it cannot repair the volume, recover or back up readable data before reformatting the card as MBR/FAT32.
+
 ## Wi-Fi and time
 
 `WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. Before Wi-Fi's first initialization it selects Arduino-ESP32 static RX/TX buffers: this uses fixed driver memory instead of fragmenting the internal heap required for TLS. Do not change this mode after Wi-Fi has started; Arduino requires the radio to be off first. The Settings flow owns the UI; Home reflects connection state.

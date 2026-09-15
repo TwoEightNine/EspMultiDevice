@@ -338,6 +338,25 @@ void drawListCell(TFT_eSPI &tft,
                     width - ContentPadding - ListTextWithIconX, DividerColor);
 }
 
+void drawFilledButton(TFT_eSPI &tft,
+                      int16_t x,
+                      int16_t y,
+                      int16_t width,
+                      int16_t height,
+                      const String &label,
+                      uint16_t fillColor,
+                      uint16_t textColor,
+                      uint16_t backgroundColor) {
+  if (width <= 0 || height <= 0) return;
+  const int16_t radius = min<int16_t>(8, height / 2);
+  tft.fillSmoothRoundRect(x, y, width, height, radius,
+                          fillColor, backgroundColor);
+  UiText::draw(tft, UiKit::ellipsize(label, width - ContentPadding * 2,
+                                     UiText::Size::Content),
+               x + width / 2, y + height / 2,
+               textColor, fillColor, UiText::Size::Content, MC_DATUM);
+}
+
 void drawProgressBar(TFT_eSPI &tft,
                      int16_t x,
                      int16_t y,

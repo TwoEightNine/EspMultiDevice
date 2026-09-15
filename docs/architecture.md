@@ -4,6 +4,8 @@
 
 `esp_media.ino` is the composition root. It owns pin constants, constructs each controller and screen once, registers screens with `Navigator`, starts at `Splash`, and runs a generic loop. It must not call methods on a specific screen after registration.
 
+The one-shot USB Drive flag selects an isolated alternate composition. Transfer boot constructs only UART Serial, display, touch, SD/raw-block storage, Navigator, and `UsbDriveScreen`; it does not construct network, browser, cache, decoder, recording, or playback components. Normal boot disconnects the ROM USB-Serial/JTAG pad so the native connector remains inactive after startup. Because that register can survive a software reset, transfer boot explicitly reconnects the pad before configuring the static MSC descriptor and callbacks and calling `USB.begin()`. The flag is cleared as it is consumed, so the next reset returns to the normal composition and the native connector stops enumerating.
+
 The loop forwards touch **state edges** only, updates SD hot-swap state, Wi-Fi, and time, then calls `tick(millis())` on the active `Screen`. The state-edge rule prevents a held press that opened a screen from also activating a control in that screen.
 
 ```text
@@ -16,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 14 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
+`Navigator` registers the 15 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -36,6 +38,7 @@ Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Im
 | `SpiBusLock` | FreeRTOS mutex for the SPI wires shared by SD and XPT2046. Concurrent work locks only individual transactions. |
 | `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. During one controller session, it retains the lowest median voltage; each returned voltage and its linearly interpolated discharge-curve percentage therefore never increase. The percentage is calculated from exactly the voltage returned in the same `BatteryReading`. |
 | `SdCardController` | Mounts, monitors, and remounts FAT storage. `update()` is called from the main loop and consumers obtain pending `Mounted`, `Removed`, or `MountFailed` state through `takeEvent()`. |
+| `UsbMassStorageController` | Owns the TinyUSB MSC callbacks and host-visible state. In transfer boot it asks `SdCardController` to replace local FAT ownership with an unmounted raw SPI block device, exposes the whole card, and reports eject/disconnect/error state to `UsbDriveScreen::tick()`. |
 | `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, incremental sidecar cleanup, and staged sidecar relocation across encryption boundaries. Cache codecs retain their format-specific header and payload validation. |
 
 Without a card-detect pin, `SdCardController` probes an attached card every 500 ms and retries an absent card every three seconds. With card detect, mount attempts occur after the physical state changes. SD screens must react to events from their `tick()` methods, not assume a mounted card remains available.
@@ -45,6 +48,8 @@ Without a card-detect pin, `SdCardController` probes an attached card every 500 
 The UI loop must continue to process touch and redraw while expensive work is under way. Files thumbnails, browser inline images, and animated-image cache loading use worker work on the other core; results are returned to the UI task for display updates. Do not let a worker redraw UI directly.
 
 SD and touch share clock/data lines. Long media reads are deliberately chunked, acquire `SpiBusLock` only around a read, and release it between chunks. Media decoders and frame rings rely on PSRAM. The supported N16R8 profile is not optional for the full animated-image/video feature set.
+
+USB MSC callbacks run outside the UI task. They never draw, navigate, or restart. Each 512-byte SD sector transaction takes `SpiBusLock` and releases it before the next sector so touch polling can proceed. Safe eject, disconnect, and I/O failures are published as state and acted on by the USB Drive screen. Local FatFs is fully unmounted before raw media becomes present to the host; normal and host filesystem ownership never overlap.
 
 `MediaCache` is constructed once in the composition root and shared by Files, Image Viewer, Audio Player, and Video Player. Its reader, writer, cleanup, and relocation operations report busy separately from failure. Screen work retries incremental cleanup or relocation from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
 

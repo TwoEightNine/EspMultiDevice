@@ -1,4 +1,26 @@
 #include <Arduino.h>
+#include <USB.h>
+#include <USBMSC.h>
+#include <hal/usb_serial_jtag_ll.h>
+#include <sdkconfig.h>
+#include <soc/soc_caps.h>
+
+#if !SOC_USB_OTG_SUPPORTED
+#error ESP Media USB Drive requires a native USB-capable ESP32 target
+#endif
+#if !defined(ARDUINO_USB_MODE) || ARDUINO_USB_MODE != 0
+#error Select USB-OTG (TinyUSB) for USB Mode
+#endif
+#if ARDUINO_USB_CDC_ON_BOOT || ARDUINO_USB_MSC_ON_BOOT || ARDUINO_USB_DFU_ON_BOOT
+#error Disable USB CDC, Firmware MSC, and DFU On Boot; ESP Media starts native USB only in USB Drive mode
+#endif
+#if !defined(CONFIG_TINYUSB_MSC_ENABLED) || !CONFIG_TINYUSB_MSC_ENABLED
+#error TinyUSB MSC support must be enabled for ESP Media USB Drive
+#endif
+
+// TinyUSB collects interfaces when USB.begin() runs. Keep the MSC descriptor
+// object static, but start native USB only from the isolated transfer boot.
+USBMSC usbMsc;
 
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
 
@@ -29,9 +51,12 @@
 #include "src/services/network/TimeController.h"
 #include "src/core/TouchController.h"
 #include "src/features/settings/TouchCalibrationScreen.h"
+#include "src/features/settings/UsbDriveScreen.h"
 #include "src/features/text_input/TextInputScreen.h"
 #include "src/features/recording/VoiceRecorderScreen.h"
 #include "src/services/network/WiFiController.h"
+#include "src/services/storage/UsbDriveBoot.h"
+#include "src/services/storage/UsbMassStorageController.h"
 #include "src/features/settings/WiFiScreen.h"
 #include "src/features/workout/WorkoutScreen.h"
 #include "src/media/MediaCache.h"
@@ -89,6 +114,7 @@ AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 BatteryController *batteryController = nullptr;
+UsbMassStorageController *usbMassStorage = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
@@ -105,6 +131,7 @@ TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
 WorkoutScreen *workoutScreen = nullptr;
+UsbDriveScreen *usbDriveScreen = nullptr;
 
 void updateTouch();
 
@@ -173,6 +200,14 @@ void setup() {
 
   Serial.begin(SERIAL_BAUD);
 
+  const bool usbTransferBoot = UsbDriveBoot::consumeRequest();
+  if (!usbTransferBoot) {
+    // The S3 ROM can leave its built-in USB-Serial/JTAG device attached even
+    // when Arduino's USB-on-boot options are disabled. Disconnect that PHY in
+    // normal operation so the native connector is reserved for USB Drive.
+    usb_serial_jtag_ll_phy_enable_pad(false);
+  }
+
   Serial.println(F("ESP Media starting..."));
   logResetReason();
   Serial.print(F("CPU MHz: "));
@@ -192,10 +227,6 @@ void setup() {
   if (!SpiBusLock::begin()) {
     Serial.println(F("Shared SPI lock unavailable."));
   }
-
-  batteryController = new BatteryController(BATTERY_ADC_PIN);
-  batteryController->begin();
-  Serial.println(F("Battery controller ready."));
 
   display = new DisplayController();
   display->begin(DISPLAY_ROTATION);
@@ -233,6 +264,25 @@ void setup() {
   } else {
     Serial.println(F("SD card not mounted."));
   }
+
+  navigator = new Navigator();
+  if (usbTransferBoot) {
+    usbMassStorage = new UsbMassStorageController(*sdCard, usbMsc);
+    usbDriveScreen = new UsbDriveScreen(
+      *navigator, *touch, *display, usbMassStorage, true
+    );
+    if (!navigator->registerScreen(ScreenId::UsbDrive, *usbDriveScreen) ||
+        !navigator->setRoot(ScreenId::UsbDrive)) {
+      Serial.println(F("USB Drive screen setup failed."));
+    } else {
+      Serial.println(F("USB Drive transfer boot ready."));
+    }
+    return;
+  }
+
+  batteryController = new BatteryController(BATTERY_ADC_PIN);
+  batteryController->begin();
+  Serial.println(F("Battery controller ready."));
 
   mic = new MicController(
     MIC_BCLK_PIN,
@@ -272,7 +322,6 @@ void setup() {
   timeController->begin();
   Serial.println(F("Time controller ready."));
 
-  navigator = new Navigator();
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController, *batteryController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
@@ -287,6 +336,7 @@ void setup() {
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
+  usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -329,6 +379,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::Workout, *workoutScreen)) {
     Serial.println(F("Navigator failed to register Workout screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::UsbDrive, *usbDriveScreen)) {
+    Serial.println(F("Navigator failed to register USB Drive screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

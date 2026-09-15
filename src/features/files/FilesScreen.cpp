@@ -1677,7 +1677,12 @@ const FilesScreen::Entry *FilesScreen::entryAt(uint16_t index) const {
 
 bool FilesScreen::isHiddenEntry(const String &path, const String &directory) const {
   const String name = displayName(path);
-  if (name.startsWith(F("._")) || name == F(".cache") || name.endsWith(F(".tmp"))) return true;
+  if (name.startsWith(F("._")) || name == F(".cache") || name.endsWith(F(".tmp")) ||
+      name == F(".DS_Store") || name == F(".Spotlight-V100") ||
+      name == F(".Trashes") || name == F(".fseventsd") ||
+      name == F(".TemporaryItems") || name == F(".DocumentRevisions-V100")) {
+    return true;
+  }
   if (name == F(".configs")) return !_secretMode;
   return directory == SecretStorage::Directory && name == F("index");
 }

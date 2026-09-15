@@ -8,6 +8,14 @@ The NVS partition remains at offset `0x9000` with size `0x5000`, and OTA data re
 
 Keep normal peripherals within GPIO 0–21, 35–42, and 45–48. Avoid GPIO 0, 19/20, and 45/46 unless the exact board documents them as safe; they commonly affect bootstrapping or USB.
 
+## Native USB connection
+
+The two connectors have fixed roles. Use the **UART**, **COM**, or **Debug** connector backed by a CH340, CP210x, FTDI, or equivalent bridge for firmware upload and 115200-baud Serial. USB Drive uses the second **USB** or **OTG** connector wired directly to the ESP32-S3 USB D- and D+ signals on GPIO 19 and GPIO 20. Normal firmware disconnects the S3's built-in USB-Serial/JTAG PHY after startup, and transfer boot reconnects the native path as mass storage only. The ROM downloader can still appear briefly on that connector during reset.
+
+Build with **USB Mode: USB-OTG (TinyUSB)**; set **USB CDC On Boot**, **USB Firmware MSC On Boot**, and **USB DFU On Boot** to **Disabled**; and select **Upload Mode: UART0 / Hardware CDC**. The project starts and registers its SD-card MSC interface itself only in transfer boot. The USB Drive is certified against macOS Finder; it uses the standard MSC protocol and may also enumerate on other desktop hosts.
+
+For the first upload, select the serial device belonging to the USB-to-UART bridge. If automatic reset fails, hold **BOOT**, tap and release **RESET/EN**, release **BOOT**, and upload again. Native USB is not an upload or Serial Monitor port in this profile.
+
 ## Default wiring
 
 | Purpose | ESP32-S3 GPIO | Notes |
@@ -76,6 +84,8 @@ Place these capacitors at the loads:
 A TP4056 is a charger/protection board, not a 5V converter or load-sharing power path. For a one-cell system, use protected battery/BMS, power-path charging, and a synchronous 5V boost rated for at least 3A peak; its battery peak can exceed 4.5A. A 2S battery plus BMS/charger and a 5V buck is often more robust.
 
 Do not connect external 5V to a board’s `VIN` while USB is attached unless its schematic explicitly supports dual power. The safe development arrangement is USB for the ESP32, external 5V for TFT/amplifier, common ground, and no positive backfeed to USB or board VIN.
+
+The same power/backfeed restriction applies during USB Drive transfers. Connect both board USB ports at once only if the board schematic explicitly supports their shared power path; otherwise use a data-only native cable or another documented safe power arrangement. Eject the SD volume (recommended label: `ESPMEDIA`) in Finder before disconnecting it. If the native USB cable is the only power source, unplugging it powers the device off rather than allowing the disconnect-triggered normal restart.
 
 For reset diagnosis, capture complete boot logs at 115200 baud. Test the intended final supply through: ESP32 alone; display/SD; Wi-Fi scans; then continuous or bass-heavy sound at volumes 3, 5, and 10. Measure 5V at ESP32 input and amplifier pins under load. If disconnecting only amplifier VIN stops resets, fix the rail, wiring, and capacitance rather than firmware.
 

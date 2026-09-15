@@ -9,6 +9,12 @@ enum class SdCardEvent {
   MountFailed
 };
 
+enum class SdCardOwner : uint8_t {
+  None,
+  Device,
+  UsbHost
+};
+
 class SdCardController {
 public:
   SdCardController(int sckPin,
@@ -26,6 +32,20 @@ public:
 
   bool isMounted() const;
   bool isCardPresent() const;
+  SdCardOwner owner() const;
+
+  // Transfers exclusive ownership of the physical card from the local FAT
+  // filesystem to a raw block device suitable for USB MSC. No filesystem
+  // operation may be attempted until the device restarts or USB export ends.
+  bool beginUsbExport();
+  void endUsbExport();
+  bool isUsbExportActive() const;
+  uint32_t usbBlockCount() const;
+  uint16_t usbBlockSize() const;
+  int32_t readUsbBlocks(uint32_t lba, uint32_t offset,
+                        void *buffer, uint32_t byteCount);
+  int32_t writeUsbBlocks(uint32_t lba, uint32_t offset,
+                         const uint8_t *buffer, uint32_t byteCount);
 
   bool runReadWriteTest(const char *path = "/sd_rw_test.txt");
   // Development-only diagnostic. It creates, verifies, and removes a
@@ -53,6 +73,10 @@ private:
   int _cardDetectPin;
   bool _cardDetectActiveLow;
   bool _mounted;
+  SdCardOwner _owner;
+  uint8_t _rawDrive;
+  uint32_t _rawBlockCount;
+  uint16_t _rawBlockSize;
   uint32_t _lastMountAttemptMs;
   uint32_t _nextMountAttemptMs;
   uint32_t _lastHealthCheckMs;
@@ -62,6 +86,10 @@ private:
   void unmount();
   bool mountedCardStillResponds();
   void configurePins();
+  bool validateUsbRange(uint32_t lba, uint32_t offset,
+                        uint32_t byteCount) const;
+  bool readRawSector(uint32_t lba, uint8_t *buffer);
+  bool writeRawSector(uint32_t lba, const uint8_t *buffer);
 
   bool writeTextFile(const char *path, const char *content);
   bool appendTextFile(const char *path, const char *content);

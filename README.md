@@ -5,6 +5,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 ## Features
 
 - SD-card browser with folders, pagination, rename/delete actions, thumbnails, and optional PIN-offset protected storage.
+- Manual USB Drive mode exposes the complete SD card as writable USB mass storage for macOS file transfer, with isolated transfer boot and safe-eject restart.
 - Image viewer for BMP, PNG, baseline JPEG, GIF, and WebP, including animated GIF/WebP playback backed by SD caches and PSRAM.
 - WAV/MP3 playback, 16 kHz mono WAV recording, and configurable persisted volume.
 - MP4/3GP video playback for H.264, H.263, and MPEG-4 Part 2 at up to 320 × 240, with AAC-LC, MP3, or AMR-NB audio where compatible.
@@ -19,7 +20,7 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 
 ## Setup and build
 
-1. Install Arduino-ESP32 3.3.8 and select **ESP32S3 Dev Module**, **16MB Flash**, **OPI PSRAM**, **240MHz**, and **Custom** partition scheme.
+1. Install Arduino-ESP32 3.3.8 and select **ESP32S3 Dev Module**, **16MB Flash**, **OPI PSRAM**, **240MHz**, and **Custom** partition scheme. Select **USB-OTG (TinyUSB)**, disable **USB CDC On Boot**, **USB Firmware MSC On Boot**, and **USB DFU On Boot**, then select **UART0 / Hardware CDC** upload mode.
 2. Install these Arduino libraries through Library Manager:
    - `TFT_eSPI`
    - `PNGdec`
@@ -27,6 +28,8 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 3. Configure the `TFT_eSPI` library’s `User_Setup.h` with the ILI9488 8-bit parallel pin block in [docs/hardware.md](docs/hardware.md#tft_espi-configuration).
 4. Run `tools/build_esp32s3.sh`, or open `esp_media.ino` with the exact profile above and build/upload. The script additionally enforces the real 6,553,600-byte application limit, which Arduino's generic Custom profile does not. `build_opt.h` is read automatically.
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
+
+Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART connector. If its automatic reset cannot enter the downloader, hold **BOOT**, tap **RESET/EN**, release **RESET/EN**, then release **BOOT** and upload again. USB Drive uses the second connector wired directly to the ESP32-S3 native USB D-/D+ pins (GPIO 19/20); it remains inactive during normal boot. Start **Settings → USB Drive**, connect the native port, transfer files in Finder, and eject the volume before unplugging it.
 
 The first upload after changing from the old 3 MB/9.9 MB FATFS scheme must flash the new partition table. Preferences/NVS remains at the same offset and is compatible. Contents of the old, now-unused internal FATFS region are not preserved; ESP Media user media remains on SD.
 

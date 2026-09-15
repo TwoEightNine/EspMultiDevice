@@ -4,9 +4,9 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 arduino_cli="${ARDUINO_CLI:-/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli}"
 build_dir="${ESP_MEDIA_PROBE_BUILD_DIR:-/private/tmp/esp-media-assistant-probe-build}"
-# The probe prints its hardware gates over the ESP32-S3's native USB CDC port.
-# Keep this diagnostic-only; normal production firmware retains its profile.
-fqbn='espressif:esp32:esp32s3:FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,CDCOnBoot=cdc'
+# The probe uses the same two-port profile as production and prints its
+# hardware gates through UART0 on the board's USB-to-UART connector.
+fqbn='espressif:esp32:esp32s3:FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default'
 application_limit=6553600
 
 if [[ ! -x "$arduino_cli" ]]; then
