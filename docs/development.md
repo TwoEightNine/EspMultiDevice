@@ -67,9 +67,9 @@ Record the complete 115200-baud Serial result here after a physical-device run:
 
 The physical-device Stage 0 report passed every threshold: codec/TLS initialization growth below 32 KiB internal heap, a 122,868-byte largest internal block after active WSS testing, no monotonic reconnect/frame loss, a 194-byte maximum Opus packet, exact 960/1,440 decoded samples, and P95 encode/decode below 30/20 ms. Stage 1 may begin, but it must add its session loop off the UI task and retain the documented half-duplex audio ownership.
 
-## Stage 1 hosted compatibility probe
+## Stage 1 Xiaozhi compatibility probe
 
-Build the Xiaozhi-hosted diagnostic with
+Build the Xiaozhi diagnostic with
 `tools/build_xiaozhi_compatibility_probe.sh`. It retains the complete
 application in the linked image while the compile-time entry point bypasses
 normal setup. It uses the production two-port USB profile, so capture UART0 at
@@ -84,23 +84,54 @@ header, and client/server hello exchange. Firmware and MQTT instructions in the
 response are deliberately ignored. The build enforces both the 6,553,600-byte
 application slot and a 4.5 MiB diagnostic gate.
 
-The implementation build verified at 2,944,656 bytes. Its companion regression
-builds also passed: normal firmware at 2,832,960 bytes and the Stage 0 assistant
-dependency diagnostic at 3,102,032 bytes, all within the 6,553,600-byte slot.
+The local-endpoint implementation build verified at 2,943,920 bytes. Its
+companion regression builds also passed: normal firmware at 2,832,512 bytes and
+the Stage 0 assistant dependency diagnostic at 3,101,520 bytes, all within the
+6,553,600-byte slot.
 
 Record the complete redacted Serial result after account binding and the
 automatic two-boot hardware run:
 
-| Runtime gate | Recorded result |
-| --- | --- |
-| Stable MAC-derived Device-Id and NVS UUID across reboot | Pending hardware run |
-| Normal Xiaozhi account binding | Pending hardware run |
-| Non-placeholder bootstrap WSS credentials | Pending hardware run |
-| Hosted WSS upgrade and valid server hello | Pending hardware run |
-| MCP disabled or omitted acceptance | Pending hardware run |
-| Fresh bootstrap credentials after automatic reboot | Pending hardware run |
-| Free/largest internal heap, PSRAM, and 24 KiB task high-water mark | Pending hardware run |
-| Credential-free Serial log audit | Pending hardware run |
+| Runtime gate | Public hosted result | Mac self-hosted result |
+| --- | --- | --- |
+| Stable MAC-derived Device-Id and NVS UUID across reboot | First boot passed; credential failure blocked the planned reboot | **Passed:** `14:c1:9f:50:b4:a8` and the same NVS UUID on both boots |
+| Normal Xiaozhi account binding | Passed 2026-09-15: activation polls advanced from HTTP 202 to 200 | Not required by the simple self-hosted backend |
+| Non-placeholder bootstrap WSS credentials | **Failed:** recognized placeholder/test token after successful binding | **Passed:** signed token on both boots |
+| WSS upgrade and valid server hello | Blocked by the credential failure | **Passed** on both boots |
+| MCP disabled or omitted acceptance | Blocked by the credential failure | **Passed** with MCP disabled |
+| Fresh bootstrap credentials after automatic reboot | Blocked by the credential failure | **Passed** |
+| WSS-closed free/largest internal heap and free PSRAM | Not reached | 105,148 / 90,100 / 8,371,432 bytes first boot; 105,156 / 90,100 / 8,371,528 bytes second boot |
+| Dedicated 48 KiB task stack high-water mark | Not reached | 21,076 bytes remaining on both boots |
+| Credential-free Serial log audit | Passed for supplied pre-WSS failure logs | Passed; no token, URL, Authorization value, or session ID printed |
+
+The public hosted route is therefore a Stage 1 **no-go** for this custom client.
+Do not add the assistant screen or production session behavior against that
+service. The next compatibility target is the self-hosted
+[xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server)
+WebSocket backend and its OTA/bootstrap endpoint, deployed behind
+certificate-validated HTTPS/WSS. A pass-through relay
+to the public service is not selected because it cannot supply credentials the
+upstream bootstrap intentionally withheld.
+
+The self-hosted follow-up used upstream server commit
+`6afc54a17def47578a4b3efc4680873689d3168b`, pinned arm64 server manifest
+`sha256:4673fac2cb7125d6370a3e8cd6cd9985195c9bfc6203d3ced41e86a1b9775c30`,
+and pinned Caddy manifest
+`sha256:8dbca3525dd8dce671e495665a0eb297a83ec87ee30f373947d0ea93115949db`.
+The only downloaded model is Silero VAD from commit
+`41f03a954b841327835dea1ddb7bb28ae23ddc2c`, 2,327,524 bytes with SHA-256
+`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`.
+The lightweight compatibility configuration does not send audio or invoke its
+placeholder cloud ASR/LLM settings.
+
+The Mac-hosted gate **passed 2026-09-15**. Bootstrap returned a signed,
+non-placeholder token; certificate-checked WSS accepted the client hello and
+MCP disabled; the automatic second boot fetched fresh credentials and received
+another valid server hello. First/second-boot WSS-closed measurements were
+105,148/105,156 bytes free internal heap, a 90,100-byte largest internal block,
+and 8,371,432/8,371,528 bytes free PSRAM. The dedicated 48 KiB task retained
+21,076 bytes of stack. The public hosted result remains a no-go; only the
+self-hosted protocol path advances.
 
 ## Generators and regression fixtures
 
@@ -112,7 +143,8 @@ automatic two-boot hardware run:
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
-| `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 hosted bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
+| `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
+| `tools/xiaozhi_local/` | Pinned local Xiaozhi/Caddy compatibility deployment; ignored runtime state contains its private config, CA, and model. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.
 

@@ -1,0 +1,10 @@
+server:
+  websocket: wss://192-168-1-10.sslip.io:8443/xiaozhi/v1/
+  auth:
+    enabled: true
+    allowed_devices: []
+
+selected_module:
+  ASR: DoubaoASR
+  Intent: nointent
+  Memory: nomem

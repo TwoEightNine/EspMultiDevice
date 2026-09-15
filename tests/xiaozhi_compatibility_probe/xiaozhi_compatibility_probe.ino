@@ -13,15 +13,31 @@
 #include "../../src/services/assistant/XiaozhiIdentity.h"
 #include "../../src/services/assistant/XiaozhiTrust.h"
 
+#if __has_include("LocalBackendConfig.h")
+#include "LocalBackendConfig.h"
+#else
+namespace XiaozhiProbeConfig {
+inline constexpr char TargetName[] = "official-hosted";
+inline constexpr const char *BootstrapUrl = XiaozhiBootstrapClient::OfficialBootstrapUrl;
+inline constexpr const char *ActivationUrl = XiaozhiBootstrapClient::OfficialActivationUrl;
+inline constexpr const char *CaCertificate = XiaozhiTrust::DigiCertGlobalRootG2;
+} // namespace XiaozhiProbeConfig
+#endif
+
 namespace {
 
-constexpr uint32_t ProbeTaskStackBytes = 24U * 1024U;
+// SecureWebSocketClient keeps bounded RX/event buffers in the owning task's
+// frame. Match the already hardware-validated Stage 0 transport probe stack so
+// the TLS handshake cannot consume the canary margin.
+constexpr uint32_t ProbeTaskStackBytes = 48U * 1024U;
 constexpr uint32_t WiFiTimeoutMs = 30000;
 constexpr uint32_t TimeSyncTimeoutMs = 30000;
 constexpr uint32_t HelloTimeoutMs = 10000;
 constexpr uint32_t DefaultActivationTimeoutMs = 10U * 60U * 1000U;
 constexpr uint32_t MinimumActivationTimeoutMs = 30000;
 constexpr uint32_t MaximumActivationTimeoutMs = 10U * 60U * 1000U;
+constexpr uint8_t MaximumBootstrapAttempts = 8;
+constexpr uint32_t BootstrapRetryDelayMs = 3000;
 constexpr time_t MinimumValidEpoch = 1609459200;
 constexpr char PreferencesNamespace[] = "assistant";
 constexpr char PhaseKey[] = "s1_phase";
@@ -255,8 +271,8 @@ HelloAttempt attemptHello(const XiaozhiIdentity &identity,
   const SecureWebSocketClient::Endpoint endpoint = {parsed.host, parsed.port, parsed.path, ""};
   const SecureWebSocketClient::TrustStore trust = {
     SecureWebSocketClient::TrustKind::PemCertificate,
-    reinterpret_cast<const uint8_t *>(XiaozhiTrust::DigiCertGlobalRootG2),
-    sizeof(XiaozhiTrust::DigiCertGlobalRootG2)
+    reinterpret_cast<const uint8_t *>(XiaozhiProbeConfig::CaCertificate),
+    strlen(XiaozhiProbeConfig::CaCertificate) + 1U
   };
 
   SecureWebSocketClient websocket;
@@ -351,7 +367,7 @@ bool waitForActivation(const XiaozhiIdentity &identity,
 bool obtainCredentials(const XiaozhiIdentity &identity,
                        XiaozhiBootstrapClient &bootstrap,
                        XiaozhiBootstrapResponse &response) {
-  for (uint8_t check = 0; check < 4; ++check) {
+  for (uint8_t check = 0; check < MaximumBootstrapAttempts; ++check) {
     response.clear();
     if (!bootstrap.check(identity, response)) {
       Serial.print(F("FAIL bootstrap status="));
@@ -368,19 +384,31 @@ bool obtainCredentials(const XiaozhiIdentity &identity,
       delay(1000);
       continue;
     }
-    if (!response.websocket.usable()) {
-      Serial.println(F("FAIL bootstrap: missing, placeholder, or unsupported WebSocket credentials"));
+    const XiaozhiWebSocketCredentialStatus credentialStatus = response.websocket.status();
+    if (credentialStatus == XiaozhiWebSocketCredentialStatus::PlaceholderToken) {
+      Serial.println(F("FAIL bootstrap: hosted service returned a placeholder/test WebSocket token"));
       return false;
+    }
+    if (credentialStatus == XiaozhiWebSocketCredentialStatus::UnsupportedProtocol) {
+      Serial.println(F("FAIL bootstrap: hosted service returned an unsupported protocol version"));
+      return false;
+    }
+    if (credentialStatus == XiaozhiWebSocketCredentialStatus::Missing) {
+      Serial.println(F("WAIT bootstrap: WebSocket URL or token is absent; retrying"));
+      if (check + 1 < MaximumBootstrapAttempts) delay(BootstrapRetryDelayMs);
+      continue;
     }
     Serial.println(F("PASS bootstrap returned usable non-placeholder credentials"));
     return true;
   }
-  Serial.println(F("FAIL bootstrap: activation remained pending after acceptance"));
+  Serial.println(F("FAIL bootstrap: usable WebSocket credentials did not become available"));
   return false;
 }
 
 void runXiaozhiCompatibilityProbe() {
-  Serial.println(F("ESP Media Stage 1 Xiaozhi hosted compatibility probe"));
+  Serial.println(F("ESP Media Stage 1 Xiaozhi compatibility probe"));
+  Serial.print(F("Target="));
+  Serial.println(XiaozhiProbeConfig::TargetName);
   Serial.println(F("Upstream snapshot: 78/xiaozhi-esp32 ac6deed3"));
   printMemory("START");
 
@@ -412,7 +440,12 @@ void runXiaozhiCompatibilityProbe() {
   Serial.println(phase == 1 ? F("Second-boot credential refresh gate")
                             : F("First-boot binding and handshake gate"));
 
-  XiaozhiBootstrapClient bootstrap;
+  const XiaozhiBootstrapEndpoint endpoint = {
+    XiaozhiProbeConfig::BootstrapUrl,
+    XiaozhiProbeConfig::ActivationUrl,
+    XiaozhiProbeConfig::CaCertificate
+  };
+  XiaozhiBootstrapClient bootstrap(endpoint);
   XiaozhiBootstrapResponse response;
   if (!obtainCredentials(identity, bootstrap, response)) {
     response.clear();

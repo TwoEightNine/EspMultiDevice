@@ -17,6 +17,13 @@ struct XiaozhiActivationInstructions {
   void clear();
 };
 
+enum class XiaozhiWebSocketCredentialStatus : uint8_t {
+  Usable,
+  Missing,
+  PlaceholderToken,
+  UnsupportedProtocol
+};
+
 struct XiaozhiWebSocketCredentials {
   static constexpr size_t MaxUrlBytes = 512;
   static constexpr size_t MaxTokenBytes = 768;
@@ -27,6 +34,7 @@ struct XiaozhiWebSocketCredentials {
   uint8_t version;
 
   void clear();
+  XiaozhiWebSocketCredentialStatus status() const;
   bool usable() const;
 };
 
@@ -44,18 +52,28 @@ enum class XiaozhiActivationPoll : uint8_t {
   FatalError
 };
 
+struct XiaozhiBootstrapEndpoint {
+  // These pointers are borrowed and must outlive the client.
+  const char *bootstrapUrl;
+  const char *activationUrl;
+  const char *caCertificate;
+};
+
 class XiaozhiBootstrapClient {
 public:
-  static constexpr char BootstrapUrl[] = "https://api.tenclass.net/xiaozhi/ota/";
-  static constexpr char ActivationUrl[] = "https://api.tenclass.net/xiaozhi/ota/activate";
+  static constexpr char OfficialBootstrapUrl[] = "https://api.tenclass.net/xiaozhi/ota/";
+  static constexpr char OfficialActivationUrl[] = "https://api.tenclass.net/xiaozhi/ota/activate";
   static constexpr size_t MaxResponseBytes = 16U * 1024U;
 
+  XiaozhiBootstrapClient();
+  explicit XiaozhiBootstrapClient(const XiaozhiBootstrapEndpoint &endpoint);
   bool check(const XiaozhiIdentity &identity, XiaozhiBootstrapResponse &response);
   XiaozhiActivationPoll activate(const XiaozhiIdentity &identity);
   const String &lastError() const { return _lastError; }
   int lastHttpStatus() const { return _lastHttpStatus; }
 
 private:
+  XiaozhiBootstrapEndpoint _endpoint;
   String _lastError;
   int _lastHttpStatus = 0;
 

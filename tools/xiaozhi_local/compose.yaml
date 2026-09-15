@@ -1,0 +1,32 @@
+name: esp-media-xiaozhi
+
+services:
+  xiaozhi:
+    image: ghcr.io/xinnan-tech/xiaozhi-esp32-server@sha256:4673fac2cb7125d6370a3e8cd6cd9985195c9bfc6203d3ced41e86a1b9775c30
+    platform: linux/arm64
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      TZ: Asia/Tbilisi
+    expose:
+      - "8000"
+      - "8003"
+    volumes:
+      - ./.runtime/data:/opt/xiaozhi-esp32-server/data
+      - ./.runtime/models/snakers4_silero-vad:/opt/xiaozhi-esp32-server/models/snakers4_silero-vad:ro
+
+  caddy:
+    image: caddy@sha256:8dbca3525dd8dce671e495665a0eb297a83ec87ee30f373947d0ea93115949db
+    platform: linux/arm64
+    restart: unless-stopped
+    depends_on:
+      - xiaozhi
+    environment:
+      XIAOZHI_LAN_HOST: ${XIAOZHI_LAN_HOST}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.runtime/caddy-data:/data
+      - ./.runtime/caddy-config:/config

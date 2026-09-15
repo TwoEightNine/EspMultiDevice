@@ -2,3 +2,5 @@
 .idea
 tests/assistant_dependency_probe/ProbeConfig.h
 tests/assistant_dependency_probe/generated/
+tests/xiaozhi_compatibility_probe/LocalBackendConfig.h
+tools/xiaozhi_local/.runtime/

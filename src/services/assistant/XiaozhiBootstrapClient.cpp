@@ -76,22 +76,40 @@ void XiaozhiWebSocketCredentials::clear() {
   version = 1;
 }
 
-bool XiaozhiWebSocketCredentials::usable() const {
-  if (!present || url[0] == 0 || token[0] == 0 || version < 1 || version > 3) return false;
+XiaozhiWebSocketCredentialStatus XiaozhiWebSocketCredentials::status() const {
+  if (!present || url[0] == 0 || token[0] == 0) {
+    return XiaozhiWebSocketCredentialStatus::Missing;
+  }
+  if (version < 1 || version > 3) {
+    return XiaozhiWebSocketCredentialStatus::UnsupportedProtocol;
+  }
   const char *tokenValue = startsWithIgnoreCase(token, "bearer ") ? token + 7 : token;
   static constexpr const char *Placeholders[] = {
     "test-token", "test_token", "placeholder", "your-token", "token"
   };
   for (const char *placeholder : Placeholders) {
-    if (equalsIgnoreCase(tokenValue, placeholder)) return false;
+    if (equalsIgnoreCase(tokenValue, placeholder)) {
+      return XiaozhiWebSocketCredentialStatus::PlaceholderToken;
+    }
   }
-  return true;
+  return XiaozhiWebSocketCredentialStatus::Usable;
+}
+
+bool XiaozhiWebSocketCredentials::usable() const {
+  return status() == XiaozhiWebSocketCredentialStatus::Usable;
 }
 
 void XiaozhiBootstrapResponse::clear() {
   activation.clear();
   websocket.clear();
 }
+
+XiaozhiBootstrapClient::XiaozhiBootstrapClient()
+    : _endpoint{OfficialBootstrapUrl, OfficialActivationUrl,
+                XiaozhiTrust::DigiCertGlobalRootG2} {}
+
+XiaozhiBootstrapClient::XiaozhiBootstrapClient(const XiaozhiBootstrapEndpoint &endpoint)
+    : _endpoint(endpoint) {}
 
 bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
                                    XiaozhiBootstrapResponse &response) {
@@ -107,7 +125,7 @@ bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
     return false;
   }
   size_t length = 0;
-  const bool posted = post(BootstrapUrl, identity, request.c_str(), body,
+  const bool posted = post(_endpoint.bootstrapUrl, identity, request.c_str(), body,
                            MaxResponseBytes + 1, length);
   request = "";
   bool parsed = false;
@@ -124,7 +142,7 @@ bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
 XiaozhiActivationPoll XiaozhiBootstrapClient::activate(const XiaozhiIdentity &identity) {
   char response[513] = {};
   size_t responseLength = 0;
-  if (!post(ActivationUrl, identity, "{}", response, sizeof(response), responseLength)) {
+  if (!post(_endpoint.activationUrl, identity, "{}", response, sizeof(response), responseLength)) {
     memset(response, 0, sizeof(response));
     return XiaozhiActivationPoll::RetryableError;
   }
@@ -141,13 +159,14 @@ bool XiaozhiBootstrapClient::post(const char *url, const XiaozhiIdentity &identi
                                   size_t responseCapacity, size_t &responseLength) {
   responseLength = 0;
   _lastHttpStatus = 0;
-  if (!url || !body || !response || responseCapacity < 2) {
+  if (!url || !startsWithIgnoreCase(url, "https://") || !_endpoint.caCertificate ||
+      _endpoint.caCertificate[0] == 0 || !body || !response || responseCapacity < 2) {
     _lastError = F("Invalid bootstrap request");
     return false;
   }
 
   NetworkClientSecure tls;
-  tls.setCACert(XiaozhiTrust::DigiCertGlobalRootG2);
+  tls.setCACert(_endpoint.caCertificate);
   tls.setHandshakeTimeout(HttpTimeoutMs / 1000U);
   HTTPClient http;
   http.useHTTP10(true);

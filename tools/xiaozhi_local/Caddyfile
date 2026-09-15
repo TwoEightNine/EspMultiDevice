@@ -1,0 +1,11 @@
+https://{$XIAOZHI_LAN_HOST}:8443 {
+	tls internal {
+		curves x25519 secp256r1
+	}
+
+	@bootstrap path /xiaozhi/ota /xiaozhi/ota/ /xiaozhi/ota/*
+	reverse_proxy @bootstrap xiaozhi:8003
+
+	@websocket path /xiaozhi/v1 /xiaozhi/v1/ /xiaozhi/v1/*
+	reverse_proxy @websocket xiaozhi:8000
+}
