@@ -45,7 +45,7 @@ private:
   void drawHeader(const char *title);
   void drawButton(const char *label, int16_t x, int16_t y, bool selected);
   void drawCalibrationTarget();
-  void drawCalibrationTouch(const TouchPoint &point, const char *status);
+  void drawCalibrationTouch(const TouchPoint &point);
   void acceptCalibrationPoint(const TouchPoint &point);
   bool inButton(int16_t x, int16_t y, int16_t index) const;
   int16_t targetX(uint8_t column) const;

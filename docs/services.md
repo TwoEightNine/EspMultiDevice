@@ -68,7 +68,7 @@ credential refresh across reboot; it does not add a production reconnect loop.
 
 ## Touch, battery, and startup diagnostics
 
-The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
+The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; the calibration target view is full-screen, has no app bar or footer overlay, and places its targets on the absolute display corners and edges so those coordinates can be sampled. Before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
 
 The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. Home refreshes the controller every five seconds. Each refresh takes the median of exactly three ADC samples. `BatteryController` retains the lowest median voltage seen during its in-memory session, so the voltage and percentage it returns never increase until the controller is recreated (normally at restart). The percentage is calculated from that same returned voltage, using linear interpolation through the measured 30-minute discharge checkpoints below; it is not calculated from a separate raw or inferred battery value. Home displays the percentage, without a `%` suffix, inside the battery glyph. Its battery fill is green at 66% and above, yellow from 33% through 65%, and red below 33%.
 

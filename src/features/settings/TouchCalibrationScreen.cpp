@@ -38,7 +38,10 @@ void TouchCalibrationScreen::handleTouch(const TouchPoint &point) {
     return;
   }
 
-  if (UiKit::navigationIconContains(point.x, point.y)) {
+  // Calibration targets occupy the complete panel, including the top-left
+  // corner. Do not treat that area as an app-bar navigation target while
+  // collecting samples.
+  if (_mode != Mode::Calibrate && UiKit::navigationIconContains(point.x, point.y)) {
     if (_mode == Mode::Menu) {
       _navigator.pop();
     } else {
@@ -52,13 +55,13 @@ void TouchCalibrationScreen::handleTouch(const TouchPoint &point) {
   }
 
   if (_mode == Mode::Calibrate && _calibrationWaitingForRelease) {
-    drawCalibrationTouch(point, "Release first");
+    drawCalibrationTouch(point);
     return;
   }
 
   if (_lastTouchDown) {
     if (_mode == Mode::Calibrate) {
-      drawCalibrationTouch(point, "Tracking");
+      drawCalibrationTouch(point);
     }
     return;
   }
@@ -153,12 +156,10 @@ void TouchCalibrationScreen::drawDrawMode() {
 }
 
 void TouchCalibrationScreen::drawCalibrationMode() {
-  drawHeader("Calibrate");
+  // Calibration is deliberately a bare full-screen view. The target grid
+  // must include the panel edges, with no app bar or footer competing for
+  // those samples.
   drawCalibrationTarget();
-  TFT_eSPI &tft = _display.tft();
-  UiText::draw(tft, F("Touch the target"), _display.width() / 2,
-               _display.height() - 10, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Compact, BC_DATUM);
 }
 
 void TouchCalibrationScreen::drawHeader(const char *title) {
@@ -188,27 +189,18 @@ void TouchCalibrationScreen::drawCalibrationTarget() {
   tft.drawLine(max((int16_t)0, (int16_t)(x - 10)), y,
                min((int16_t)(_display.width() - 1), (int16_t)(x + 10)), y, TFT_YELLOW);
   tft.drawLine(x, max((int16_t)0, (int16_t)(y - 10)), x,
-               min((int16_t)(_display.height() - InfoHeight - 1), (int16_t)(y + 10)), TFT_YELLOW);
+               min((int16_t)(_display.height() - 1), (int16_t)(y + 10)), TFT_YELLOW);
 }
 
-void TouchCalibrationScreen::drawCalibrationTouch(const TouchPoint &point,
-                                                   const char *status) {
+void TouchCalibrationScreen::drawCalibrationTouch(const TouchPoint &point) {
   if (!_display.isReady()) {
     return;
   }
 
   TFT_eSPI &tft = _display.tft();
-  int16_t dotY = min((int16_t)point.y,
-                     (int16_t)(_display.height() - InfoHeight - 3));
-  tft.fillCircle(point.x, dotY, 5, TFT_CYAN);
-
-  tft.fillRect(0, _display.height() - InfoHeight,
-               _display.width(), InfoHeight, TFT_BLACK);
-  char info[72];
-  snprintf(info, sizeof(info), "%s  x:%u y:%u z:%u",
-           status, point.x, point.y, point.z);
-  UiText::draw(tft, info, 8, _display.height() - InfoHeight / 2, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Compact, ML_DATUM);
+  // There is no footer in calibration mode, so the sampled point can be
+  // shown at its actual mapped coordinate, including the bottom edge.
+  tft.fillCircle(point.x, point.y, 5, TFT_CYAN);
 }
 
 void TouchCalibrationScreen::acceptCalibrationPoint(const TouchPoint &point) {
@@ -230,7 +222,7 @@ void TouchCalibrationScreen::acceptCalibrationPoint(const TouchPoint &point) {
   }
 
   draw();
-  drawCalibrationTouch(point, "Sample accepted");
+  drawCalibrationTouch(point);
 }
 
 bool TouchCalibrationScreen::inButton(int16_t x, int16_t y, int16_t index) const {
@@ -246,9 +238,7 @@ int16_t TouchCalibrationScreen::targetX(uint8_t column) const {
 }
 
 int16_t TouchCalibrationScreen::targetY(uint8_t row) const {
-  const int16_t top = HeaderHeight + TargetSize / 2;
-  const int16_t bottom = _display.height() - InfoHeight - TargetSize / 2 - 1;
-  return top + (int32_t)row * (bottom - top) / 3;
+  return (int32_t)row * (_display.height() - 1) / 3;
 }
 
 void TouchCalibrationScreen::resetCalibration() {
