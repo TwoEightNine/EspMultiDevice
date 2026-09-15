@@ -31,6 +31,13 @@ Do not casually upgrade, reconfigure, or copy a dependency into the Arduino libr
 
 Arduino-ESP32's existing `HTTPClient`, `NetworkClientSecure`, `Preferences`, and IDF `cJSON` are the selected platform facilities for future assistant HTTP, TLS, storage, and JSON work. Do not add parallel libraries. Assistant WSS code must use the project `SecureWebSocketClient`, which implements the small, bounded RFC 6455 client layer over `NetworkClientSecure` and requires a non-empty trust input. Its TLS-handshake allocations are directed to PSRAM during connection setup to preserve the internal-heap contiguous block. Do not reuse `BrowserTransport` or call arduinoWebSockets directly.
 
+The hosted Stage 1 bootstrap and WSS probe trust the bundled DigiCert Global
+Root G2 PEM, sourced from DigiCert with SHA-256 fingerprint
+`CB:3C:CB:B7:60:31:E5:E0:13:8F:8D:D3:9A:23:F9:DE:47:FF:C3:5E:43:C1:14:4C:EA:27:D4:6A:5A:B1:CB:5F`.
+The observed `api.tenclass.net` and `api.xiaozhi.me` chains both terminated at
+that root. Treat a future certificate-chain failure as a trust-input review;
+never introduce an insecure fallback.
+
 ## Stage 0 measurements and probes
 
 The pre-change baseline was recorded with Arduino-ESP32 3.3.8 and the legacy 3 MB application profile:
@@ -60,6 +67,41 @@ Record the complete 115200-baud Serial result here after a physical-device run:
 
 The physical-device Stage 0 report passed every threshold: codec/TLS initialization growth below 32 KiB internal heap, a 122,868-byte largest internal block after active WSS testing, no monotonic reconnect/frame loss, a 194-byte maximum Opus packet, exact 960/1,440 decoded samples, and P95 encode/decode below 30/20 ms. Stage 1 may begin, but it must add its session loop off the UI task and retain the documented half-duplex audio ownership.
 
+## Stage 1 hosted compatibility probe
+
+Build the Xiaozhi-hosted diagnostic with
+`tools/build_xiaozhi_compatibility_probe.sh`. It retains the complete
+application in the linked image while the compile-time entry point bypasses
+normal setup. It uses the production two-port USB profile, so capture UART0 at
+115200 baud through the USB-to-UART connector. The diagnostic requires saved
+Wi-Fi credentials plus DNS and NTP access and never initializes the display,
+audio controllers, SD card, or USB mass storage.
+
+The implementation follows Xiaozhi upstream commit
+`ac6deed3d8e75348475364bf40ad953c6cd48054`: activation version 1, the official
+bootstrap headers and board report, dynamic WSS credentials, protocol-version
+header, and client/server hello exchange. Firmware and MQTT instructions in the
+response are deliberately ignored. The build enforces both the 6,553,600-byte
+application slot and a 4.5 MiB diagnostic gate.
+
+The implementation build verified at 2,944,656 bytes. Its companion regression
+builds also passed: normal firmware at 2,832,960 bytes and the Stage 0 assistant
+dependency diagnostic at 3,102,032 bytes, all within the 6,553,600-byte slot.
+
+Record the complete redacted Serial result after account binding and the
+automatic two-boot hardware run:
+
+| Runtime gate | Recorded result |
+| --- | --- |
+| Stable MAC-derived Device-Id and NVS UUID across reboot | Pending hardware run |
+| Normal Xiaozhi account binding | Pending hardware run |
+| Non-placeholder bootstrap WSS credentials | Pending hardware run |
+| Hosted WSS upgrade and valid server hello | Pending hardware run |
+| MCP disabled or omitted acceptance | Pending hardware run |
+| Fresh bootstrap credentials after automatic reboot | Pending hardware run |
+| Free/largest internal heap, PSRAM, and 24 KiB task high-water mark | Pending hardware run |
+| Credential-free Serial log audit | Pending hardware run |
+
 ## Generators and regression fixtures
 
 | Tool | Purpose |
@@ -70,6 +112,7 @@ The physical-device Stage 0 report passed every threshold: codec/TLS initializat
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
+| `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 hosted bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.
 

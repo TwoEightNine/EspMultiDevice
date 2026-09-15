@@ -72,7 +72,10 @@ bool SecureWebSocketClient::connect(const Endpoint &endpoint, const Header *head
     setError(F("PEM trust store must be null terminated"));
     return false;
   }
-  if (!buildHeaders(headers, headerCount)) return false;
+  if (!buildHeaders(headers, headerCount)) {
+    memset(_extraHeaders, 0, sizeof(_extraHeaders));
+    return false;
+  }
 
   if (trust.kind == TrustKind::CertificateBundle) _tls.setCACertBundle(trust.data, trust.length);
   else _tls.setCACert(reinterpret_cast<const char *>(trust.data));
@@ -86,16 +89,19 @@ bool SecureWebSocketClient::connect(const Endpoint &endpoint, const Header *head
     mbedtls_platform_set_calloc_free(assistantDefaultTlsCalloc, assistantDefaultTlsFree);
   }
   if (!tlsConnected) {
+    memset(_extraHeaders, 0, sizeof(_extraHeaders));
     setError(F("TLS WSS connection failed"));
     _tls.stop();
     return false;
   }
   _active = true;
   if (!performHandshake(endpoint)) {
+    memset(_extraHeaders, 0, sizeof(_extraHeaders));
     _tls.stop();
     _active = false;
     return false;
   }
+  memset(_extraHeaders, 0, sizeof(_extraHeaders));
   _connected = true;
   resetReceiveState();
   _lastError = F("OK");
@@ -140,6 +146,11 @@ void SecureWebSocketClient::close() {
   _eventHead = 0;
   _eventCount = 0;
   _overflowPending = false;
+  memset(_extraHeaders, 0, sizeof(_extraHeaders));
+  memset(_events, 0, sizeof(_events));
+  memset(_rxPayload, 0, sizeof(_rxPayload));
+  memset(_txChunk, 0, sizeof(_txChunk));
+  memset(_rxLengthBytes, 0, sizeof(_rxLengthBytes));
   resetReceiveState();
 }
 
@@ -191,6 +202,7 @@ bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint) {
                          subprotocol[0] ? subprotocol : "", subprotocol[0] ? "\r\n" : "");
   const size_t extras = strlen(_extraHeaders);
   if (written < 0 || static_cast<size_t>(written) < 2 || static_cast<size_t>(written) + extras + 1 > sizeof(request)) {
+    memset(request, 0, sizeof(request));
     setError(F("WebSocket handshake exceeds limit"));
     return false;
   }
@@ -199,9 +211,11 @@ bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint) {
   memcpy(request + requestLength, _extraHeaders, extras);
   requestLength += extras + 2;
   if (!writeAll(reinterpret_cast<const uint8_t *>(request), requestLength, IoTimeoutMs)) {
+    memset(request, 0, sizeof(request));
     setError(F("WebSocket upgrade write failed"));
     return false;
   }
+  memset(request, 0, sizeof(request));
   size_t used = 0;
   const uint32_t started = millis();
   while (millis() - started < IoTimeoutMs && used < MaxHandshakeBytes) {

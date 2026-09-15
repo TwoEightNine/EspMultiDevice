@@ -42,6 +42,28 @@ The Stage 0 `SecureWebSocketClient` is the future assistant's bounded WSS layer 
 
 The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960-sample) frames. Its decoder is initialized explicitly for 16 or 24 kHz, with maximum output of 960 or 1,440 samples respectively. Codec state lives in PSRAM. This dependency foundation does not capture, stream, or play audio in normal firmware; a future assistant must continue to arbitrate the shared BCLK and WS lines half-duplex through the microphone and speaker controllers.
 
+The Stage 1 Xiaozhi probe uses `https://api.tenclass.net/xiaozhi/ota/` as its
+only configured hosted endpoint. It sends the current upstream headers and
+system/board report, including SSID, RSSI, channel, and local IP. Account login
+never occurs on the device: when bootstrap returns activation instructions,
+the serial diagnostic prints the bounded message and code while the user binds
+the device through the Xiaozhi console. Activation version 1 polls the hosted
+`/activate` endpoint with `{}` until accepted or timed out.
+
+The returned WebSocket URL, token, and protocol version exist only in bounded
+RAM buffers. The probe rejects plaintext WebSockets, malformed URLs, empty or
+known placeholder tokens, and protocol versions outside 1–3. It first
+advertises `mcp: false`; if the socket upgrades but no server hello arrives, it
+retries once with the features object omitted. A valid hello is followed by an
+immediate disconnect. The token, Authorization value, raw bootstrap body,
+complete WSS URL, and server session ID are never logged or persisted.
+
+After its first successful hello, the probe stores temporary `assistant/s1_phase`
+and `assistant/s1_mcp` bytes and restarts. The second boot reloads the same UUID,
+performs a fresh bootstrap rather than reusing credentials, and requires a
+second hello before clearing those temporary keys. This proves automatic
+credential refresh across reboot; it does not add a production reconnect loop.
+
 `AudioSettings` persists the speaker volume using ESP32 Preferences. `WorkoutScreen` has configurable work/rest periods in five-second steps from 5 to 600 seconds and plays audible stage cues using the shared speaker and volume setting.
 
 ## Touch, battery, and startup diagnostics

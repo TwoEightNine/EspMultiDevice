@@ -28,6 +28,16 @@ USBMSC usbMsc;
 
 #endif
 
+#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+
+#include "tests/xiaozhi_compatibility_probe/xiaozhi_compatibility_probe.ino"
+
+#endif
+
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE) && defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+#error "Select only one assistant diagnostic"
+#endif
+
 #include <esp_system.h>
 
 #include "src/core/BatteryController.h"
@@ -70,6 +80,10 @@ static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
 // Volatile keeps the complete production image linked into the diagnostic size
 // measurement while selecting the isolated probe at runtime.
 static volatile bool RUN_ASSISTANT_DEPENDENCY_PROBE = true;
+#endif
+#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+// Keep production composition linked while selecting the isolated hosted probe.
+static volatile bool RUN_XIAOZHI_COMPATIBILITY_PROBE = true;
 #endif
 
 // Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
@@ -194,6 +208,12 @@ void setup() {
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
   if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
     assistantDependencyProbeSetup();
+    return;
+  }
+#endif
+#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+  if (RUN_XIAOZHI_COMPATIBILITY_PROBE) {
+    xiaozhiCompatibilityProbeSetup();
     return;
   }
 #endif
@@ -395,6 +415,12 @@ void loop() {
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
   if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
     assistantDependencyProbeLoop();
+    return;
+  }
+#endif
+#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+  if (RUN_XIAOZHI_COMPATIBILITY_PROBE) {
+    xiaozhiCompatibilityProbeLoop();
     return;
   }
 #endif

@@ -149,6 +149,23 @@ or 1,440-sample 24 kHz output. Codec state is allocated in PSRAM. Stage 1 must
 keep microphone capture and speaker playback half-duplex and place any
 network/codec loop on non-UI work rather than blocking `Screen::tick()`.
 
+Stage 1 adds a hosted-compatibility diagnostic, not assistant behavior.
+`XiaozhiIdentity` owns the assistant's stable identifiers: the device ID is the
+lowercase Wi-Fi station MAC and a random UUIDv4 is generated once in NVS under
+`assistant/client_uuid`. A malformed stored UUID is a hard error because
+silently replacing it would change the server-side device identity.
+`XiaozhiBootstrapClient` owns the certificate-checked HTTP POST, upstream-style
+board report, bounded response, and parsing of only activation and WebSocket
+configuration. It never exposes firmware or MQTT response data and never logs
+the raw response or credentials.
+
+The Stage 1 probe is selected only by
+`ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE`. It runs in a dedicated task, uses the
+existing secure WebSocket adapter, sends one protocol `hello`, waits for a
+validated server `hello`, and disconnects. No audio, MCP request, system
+command, or other server message is acted on. The normal composition root does
+not instantiate either Stage 1 service.
+
 ## File and source boundaries
 
 ```text
