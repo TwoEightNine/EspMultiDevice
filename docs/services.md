@@ -38,13 +38,49 @@ The boot request is consumed before transfer setup, so pressing reset or power-c
 
 Recording and speaker playback never run concurrently because they share I2S clock and word-select pins. Stop/mute the relevant component before repurposing the bus.
 
+### Production assistant
+
+The Stage 2 assistant exists only while its screen is active. The lightweight
+controller is registered at boot, but it creates the worker/session only on
+screen entry and releases its WebSocket/codec buffers after safe screen exit.
+Its controller publishes fixed-size immutable snapshots; the session worker alone performs
+bootstrap, activation polling, WebSocket I/O, Opus conversion, microphone
+capture, and speaker playback. Closing the screen waits for a worker
+acknowledgement after capture/playback are stopped and credentials are wiped.
+
+The microphone produces exact 960-sample, mono 16 kHz frames. The namespaced
+OpusEncoder and OpusDecoder adapters delegate to the existing fixed-point
+OpusCodec binding; the decoder accepts only 16 or 24 kHz mono output. The
+speaker starts only after microphone shutdown. Normal TTS completion drains
+the bounded downlink ring and I2S DMA before mute/stop; cancellation discards
+queued audio immediately. The persisted global speaker volume remains
+authoritative.
+
+Four commands, eight typed events, four uplink frames (240 ms), and eight
+downlink packets (480 ms) are the hard queue limits. Overflow closes the
+connection. The opposite-core worker uses a 48 KiB internal-RAM stack and reports safe
+stack/heap metrics. Stage 1 retained 21,076 bytes; production hardware
+acceptance requires at least 8 KiB after ten turns and reconnect cycles.
+Bootstrap diagnostics log only a bounded transport/HTTP/response class and
+numeric HTTP status; they never log URLs, response bodies, or credentials.
+
+Assistant bootstrap waits up to 30 seconds for secure time, then uses only the
+injected self-hosted HTTPS endpoint and CA. Session URLs must be WSS with a DNS
+hostname. Authentication rejection clears RAM credentials and restarts the
+bootstrap flow. Other recoverable failures retry after 2, 4, 8, then 15
+seconds. Tokens, Authorization, complete WSS URLs, session IDs, raw JSON,
+audio, and captions are prohibited from logs and snapshots. Firmware-update,
+MQTT, system, MCP, alert, custom, and unknown instructions are ignored.
+
+### Stage 0/1 validation history
+
 The Stage 0 `SecureWebSocketClient` is the future assistant's bounded WSS layer over `NetworkClientSecure`. It requires a trust store and never uses the browser's HTTPS compatibility mode. Its connection handshake directs temporary TLS allocations to PSRAM so the internal-heap largest block remains available; future session code must perform this synchronous operation in worker-backed, non-UI work.
 
 The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960-sample) frames. Its decoder is initialized explicitly for 16 or 24 kHz, with maximum output of 960 or 1,440 samples respectively. Codec state lives in PSRAM. This dependency foundation does not capture, stream, or play audio in normal firmware; a future assistant must continue to arbitrate the shared BCLK and WS lines half-duplex through the microphone and speaker controllers.
 
-The Stage 1 Xiaozhi probe defaults to
-`https://api.tenclass.net/xiaozhi/ota/`, but accepts a build-local HTTPS
-endpoint and PEM CA through the ignored `LocalBackendConfig.h`. It sends the
+The migrated Stage 1 Xiaozhi probe requires a build-local HTTPS endpoint and
+PEM CA through the ignored `LocalBackendConfig.h`; it has no public-hosted
+default or fallback. It sends the
 current upstream headers and system/board report, including SSID, RSSI,
 channel, and local IP. Account login
 never occurs on the device: when bootstrap returns activation instructions,

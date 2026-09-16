@@ -22,19 +22,10 @@
 // object static, but start native USB only from the isolated transfer boot.
 USBMSC usbMsc;
 
-#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
-
-#include "tests/assistant_dependency_probe/assistant_dependency_probe.ino"
-
-#endif
-
-#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
-
-#include "tests/xiaozhi_compatibility_probe/xiaozhi_compatibility_probe.ino"
-
-#endif
-
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE) && defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+#error "Select only one assistant diagnostic"
+#endif
+#if defined(ESP_MEDIA_ASSISTANT_CONTRACT) && (defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE) || defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE))
 #error "Select only one assistant diagnostic"
 #endif
 
@@ -43,6 +34,9 @@ USBMSC usbMsc;
 #include "src/core/BatteryController.h"
 #include "src/core/DisplayController.h"
 #include "src/services/audio/AudioSettings.h"
+#include "src/services/assistant/AssistantBackendConfigLoader.h"
+#include "src/services/assistant/AssistantController.h"
+#include "src/features/assistant/AssistantScreen.h"
 #include "src/features/settings/AudioSettingsScreen.h"
 #include "src/features/audio_player/AudioPlayerScreen.h"
 #include "src/features/video_player/VideoPlayerScreen.h"
@@ -71,6 +65,16 @@ USBMSC usbMsc;
 #include "src/features/workout/WorkoutScreen.h"
 #include "src/media/MediaCache.h"
 
+#if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
+#include "tests/assistant_dependency_probe/assistant_dependency_probe.ino"
+#endif
+#if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
+#include "tests/xiaozhi_compatibility_probe/xiaozhi_compatibility_probe.ino"
+#endif
+#if defined(ESP_MEDIA_ASSISTANT_CONTRACT)
+#include "tests/assistant_contract/assistant_contract.ino"
+#endif
+
 static const uint32_t SERIAL_BAUD = 115200;
 static const uint8_t DISPLAY_ROTATION = 4;
 // Development-only diagnostic. Enable for three cold boots with a target card,
@@ -82,8 +86,11 @@ static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
 static volatile bool RUN_ASSISTANT_DEPENDENCY_PROBE = true;
 #endif
 #if defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
-// Keep production composition linked while selecting the isolated hosted probe.
+// Keep production composition linked while selecting the isolated compatibility probe.
 static volatile bool RUN_XIAOZHI_COMPATIBILITY_PROBE = true;
+#endif
+#if defined(ESP_MEDIA_ASSISTANT_CONTRACT)
+static volatile bool RUN_ASSISTANT_CONTRACT = true;
 #endif
 
 // Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
@@ -128,6 +135,7 @@ AudioSettings *audioSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 BatteryController *batteryController = nullptr;
+AssistantController *assistantController = nullptr;
 UsbMassStorageController *usbMassStorage = nullptr;
 
 Navigator *navigator = nullptr;
@@ -146,6 +154,7 @@ WiFiScreen *wifiScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
 WorkoutScreen *workoutScreen = nullptr;
 UsbDriveScreen *usbDriveScreen = nullptr;
+AssistantScreen *assistantScreen = nullptr;
 
 void updateTouch();
 
@@ -205,6 +214,12 @@ void updateTouch() {
 }
 
 void setup() {
+#if defined(ESP_MEDIA_ASSISTANT_CONTRACT)
+  if (RUN_ASSISTANT_CONTRACT) {
+    assistantContractSetup();
+    return;
+  }
+#endif
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
   if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
     assistantDependencyProbeSetup();
@@ -342,6 +357,14 @@ void setup() {
   timeController->begin();
   Serial.println(F("Time controller ready."));
 
+  const AssistantBackendConfig assistantBackend = loadAssistantBackendConfig();
+  assistantController = new AssistantController(
+    *wifiController, *timeController, *mic, *speaker, assistantBackend
+  );
+  if (!assistantController->begin()) {
+    Serial.println(F("Assistant worker unavailable."));
+  }
+
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController, *batteryController);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
@@ -357,6 +380,9 @@ void setup() {
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
   usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
+  assistantScreen = new AssistantScreen(
+    *navigator, *touch, *display, *assistantController
+  );
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -400,6 +426,9 @@ void setup() {
   if (!navigator->registerScreen(ScreenId::Workout, *workoutScreen)) {
     Serial.println(F("Navigator failed to register Workout screen."));
   }
+  if (!navigator->registerScreen(ScreenId::Assistant, *assistantScreen)) {
+    Serial.println(F("Navigator failed to register Assistant screen."));
+  }
   if (!navigator->registerScreen(ScreenId::UsbDrive, *usbDriveScreen)) {
     Serial.println(F("Navigator failed to register USB Drive screen."));
   }
@@ -412,6 +441,12 @@ void setup() {
 }
 
 void loop() {
+#if defined(ESP_MEDIA_ASSISTANT_CONTRACT)
+  if (RUN_ASSISTANT_CONTRACT) {
+    assistantContractLoop();
+    return;
+  }
+#endif
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE)
   if (RUN_ASSISTANT_DEPENDENCY_PROBE) {
     assistantDependencyProbeLoop();

@@ -3,8 +3,55 @@ server:
   auth:
     enabled: true
     allowed_devices: []
+  mqtt_gateway: null
+  mqtt_signature_key: null
+
+prompt: |
+  You are a concise, friendly voice assistant. Reply in clear natural English.
+  Prefer one or two short sentences unless the user asks for more detail.
 
 selected_module:
-  ASR: DoubaoASR
+  VAD: SileroVAD
+  ASR: OpenaiASR
+  LLM: OpenAILLM
+  TTS: EdgeTTS
   Intent: nointent
   Memory: nomem
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 500
+
+ASR:
+  OpenaiASR:
+    type: openai
+    api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
+    base_url: https://api.openai.com/v1/audio/transcriptions
+    model_name: gpt-4o-mini-transcribe-2025-12-15
+    output_dir: tmp/
+
+LLM:
+  OpenAILLM:
+    type: openai
+    api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
+    base_url: https://api.openai.com/v1
+    model_name: gpt-5.4-mini-2026-03-17
+
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: en-US-JennyNeural
+    output_dir: tmp/
+    language: English
+
+Intent:
+  nointent:
+    type: nointent
+
+Memory:
+  nomem:
+    type: nomem

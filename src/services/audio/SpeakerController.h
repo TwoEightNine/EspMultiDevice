@@ -28,6 +28,7 @@ public:
   const String &lastError() const;
 
   size_t writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs = 100);
+  bool drain(uint32_t timeoutMs = 2000);
   void stop();
 
 private:

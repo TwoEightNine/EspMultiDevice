@@ -1,5 +1,6 @@
 #include "OpusCodec.h"
 
+#include "../../../third_party/esp-opus/include/opus.h"
 #include <esp_heap_caps.h>
 #include <stdlib.h>
 
@@ -17,14 +18,30 @@ OpusCodec::~OpusCodec() {
 
 bool OpusCodec::begin(uint32_t decoderSampleRate) {
   end();
+  if (!beginEncoder() || !beginDecoder(decoderSampleRate)) {
+    end();
+    return false;
+  }
+  _lastError = OPUS_OK;
+  return true;
+}
+
+bool OpusCodec::beginEncoder() {
+  releaseEncoder();
+  if (!allocateEncoder()) return false;
+  _lastError = OPUS_OK;
+  return true;
+}
+
+bool OpusCodec::beginDecoder(uint32_t decoderSampleRate) {
+  releaseDecoder();
+  _decoderSampleRate = 0;
+  _decoderFrameSamples = 0;
   if (decoderSampleRate != 16000 && decoderSampleRate != 24000) {
     _lastError = OPUS_BAD_ARG;
     return false;
   }
-  if (!allocateEncoder() || !allocateDecoder(decoderSampleRate)) {
-    end();
-    return false;
-  }
+  if (!allocateDecoder(decoderSampleRate)) return false;
   _lastError = OPUS_OK;
   return true;
 }
@@ -38,6 +55,14 @@ void OpusCodec::end() {
 
 bool OpusCodec::isReady() const {
   return _encoder != nullptr && _decoder != nullptr;
+}
+
+bool OpusCodec::encoderReady() const {
+  return _encoder != nullptr;
+}
+
+bool OpusCodec::decoderReady() const {
+  return _decoder != nullptr;
 }
 
 uint32_t OpusCodec::decoderSampleRate() const {

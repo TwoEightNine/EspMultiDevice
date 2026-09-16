@@ -1,7 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
-#include "../../../third_party/esp-opus/include/opus.h"
+
+struct OpusEncoder;
+struct OpusDecoder;
 
 class OpusCodec {
 public:
@@ -18,8 +20,12 @@ public:
   OpusCodec &operator=(const OpusCodec &) = delete;
 
   bool begin(uint32_t decoderSampleRate);
+  bool beginEncoder();
+  bool beginDecoder(uint32_t decoderSampleRate);
   void end();
   bool isReady() const;
+  bool encoderReady() const;
+  bool decoderReady() const;
   uint32_t decoderSampleRate() const;
   size_t decoderFrameSamples() const;
 

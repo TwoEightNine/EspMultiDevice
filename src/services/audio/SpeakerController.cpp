@@ -177,6 +177,16 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
   return writtenSamples;
 }
 
+bool SpeakerController::drain(uint32_t timeoutMs) {
+  if (!_ready) return true;
+  // The legacy Arduino-ESP32 I2S API does not expose a TX-done primitive.
+  // Its eight 512-sample DMA buffers cover at most 256 ms at 16 kHz (less at
+  // 24 kHz), so allow that bounded queue to finish before muting.
+  const uint32_t drainMs = min<uint32_t>(timeoutMs, 260);
+  delay(drainMs);
+  return timeoutMs >= drainMs;
+}
+
 void SpeakerController::stop() {
   // Disable the amplifier before changing the I2S peripheral or pins.
   mute();

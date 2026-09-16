@@ -10,9 +10,6 @@
 #include <new>
 #include <time.h>
 
-#include "../../src/services/assistant/SecureWebSocketClient.h"
-#include "../../src/services/audio/OpusCodec.h"
-
 #if __has_include("ProbeConfig.h")
 #include "ProbeConfig.h"
 #define ESP_MEDIA_PROBE_HAS_WSS_CONFIG 1

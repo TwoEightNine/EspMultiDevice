@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 
-class XiaozhiIdentity {
+class AssistantIdentity {
 public:
   static constexpr size_t DeviceIdBytes = 18;
   static constexpr size_t ClientIdBytes = 37;
 
-  XiaozhiIdentity();
+  AssistantIdentity();
 
   bool begin();
   const char *deviceId() const { return _deviceId; }

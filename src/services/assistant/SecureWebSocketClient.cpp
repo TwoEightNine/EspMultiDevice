@@ -1,34 +1,19 @@
 #include "SecureWebSocketClient.h"
+#include "AssistantTlsAllocator.h"
 
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/base64.h>
-#include <mbedtls/platform.h>
 #include <mbedtls/sha1.h>
 
 #include <strings.h>
 #include <string.h>
-
-// Arduino-ESP32 3.3.8's esp_mem.h declares these ESP-IDF C symbols with C++
-// linkage. Use distinct local names pinned to the unmangled runtime symbols.
-extern void *assistantDefaultTlsCalloc(size_t count, size_t size) asm("esp_mbedtls_mem_calloc");
-extern void assistantDefaultTlsFree(void *pointer) asm("esp_mbedtls_mem_free");
 
 namespace {
 constexpr uint32_t IoTimeoutMs = 5000;
 constexpr uint32_t ConnectTimeoutMs = 15000;
 constexpr size_t MaxHandshakeBytes = 4096;
 constexpr char WebSocketGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
-// ESP-IDF exposes mbedTLS's allocator hook. The TLS contexts and certificate
-// parser do not require DMA-capable RAM, so put their short-lived handshake
-// allocations in the available OPI PSRAM instead of fragmenting internal heap.
-void *assistantTlsCalloc(size_t count, size_t size) {
-  if (psramFound()) {
-    return heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  }
-  return assistantDefaultTlsCalloc(count, size);
-}
 
 bool responseHeaderEquals(const char *response, const char *name, const char *expected) {
   const size_t nameLength = strlen(name);
@@ -50,30 +35,39 @@ bool responseHeaderEquals(const char *response, const char *name, const char *ex
 
 SecureWebSocketClient::SecureWebSocketClient()
     : _eventHead(0), _eventCount(0), _active(false), _connected(false), _overflowPending(false),
-      _extraHeaders{}, _rxPayload{}, _txChunk{}, _receiveState(ReceiveState::Header), _rxFirst(0),
-      _rxLengthBytes{}, _rxLengthUsed(0), _rxLength(0), _rxUsed(0), _lastError(F("Not connected")) {}
+      _events(nullptr), _extraHeaders(nullptr), _rxPayload(nullptr), _txChunk(nullptr),
+      _receiveState(ReceiveState::Header), _rxFirst(0),
+      _rxLengthBytes{}, _rxLengthUsed(0), _rxLength(0), _rxUsed(0), _lastError(F("Not connected")),
+      _lastFailure(FailureKind::None), _lastHttpStatus(0) {}
 
-SecureWebSocketClient::~SecureWebSocketClient() { close(); }
+SecureWebSocketClient::~SecureWebSocketClient() {
+  close();
+  releaseStorage();
+}
 
 bool SecureWebSocketClient::connect(const Endpoint &endpoint, const Header *headers, size_t headerCount,
                                     const TrustStore &trust) {
   close();
+  const uint32_t connectStarted = millis();
+  _lastFailure = FailureKind::None;
+  _lastHttpStatus = 0;
   if (!endpoint.host || !endpoint.host[0] || endpoint.port == 0 || !endpoint.path || endpoint.path[0] != '/' ||
       !validEndpointValue(endpoint.host) || !validEndpointValue(endpoint.path) ||
       (endpoint.subprotocol && !validEndpointValue(endpoint.subprotocol))) {
-    setError(F("Invalid WSS endpoint"));
+    setError(FailureKind::InvalidConfiguration, F("Invalid WSS endpoint"));
     return false;
   }
   if (!trust.data || trust.length == 0) {
-    setError(F("WSS trust store is required"));
+    setError(FailureKind::InvalidConfiguration, F("WSS trust store is required"));
     return false;
   }
   if (trust.kind == TrustKind::PemCertificate && trust.data[trust.length - 1] != '\0') {
-    setError(F("PEM trust store must be null terminated"));
+    setError(FailureKind::InvalidConfiguration, F("PEM trust store must be null terminated"));
     return false;
   }
+  if (!ensureStorage()) return false;
   if (!buildHeaders(headers, headerCount)) {
-    memset(_extraHeaders, 0, sizeof(_extraHeaders));
+    memset(_extraHeaders, 0, MaxHeaderBytes + 1);
     return false;
   }
 
@@ -81,27 +75,28 @@ bool SecureWebSocketClient::connect(const Endpoint &endpoint, const Header *head
   else _tls.setCACert(reinterpret_cast<const char *>(trust.data));
   _tls.setHandshakeTimeout(ConnectTimeoutMs / 1000U);
   _tls.setTimeout(1000);
-  const bool psramTlsAllocator = psramFound() &&
-    mbedtls_platform_set_calloc_free(assistantTlsCalloc, assistantDefaultTlsFree) == 0;
+  AssistantTlsAllocatorScope tlsAllocator;
   const bool tlsConnected = _tls.connect(endpoint.host, endpoint.port,
                                          static_cast<int32_t>(ConnectTimeoutMs));
-  if (psramTlsAllocator) {
-    mbedtls_platform_set_calloc_free(assistantDefaultTlsCalloc, assistantDefaultTlsFree);
-  }
   if (!tlsConnected) {
-    memset(_extraHeaders, 0, sizeof(_extraHeaders));
-    setError(F("TLS WSS connection failed"));
+    memset(_extraHeaders, 0, MaxHeaderBytes + 1);
+    setError(FailureKind::TlsConnect, F("TLS WSS connection failed"));
     _tls.stop();
     return false;
   }
   _active = true;
-  if (!performHandshake(endpoint)) {
-    memset(_extraHeaders, 0, sizeof(_extraHeaders));
+  const uint32_t elapsed = millis() - connectStarted;
+  if (elapsed >= ConnectTimeoutMs ||
+      !performHandshake(endpoint, ConnectTimeoutMs - elapsed)) {
+    if (elapsed >= ConnectTimeoutMs) {
+      setError(FailureKind::UpgradeTimeout, F("WebSocket connection timed out"));
+    }
+    memset(_extraHeaders, 0, MaxHeaderBytes + 1);
     _tls.stop();
     _active = false;
     return false;
   }
-  memset(_extraHeaders, 0, sizeof(_extraHeaders));
+  memset(_extraHeaders, 0, MaxHeaderBytes + 1);
   _connected = true;
   resetReceiveState();
   _lastError = F("OK");
@@ -124,7 +119,7 @@ bool SecureWebSocketClient::poll(Event &event) {
 
 bool SecureWebSocketClient::sendText(const char *text, size_t length) {
   if (!text || length == 0 || length > MaxPayloadBytes) {
-    setError(F("Invalid WebSocket text payload"));
+    setError(FailureKind::Protocol, F("Invalid WebSocket text payload"));
     return false;
   }
   return sendFrame(0x1, reinterpret_cast<const uint8_t *>(text), length);
@@ -132,7 +127,7 @@ bool SecureWebSocketClient::sendText(const char *text, size_t length) {
 
 bool SecureWebSocketClient::sendBinary(const uint8_t *data, size_t length) {
   if (!data || length == 0 || length > MaxPayloadBytes) {
-    setError(F("Invalid WebSocket binary payload"));
+    setError(FailureKind::Protocol, F("Invalid WebSocket binary payload"));
     return false;
   }
   return sendFrame(0x2, data, length);
@@ -146,10 +141,10 @@ void SecureWebSocketClient::close() {
   _eventHead = 0;
   _eventCount = 0;
   _overflowPending = false;
-  memset(_extraHeaders, 0, sizeof(_extraHeaders));
-  memset(_events, 0, sizeof(_events));
-  memset(_rxPayload, 0, sizeof(_rxPayload));
-  memset(_txChunk, 0, sizeof(_txChunk));
+  if (_extraHeaders) memset(_extraHeaders, 0, MaxHeaderBytes + 1);
+  if (_events) memset(_events, 0, sizeof(Event) * EventQueueCapacity);
+  if (_rxPayload) memset(_rxPayload, 0, MaxPayloadBytes + 1);
+  if (_txChunk) memset(_txChunk, 0, TxChunkBytes);
   memset(_rxLengthBytes, 0, sizeof(_rxLengthBytes));
   resetReceiveState();
 }
@@ -157,22 +152,28 @@ void SecureWebSocketClient::close() {
 bool SecureWebSocketClient::isActive() const { return _active; }
 bool SecureWebSocketClient::isConnected() const { return _connected; }
 const String &SecureWebSocketClient::lastError() const { return _lastError; }
+SecureWebSocketClient::FailureKind SecureWebSocketClient::lastFailure() const { return _lastFailure; }
+int SecureWebSocketClient::lastHttpStatus() const { return _lastHttpStatus; }
 
 bool SecureWebSocketClient::buildHeaders(const Header *headers, size_t count) {
+  if (!_extraHeaders) {
+    setError(FailureKind::Internal, F("WebSocket storage unavailable"));
+    return false;
+  }
   if (count > MaxHeaders || (count && !headers)) {
-    setError(F("Too many WebSocket headers"));
+    setError(FailureKind::InvalidConfiguration, F("Too many WebSocket headers"));
     return false;
   }
   size_t used = 0;
   for (size_t i = 0; i < count; ++i) {
     if (!validHeaderName(headers[i].name) || !validHeaderValue(headers[i].value)) {
-      setError(F("Invalid WebSocket header"));
+      setError(FailureKind::InvalidConfiguration, F("Invalid WebSocket header"));
       return false;
     }
     const size_t nameLength = strlen(headers[i].name);
     const size_t valueLength = strlen(headers[i].value);
     if (used + nameLength + valueLength + 4 > MaxHeaderBytes) {
-      setError(F("WebSocket headers exceed limit"));
+      setError(FailureKind::InvalidConfiguration, F("WebSocket headers exceed limit"));
       return false;
     }
     memcpy(_extraHeaders + used, headers[i].name, nameLength); used += nameLength;
@@ -184,13 +185,54 @@ bool SecureWebSocketClient::buildHeaders(const Header *headers, size_t count) {
   return true;
 }
 
-bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint) {
+bool SecureWebSocketClient::ensureStorage() {
+  if (_events && _extraHeaders && _rxPayload && _txChunk) return true;
+  releaseStorage();
+  _events = static_cast<Event *>(heap_caps_calloc(
+      EventQueueCapacity, sizeof(Event), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  _extraHeaders = static_cast<char *>(heap_caps_calloc(
+      MaxHeaderBytes + 1, sizeof(char), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  _rxPayload = static_cast<uint8_t *>(heap_caps_calloc(
+      MaxPayloadBytes + 1, sizeof(uint8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  _txChunk = static_cast<uint8_t *>(heap_caps_calloc(
+      TxChunkBytes, sizeof(uint8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (_events && _extraHeaders && _rxPayload && _txChunk) return true;
+  releaseStorage();
+  setError(FailureKind::Internal, F("WebSocket PSRAM allocation failed"));
+  return false;
+}
+
+void SecureWebSocketClient::releaseStorage() {
+  if (_events) {
+    memset(_events, 0, sizeof(Event) * EventQueueCapacity);
+    free(_events);
+    _events = nullptr;
+  }
+  if (_extraHeaders) {
+    memset(_extraHeaders, 0, MaxHeaderBytes + 1);
+    free(_extraHeaders);
+    _extraHeaders = nullptr;
+  }
+  if (_rxPayload) {
+    memset(_rxPayload, 0, MaxPayloadBytes + 1);
+    free(_rxPayload);
+    _rxPayload = nullptr;
+  }
+  if (_txChunk) {
+    memset(_txChunk, 0, TxChunkBytes);
+    free(_txChunk);
+    _txChunk = nullptr;
+  }
+}
+
+bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint, uint32_t timeoutMs) {
+  const uint32_t started = millis();
   char key[25] = {};
   char expectedAccept[29] = {};
   char request[MaxHandshakeBytes] = {};
   char response[MaxHandshakeBytes + 1] = {};
   if (!buildWebSocketKey(key, sizeof(key), expectedAccept, sizeof(expectedAccept))) {
-    setError(F("WebSocket key generation failed"));
+    setError(FailureKind::Internal, F("WebSocket key generation failed"));
     return false;
   }
   const char *subprotocol = endpoint.subprotocol ? endpoint.subprotocol : "";
@@ -203,22 +245,22 @@ bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint) {
   const size_t extras = strlen(_extraHeaders);
   if (written < 0 || static_cast<size_t>(written) < 2 || static_cast<size_t>(written) + extras + 1 > sizeof(request)) {
     memset(request, 0, sizeof(request));
-    setError(F("WebSocket handshake exceeds limit"));
+    setError(FailureKind::InvalidConfiguration, F("WebSocket handshake exceeds limit"));
     return false;
   }
   size_t requestLength = static_cast<size_t>(written) - 2;
   memmove(request + requestLength + extras, request + requestLength, 3);
   memcpy(request + requestLength, _extraHeaders, extras);
   requestLength += extras + 2;
-  if (!writeAll(reinterpret_cast<const uint8_t *>(request), requestLength, IoTimeoutMs)) {
+  if (!writeAll(reinterpret_cast<const uint8_t *>(request), requestLength,
+                min<uint32_t>(IoTimeoutMs, timeoutMs))) {
     memset(request, 0, sizeof(request));
-    setError(F("WebSocket upgrade write failed"));
+    setError(FailureKind::Io, F("WebSocket upgrade write failed"));
     return false;
   }
   memset(request, 0, sizeof(request));
   size_t used = 0;
-  const uint32_t started = millis();
-  while (millis() - started < IoTimeoutMs && used < MaxHandshakeBytes) {
+  while (millis() - started < timeoutMs && used < MaxHandshakeBytes) {
     const int available = _tls.available();
     if (available <= 0) { delay(1); continue; }
     // Do not consume a WebSocket frame that the server coalesced directly
@@ -230,16 +272,21 @@ bool SecureWebSocketClient::performHandshake(const Endpoint &endpoint) {
     if (strstr(response, "\r\n\r\n")) break;
   }
   if (!strstr(response, "\r\n\r\n")) {
-    setError(F("WebSocket upgrade response timeout"));
+    setError(FailureKind::UpgradeTimeout, F("WebSocket upgrade response timeout"));
     return false;
   }
+  if (sscanf(response, "HTTP/%*u.%*u %d", &_lastHttpStatus) != 1) _lastHttpStatus = 0;
   if (strncmp(response, "HTTP/1.1 101 ", 13) != 0 || !responseHeaderEquals(response, "Upgrade", "websocket") ||
       !responseHeaderEquals(response, "Sec-WebSocket-Accept", expectedAccept)) {
-    setError(F("WebSocket upgrade validation failed"));
+    const bool authenticationRejected = _lastHttpStatus == 401 || _lastHttpStatus == 403;
+    setError(authenticationRejected ? FailureKind::AuthenticationRejected
+                                    : FailureKind::UpgradeRejected,
+             authenticationRejected ? F("WebSocket authentication rejected")
+                                    : F("WebSocket upgrade validation failed"));
     return false;
   }
   if (subprotocol[0] && !responseHeaderEquals(response, "Sec-WebSocket-Protocol", subprotocol)) {
-    setError(F("WebSocket subprotocol rejected"));
+    setError(FailureKind::UpgradeRejected, F("WebSocket subprotocol rejected"));
     return false;
   }
   return true;
@@ -280,7 +327,7 @@ bool SecureWebSocketClient::writeAll(const uint8_t *data, size_t length, uint32_
 
 bool SecureWebSocketClient::sendFrame(uint8_t opcode, const uint8_t *data, size_t length) {
   if (!_connected || !_active || length > MaxPayloadBytes || (length && !data)) {
-    setError(F("WebSocket is not connected"));
+    setError(FailureKind::Io, F("WebSocket is not connected"));
     return false;
   }
   uint8_t header[8];
@@ -298,7 +345,7 @@ bool SecureWebSocketClient::sendFrame(uint8_t opcode, const uint8_t *data, size_
     return false;
   }
   for (size_t offset = 0; offset < length;) {
-    const size_t chunk = min(sizeof(_txChunk), length - offset);
+    const size_t chunk = min(TxChunkBytes, length - offset);
     for (size_t i = 0; i < chunk; ++i) _txChunk[i] = data[offset + i] ^ mask[(offset + i) % 4];
     if (!writeAll(_txChunk, chunk, IoTimeoutMs)) {
       failConnection(F("WebSocket frame payload write failed"));
@@ -310,6 +357,10 @@ bool SecureWebSocketClient::sendFrame(uint8_t opcode, const uint8_t *data, size_
 }
 
 bool SecureWebSocketClient::pumpIncoming() {
+  // poll() is the backpressure boundary. Consume at most one complete frame
+  // so a burst of 60 ms TTS packets cannot fill the four-event staging queue
+  // before XiaozhiSession gets a chance to drain its eight-packet audio ring.
+  const size_t initialEventCount = _eventCount;
   while (_active) {
     const int available = _tls.available();
     if (available < 0) { failConnection(F("WebSocket TLS read failed")); return false; }
@@ -317,6 +368,7 @@ bool SecureWebSocketClient::pumpIncoming() {
     uint8_t byte = 0;
     if (_tls.read(&byte, 1) != 1) { failConnection(F("WebSocket read failed")); return false; }
     if (!consumeByte(byte)) return false;
+    if (_eventCount != initialEventCount || _overflowPending) return !_overflowPending;
   }
   return false;
 }
@@ -370,7 +422,7 @@ void SecureWebSocketClient::resetReceiveState() {
 }
 
 void SecureWebSocketClient::failConnection(const __FlashStringHelper *message) {
-  setError(message);
+  setError(FailureKind::Io, message);
   const bool wasActive = _active || _connected;
   _tls.stop(); _active = false; _connected = false; resetReceiveState();
   enqueue(EventType::Error, nullptr, 0);
@@ -378,13 +430,17 @@ void SecureWebSocketClient::failConnection(const __FlashStringHelper *message) {
 }
 
 bool SecureWebSocketClient::dequeue(Event &event) {
-  if (!_eventCount) return false;
+  if (!_events || !_eventCount) return false;
   event = _events[_eventHead]; _eventHead = (_eventHead + 1) % EventQueueCapacity; --_eventCount;
   return true;
 }
 
 void SecureWebSocketClient::enqueue(EventType type, const uint8_t *payload, size_t length) {
-  if (length > MaxPayloadBytes || _eventCount == EventQueueCapacity) { _overflowPending = true; return; }
+  if (!_events || length > MaxPayloadBytes || _eventCount == EventQueueCapacity) {
+    _lastFailure = FailureKind::QueueOverflow;
+    _overflowPending = true;
+    return;
+  }
   Event &event = _events[(_eventHead + _eventCount) % EventQueueCapacity];
   event.type = type; event.length = length;
   if (payload && length) memcpy(event.payload, payload, length);
@@ -392,7 +448,14 @@ void SecureWebSocketClient::enqueue(EventType type, const uint8_t *payload, size
   ++_eventCount;
 }
 
-void SecureWebSocketClient::setError(const __FlashStringHelper *message) { _lastError = message; }
+void SecureWebSocketClient::setError(const __FlashStringHelper *message) {
+  setError(FailureKind::Protocol, message);
+}
+
+void SecureWebSocketClient::setError(FailureKind kind, const __FlashStringHelper *message) {
+  _lastFailure = kind;
+  _lastError = message;
+}
 
 bool SecureWebSocketClient::validHeaderName(const char *name) {
   if (!name || !name[0]) return false;

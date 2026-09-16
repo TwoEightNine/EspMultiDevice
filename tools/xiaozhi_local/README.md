@@ -1,17 +1,17 @@
-# Local Xiaozhi compatibility backend
+# Local Xiaozhi production backend
 
-This is the minimal self-hosted target for the ESP Media Stage 1 probe. It
-runs Xiaozhi's WebSocket and OTA/bootstrap service behind Caddy-managed HTTPS
-and WSS. Authentication is enabled, so bootstrap returns a signed, short-lived
-credential instead of an empty or test token. It is intentionally not an
-assistant deployment: the placeholder cloud ASR configuration is never used
-by the bootstrap/hello probe, and no microphone audio is sent.
+This pinned arm64 Compose stack is the Stage 2 production target for ESP Media.
+It runs Xiaozhi's authenticated bootstrap and voice WebSocket service behind
+Caddy-managed HTTPS/WSS. The English pipeline is `SileroVAD`, `OpenaiASR`,
+`OpenAILLM`, `EdgeTTS`, `nointent`, and `nomem`; MQTT and public Xiaozhi fallback
+remain disabled.
 
-The deployment pins the upstream server and Caddy image manifests used for the
-Apple-silicon host. Runtime state, the local CA, model data, and private config
-are under ignored `.runtime/` paths.
+Runtime state, the Caddy private CA, model data, endpoint settings, and provider
+secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
+in `.runtime/data/.config.yaml`, separately in the ASR and LLM sections. Never
+put it in Compose, firmware configuration, tracked examples, logs, or commands.
 
-## Start on this Mac
+## Configure and start
 
 1. Start Colima with at least four CPUs and 6 GiB RAM:
 
@@ -19,38 +19,42 @@ are under ignored `.runtime/` paths.
    colima start --arch aarch64 --vm-type vz --cpus 4 --memory 6 --disk 30
    ```
 
-2. Confirm the Mac's current LAN address and encode it as an `sslip.io` host
-   (for example, `192-168-1-10.sslip.io`) in `.runtime/endpoint.env` and
-   `.runtime/data/.config.yaml`, using the committed example files as the
-   templates. This keeps the connection on the LAN while giving TLS a DNS name
-   for SNI; it still requires working DNS.
+2. Copy `endpoint.example.env` to `.runtime/endpoint.env` and
+   `config.example.yaml` to `.runtime/data/.config.yaml`. Replace the example
+   LAN host with this Mac's current `sslip.io` DNS hostname in both files. Keep
+   the advertised endpoint on WSS and enter the OpenAI key only in the two
+   private `api_key` fields.
 3. Put the pinned Silero VAD ONNX file at
    `.runtime/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx`.
-   The verified input is
-   `https://raw.githubusercontent.com/snakers4/silero-vad/41f03a954b841327835dea1ddb7bb28ae23ddc2c/src/silero_vad/data/silero_vad.onnx`,
-   2,327,524 bytes, SHA-256
+   The validated file is 2,327,524 bytes with SHA-256
    `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`.
-4. Start the services from this directory:
+4. Validate the private configuration, then start the pinned services:
 
    ```sh
+   ruby check_config.rb config .runtime/data/.config.yaml
    docker-compose --env-file .runtime/endpoint.env up -d
+   ./check_backend.sh
    ```
 
 5. Caddy creates its local root at
-   `.runtime/caddy-data/caddy/pki/authorities/local/root.crt`. Copy that PEM
-   into the ignored probe `LocalBackendConfig.h` as shown by
-   `LocalBackendConfig.example.h`, build, upload, and monitor the diagnostic.
+   `.runtime/caddy-data/caddy/pki/authorities/local/root.crt`. Copy the complete
+   PEM to the ignored
+   `../../src/services/assistant/LocalAssistantBackendConfig.h`, together with
+   this backend's HTTPS bootstrap/activation URLs. The compatibility diagnostic
+   keeps its separate ignored
+   `../../tests/xiaozhi_compatibility_probe/LocalBackendConfig.h`.
 
-Use `docker-compose --env-file .runtime/endpoint.env ps` for status,
-`docker-compose --env-file .runtime/endpoint.env logs --tail 100` for logs, and
-`docker-compose --env-file .runtime/endpoint.env down` to stop it. `down` does
-not remove `.runtime/` state.
+`check_backend.sh` verifies the selected providers, exact pinned models,
+placeholder-free private keys, DNS/WSS advertisement, disabled MQTT, container
+health, the Caddy trust chain, and the authenticated bootstrap response without
+printing credentials. Use `docker-compose --env-file .runtime/endpoint.env ps`
+for status. Avoid routine backend log output because transcripts and provider
+errors can contain user data.
 
-## Moving it later
+## Trust-anchor lifecycle
 
-The service can move to a LAN server, NAS, or VPS. Change the advertised
-`server.websocket` URL and Caddy site name, install or regenerate the relevant
-certificate, and rebuild the diagnostic with the matching bootstrap URL and CA.
-Device identity in NVS is unaffected. A public domain with a publicly trusted
-certificate is preferred for an off-LAN deployment; never fall back to plain
-HTTP/WS or disabled certificate verification.
+`docker-compose down` preserves `.runtime/` and therefore preserves the private
+CA. Deleting `.runtime/caddy-data`, or starting Caddy with a new data volume,
+rotates that CA. After a rotation, copy the new root into the ignored firmware
+configuration and rebuild before the device can connect. Never disable
+certificate verification or replace the DNS hostname with a bare LAN IP.

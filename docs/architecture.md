@@ -18,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 15 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
+`Navigator` registers the 16 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -130,7 +130,70 @@ and waits for any active decoder through successive non-blocking `tick()` calls.
 The shared `BrowserTransport` mutex remains the final serialization boundary for
 page and preview HTTP transfers.
 
-## Assistant dependency boundary
+## Assistant production boundary
+
+Stage 2 registers AssistantScreen only in normal composition. The Home AI tile
+opens it; USB Drive composition never creates assistant services.
+AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
+safe-close handshake. AssistantAvatar is display-only. Neither class performs
+network or audio work.
+
+AssistantController is the UI-facing boundary. Its commands are begin,
+activate, deactivate, startTurn, cancelTurn, retry, and tick; callers receive a
+value copy of the mutex-protected AssistantSnapshot. Snapshots and session
+events use fixed buffers and never contain credentials, Authorization headers,
+complete WSS URLs, or session IDs.
+
+XiaozhiSession is created only while the Assistant screen is active; it owns
+the opposite-core 48 KiB worker with an internal-RAM stack (required while network code disables the flash cache), bootstrap lifecycle, verified WebSocket,
+protocol and codec adapters, sensitive buffers, and every microphone/speaker
+operation. Its command/event queues hold 4/8 records. Their payload storage,
+bounded credentials, and audio rings are in PSRAM; the queue control blocks stay
+in internal RAM. The rings hold four 60 ms uplink PCM frames and eight downlink Opus packets. A full
+queue terminates that connection with a recoverable typed error. WebSocket
+ingress yields after each complete frame so normal TTS bursts are backpressured
+by playback instead of overflowing the four-event staging queue. Every command
+and event carries a generation; cancellation changes the requested generation,
+stale results are dropped, audio rings are wiped, the socket closes, and both
+I2S paths stop. Its safe-stop acknowledgement lets the controller destroy the
+session and release its internal-heap WebSocket buffers before the user returns
+to another screen.
+
+XiaozhiBootstrap is the renamed Stage 1 implementation and owns only
+certificate-checked activation/bootstrap HTTP and bounded response parsing.
+AssistantIdentity is the renamed identity service and preserves the
+MAC-derived device ID plus the existing assistant/client_uuid NVS key.
+XiaozhiProtocol exclusively builds/parses JSON and v1/v2/v3 audio envelopes.
+It always advertises features.mcp false, accepts only mono Opus with 60 ms
+frames (16 kHz uplink and 16/24 kHz downlink), and ignores MCP, system,
+firmware-update, MQTT, alert, custom, and unknown messages.
+
+The current state path is NeedsWiFi → Bootstrapping → Ready, with optional
+NeedsActivation → Bootstrapping, followed by Ready → Connecting → Listening →
+Thinking → Speaking → Ready. Wi-Fi loss returns to NeedsWiFi; 401/403 discards
+credentials and returns directly to Bootstrapping; cancellation from active
+work returns to Ready. Recoverable errors are visible before a
+2/4/8/15-second capped bootstrap backoff. Each completed answer drains
+playback, closes WSS, and returns to Ready; Stage 2 has no automatic continued
+listening.
+
+The injected AssistantBackendConfig borrows a bootstrap URL, activation URL,
+and PEM trust anchor. Production accepts HTTPS bootstrap/activation and WSS
+session URLs only, requires a DNS hostname for SNI, rejects IP literals,
+userinfo, fragments, malformed ports and empty trust, and never inherits the
+browser compatibility TLS policy. A missing ignored local configuration
+compiles into a non-retryable configuration error. No production default or
+fallback points at a public Xiaozhi service.
+
+The worker enforces 15-second bootstrap and WSS-connect limits, a 10-second
+server-hello limit, 45-second listening inactivity, 60-second thinking,
+15-second speaking packet inactivity, 120-second speaking total, and
+180-second total turn. Microphone capture stops before speaker startup;
+playback drains, mutes, and stops before Ready. Logs contain only generation,
+phase, safe error category, bounded queue counts, heap/PSRAM, and stack
+headroom.
+
+## Assistant dependency and compatibility history
 
 Stage 0 adds no assistant screen, session controller, Xiaozhi activation, or
 Xiaozhi network traffic. `SecureWebSocketClient` is the future assistant's
@@ -149,24 +212,26 @@ or 1,440-sample 24 kHz output. Codec state is allocated in PSRAM. Stage 1 must
 keep microphone capture and speaker playback half-duplex and place any
 network/codec loop on non-UI work rather than blocking `Screen::tick()`.
 
-Stage 1 adds a compatibility diagnostic, not assistant behavior.
-`XiaozhiIdentity` owns the assistant's stable identifiers: the device ID is the
+Stage 1 added a compatibility diagnostic, not assistant behavior. That
+diagnostic is now migrated to the production component names.
+`AssistantIdentity` owns the assistant's stable identifiers: the device ID is the
 lowercase Wi-Fi station MAC and a random UUIDv4 is generated once in NVS under
 `assistant/client_uuid`. A malformed stored UUID is a hard error because
 silently replacing it would change the server-side device identity.
-`XiaozhiBootstrapClient` owns the certificate-checked HTTP POST, upstream-style
+`XiaozhiBootstrap` owns the certificate-checked HTTP POST, upstream-style
 board report, bounded response, and parsing of only activation and WebSocket
 configuration. Its endpoint and PEM trust anchor can be supplied by a
-build-local configuration while the official hosted endpoint remains the
-default. It rejects non-HTTPS bootstrap configuration, never exposes firmware
+build-local configuration. It has no hosted-service default or fallback. It
+rejects non-HTTPS bootstrap configuration, never exposes firmware
 or MQTT response data, and never logs the raw response or credentials.
 
 The Stage 1 probe is selected only by
 `ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE`. It runs in a dedicated 48 KiB task,
 uses the existing secure WebSocket adapter, sends one protocol `hello`, waits for a
 validated server `hello`, and disconnects. No audio, MCP request, system
-command, or other server message is acted on. The normal composition root does
-not instantiate either Stage 1 service.
+command, or other server message is acted on. The normal composition root now
+reaches these migrated services only through `AssistantController` and
+`XiaozhiSession`.
 
 The public-hosted gate failed after successful account binding because bootstrap
 returned a placeholder/test WebSocket token. The architecture therefore does

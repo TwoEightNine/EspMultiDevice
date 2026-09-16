@@ -10,6 +10,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 - WAV/MP3 playback, 16 kHz mono WAV recording, and configurable persisted volume.
 - MP4/3GP video playback for H.264, H.263, and MPEG-4 Part 2 at up to 320 × 240, with AAC-LC, MP3, or AMR-NB audio where compatible.
 - Wi-Fi management, UTC+4 SNTP time, a lightweight HTTP/HTTPS browser, and an interval-workout timer with audio cues.
+- A screen-scoped, single-turn Xiaozhi voice assistant with animated state, STT/TTS captions, verified HTTPS/WSS, and half-duplex Opus audio.
 - Runtime SD-card removal/reinsertion handling, touch mesh calibration, battery reporting, and a shared non-blocking screen/navigation model.
 
 ## Hardware profile
@@ -28,6 +29,7 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 3. Configure the `TFT_eSPI` library’s `User_Setup.h` with the ILI9488 8-bit parallel pin block in [docs/hardware.md](docs/hardware.md#tft_espi-configuration).
 4. Run `tools/build_esp32s3.sh`, or open `esp_media.ino` with the exact profile above and build/upload. The script additionally enforces the real 6,553,600-byte application limit, which Arduino's generic Custom profile does not. `build_opt.h` is read automatically.
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
+6. For the assistant, copy src/services/assistant/LocalAssistantBackendConfig.example.h to the ignored LocalAssistantBackendConfig.h, set the self-hosted HTTPS endpoints, and paste the Caddy root CA. Configure and validate the Mac backend through tools/xiaozhi_local/README.md. There is no public-service fallback.
 
 Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART connector. If its automatic reset cannot enter the downloader, hold **BOOT**, tap **RESET/EN**, release **RESET/EN**, then release **BOOT** and upload again. USB Drive uses the second connector wired directly to the ESP32-S3 native USB D-/D+ pins (GPIO 19/20); it remains inactive during normal boot. Start **Settings → USB Drive**, connect the native port, transfer files in Finder, and eject the volume before unplugging it.
 

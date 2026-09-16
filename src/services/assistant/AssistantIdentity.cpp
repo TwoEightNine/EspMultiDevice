@@ -1,4 +1,4 @@
-#include "XiaozhiIdentity.h"
+#include "AssistantIdentity.h"
 
 #include <Preferences.h>
 #include <esp_mac.h>
@@ -10,9 +10,9 @@ constexpr char PreferencesNamespace[] = "assistant";
 constexpr char ClientUuidKey[] = "client_uuid";
 }
 
-XiaozhiIdentity::XiaozhiIdentity() : _deviceId{}, _clientId{}, _lastError(F("Not initialized")) {}
+AssistantIdentity::AssistantIdentity() : _deviceId{}, _clientId{}, _lastError(F("Not initialized")) {}
 
-bool XiaozhiIdentity::begin() {
+bool AssistantIdentity::begin() {
   uint8_t mac[6] = {};
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
     _lastError = F("Cannot read Wi-Fi station MAC");
@@ -51,7 +51,7 @@ bool XiaozhiIdentity::begin() {
   return true;
 }
 
-bool XiaozhiIdentity::validUuid(const char *value) {
+bool AssistantIdentity::validUuid(const char *value) {
   if (!value || strlen(value) != ClientIdBytes - 1) return false;
   for (size_t i = 0; i < ClientIdBytes - 1; ++i) {
     if (i == 8 || i == 13 || i == 18 || i == 23) {
@@ -66,7 +66,7 @@ bool XiaozhiIdentity::validUuid(const char *value) {
                              value[19] == 'a' || value[19] == 'b');
 }
 
-void XiaozhiIdentity::generateUuid(char *output) {
+void AssistantIdentity::generateUuid(char *output) {
   uint8_t bytes[16];
   esp_fill_random(bytes, sizeof(bytes));
   bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0fU) | 0x40U);

@@ -8,19 +8,14 @@
 #include <freertos/task.h>
 #include <time.h>
 
-#include "../../src/services/assistant/SecureWebSocketClient.h"
-#include "../../src/services/assistant/XiaozhiBootstrapClient.h"
-#include "../../src/services/assistant/XiaozhiIdentity.h"
-#include "../../src/services/assistant/XiaozhiTrust.h"
-
 #if __has_include("LocalBackendConfig.h")
 #include "LocalBackendConfig.h"
 #else
 namespace XiaozhiProbeConfig {
-inline constexpr char TargetName[] = "official-hosted";
-inline constexpr const char *BootstrapUrl = XiaozhiBootstrapClient::OfficialBootstrapUrl;
-inline constexpr const char *ActivationUrl = XiaozhiBootstrapClient::OfficialActivationUrl;
-inline constexpr const char *CaCertificate = XiaozhiTrust::DigiCertGlobalRootG2;
+inline constexpr char TargetName[] = "unconfigured";
+inline constexpr char BootstrapUrl[] = "";
+inline constexpr char ActivationUrl[] = "";
+inline constexpr char CaCertificate[] = "";
 } // namespace XiaozhiProbeConfig
 #endif
 
@@ -249,7 +244,7 @@ bool validServerHello(const uint8_t *payload, size_t length) {
   return valid;
 }
 
-HelloAttempt attemptHello(const XiaozhiIdentity &identity,
+HelloAttempt attemptHello(const AssistantIdentity &identity,
                           const XiaozhiWebSocketCredentials &credentials,
                           McpMode mode) {
   ParsedEndpoint parsed = {};
@@ -321,8 +316,8 @@ HelloAttempt attemptHello(const XiaozhiIdentity &identity,
   return HelloAttempt::HelloFailed;
 }
 
-bool waitForActivation(const XiaozhiIdentity &identity,
-                       XiaozhiBootstrapClient &bootstrap,
+bool waitForActivation(const AssistantIdentity &identity,
+                       XiaozhiBootstrap &bootstrap,
                        const XiaozhiActivationInstructions &instructions) {
   Serial.println(F("ACTION REQUIRED: bind this device in the Xiaozhi console"));
   if (instructions.message[0]) {
@@ -364,8 +359,8 @@ bool waitForActivation(const XiaozhiIdentity &identity,
   return false;
 }
 
-bool obtainCredentials(const XiaozhiIdentity &identity,
-                       XiaozhiBootstrapClient &bootstrap,
+bool obtainCredentials(const AssistantIdentity &identity,
+                       XiaozhiBootstrap &bootstrap,
                        XiaozhiBootstrapResponse &response) {
   for (uint8_t check = 0; check < MaximumBootstrapAttempts; ++check) {
     response.clear();
@@ -386,7 +381,7 @@ bool obtainCredentials(const XiaozhiIdentity &identity,
     }
     const XiaozhiWebSocketCredentialStatus credentialStatus = response.websocket.status();
     if (credentialStatus == XiaozhiWebSocketCredentialStatus::PlaceholderToken) {
-      Serial.println(F("FAIL bootstrap: hosted service returned a placeholder/test WebSocket token"));
+      Serial.println(F("FAIL bootstrap: backend returned a placeholder/test WebSocket token"));
       return false;
     }
     if (credentialStatus == XiaozhiWebSocketCredentialStatus::UnsupportedProtocol) {
@@ -417,7 +412,7 @@ void runXiaozhiCompatibilityProbe() {
     return;
   }
 
-  XiaozhiIdentity identity;
+  AssistantIdentity identity;
   if (!identity.begin()) {
     Serial.print(F("FAIL identity: "));
     Serial.println(identity.lastError());
@@ -440,12 +435,13 @@ void runXiaozhiCompatibilityProbe() {
   Serial.println(phase == 1 ? F("Second-boot credential refresh gate")
                             : F("First-boot binding and handshake gate"));
 
-  const XiaozhiBootstrapEndpoint endpoint = {
+  const AssistantBackendConfig endpoint = {
     XiaozhiProbeConfig::BootstrapUrl,
     XiaozhiProbeConfig::ActivationUrl,
-    XiaozhiProbeConfig::CaCertificate
+    XiaozhiProbeConfig::CaCertificate,
+    sizeof(XiaozhiProbeConfig::CaCertificate)
   };
-  XiaozhiBootstrapClient bootstrap(endpoint);
+  XiaozhiBootstrap bootstrap(endpoint);
   XiaozhiBootstrapResponse response;
   if (!obtainCredentials(identity, bootstrap, response)) {
     response.clear();

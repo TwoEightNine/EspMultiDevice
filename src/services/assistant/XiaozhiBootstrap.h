@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 class HTTPClient;
-class XiaozhiIdentity;
+class AssistantIdentity;
 
 struct XiaozhiActivationInstructions {
   static constexpr size_t MaxCodeBytes = 32;
@@ -52,36 +52,38 @@ enum class XiaozhiActivationPoll : uint8_t {
   FatalError
 };
 
-struct XiaozhiBootstrapEndpoint {
+struct AssistantBackendConfig {
   // These pointers are borrowed and must outlive the client.
   const char *bootstrapUrl;
   const char *activationUrl;
   const char *caCertificate;
+  size_t caCertificateLength;
 };
 
-class XiaozhiBootstrapClient {
+class XiaozhiBootstrap {
 public:
-  static constexpr char OfficialBootstrapUrl[] = "https://api.tenclass.net/xiaozhi/ota/";
-  static constexpr char OfficialActivationUrl[] = "https://api.tenclass.net/xiaozhi/ota/activate";
   static constexpr size_t MaxResponseBytes = 16U * 1024U;
 
-  XiaozhiBootstrapClient();
-  explicit XiaozhiBootstrapClient(const XiaozhiBootstrapEndpoint &endpoint);
-  bool check(const XiaozhiIdentity &identity, XiaozhiBootstrapResponse &response);
-  XiaozhiActivationPoll activate(const XiaozhiIdentity &identity);
+  explicit XiaozhiBootstrap(const AssistantBackendConfig &config);
+  bool validConfiguration() const;
+  bool check(const AssistantIdentity &identity, XiaozhiBootstrapResponse &response);
+  XiaozhiActivationPoll activate(const AssistantIdentity &identity);
   const String &lastError() const { return _lastError; }
   int lastHttpStatus() const { return _lastHttpStatus; }
+  // Numeric TLS transport failure only; never expose certificate or endpoint details.
+  int lastTransportError() const { return _lastTransportError; }
 
 private:
-  XiaozhiBootstrapEndpoint _endpoint;
+  AssistantBackendConfig _config;
   String _lastError;
   int _lastHttpStatus = 0;
+  int _lastTransportError = 0;
 
-  bool post(const char *url, const XiaozhiIdentity &identity, const char *body,
+  bool post(const char *url, const AssistantIdentity &identity, const char *body,
             char *response, size_t responseCapacity, size_t &responseLength);
   bool readBoundedBody(HTTPClient &http, char *response, size_t responseCapacity,
                        size_t &responseLength);
-  bool buildSystemInfoJson(const XiaozhiIdentity &identity, String &output);
+  bool buildSystemInfoJson(const AssistantIdentity &identity, String &output);
   bool parseResponse(char *body, size_t length, XiaozhiBootstrapResponse &response);
   static bool copyJsonString(void *object, const char *name, char *output, size_t capacity);
 };

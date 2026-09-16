@@ -11,8 +11,21 @@ public:
   static constexpr size_t MaxHeaderBytes = 1024;
   static constexpr size_t MaxPayloadBytes = 2048;
   static constexpr size_t EventQueueCapacity = 4;
+  static constexpr size_t TxChunkBytes = 256;
 
   enum class TrustKind : uint8_t { PemCertificate, CertificateBundle };
+  enum class FailureKind : uint8_t {
+    None,
+    InvalidConfiguration,
+    TlsConnect,
+    UpgradeTimeout,
+    UpgradeRejected,
+    AuthenticationRejected,
+    Io,
+    Protocol,
+    QueueOverflow,
+    Internal
+  };
 
   struct Endpoint { const char *host; uint16_t port; const char *path; const char *subprotocol; };
   struct Header { const char *name; const char *value; };
@@ -38,24 +51,30 @@ public:
   bool isActive() const;
   bool isConnected() const;
   const String &lastError() const;
+  FailureKind lastFailure() const;
+  int lastHttpStatus() const;
 
 private:
   enum class ReceiveState : uint8_t { Header, ExtendedLength, Payload };
 
   NetworkClientSecure _tls;
-  Event _events[EventQueueCapacity];
+  Event *_events;
   size_t _eventHead, _eventCount;
   bool _active, _connected, _overflowPending;
-  char _extraHeaders[MaxHeaderBytes + 1];
-  uint8_t _rxPayload[MaxPayloadBytes + 1];
-  uint8_t _txChunk[256];
+  char *_extraHeaders;
+  uint8_t *_rxPayload;
+  uint8_t *_txChunk;
   ReceiveState _receiveState;
   uint8_t _rxFirst, _rxLengthBytes[2];
   size_t _rxLengthUsed, _rxLength, _rxUsed;
   String _lastError;
+  FailureKind _lastFailure;
+  int _lastHttpStatus;
 
   bool buildHeaders(const Header *headers, size_t count);
-  bool performHandshake(const Endpoint &endpoint);
+  bool ensureStorage();
+  void releaseStorage();
+  bool performHandshake(const Endpoint &endpoint, uint32_t timeoutMs);
   bool buildWebSocketKey(char *key, size_t keySize, char *accept, size_t acceptSize);
   bool writeAll(const uint8_t *data, size_t length, uint32_t timeoutMs);
   bool sendFrame(uint8_t opcode, const uint8_t *data, size_t length);
@@ -67,6 +86,7 @@ private:
   bool dequeue(Event &event);
   void enqueue(EventType type, const uint8_t *payload, size_t length);
   void setError(const __FlashStringHelper *message);
+  void setError(FailureKind kind, const __FlashStringHelper *message);
   static bool validHeaderName(const char *name);
   static bool validHeaderValue(const char *value);
   static bool validEndpointValue(const char *value);

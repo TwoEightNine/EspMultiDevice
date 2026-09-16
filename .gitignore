@@ -3,4 +3,5 @@
 tests/assistant_dependency_probe/ProbeConfig.h
 tests/assistant_dependency_probe/generated/
 tests/xiaozhi_compatibility_probe/LocalBackendConfig.h
+src/services/assistant/LocalAssistantBackendConfig.h
 tools/xiaozhi_local/.runtime/

@@ -25,6 +25,9 @@ int16_t lineHeight(Size size);
 int16_t measure(const String &text, Size size = Size::Content);
 int16_t width(TFT_eSPI &tft, const String &text, Size size = Size::Content);
 String ellipsize(const String &text, int16_t maxWidth, Size size = Size::Content);
+// Replaces unsupported glyphs and maps common typographic punctuation to the
+// nearest supported form without modifying the underlying application text.
+String normalizeForFont(const String &text, Size size = Size::Content);
 
 // Draws with the requested alignment and restores TFT_eSPI's normal text
 // state after a temporary font scope has finished.

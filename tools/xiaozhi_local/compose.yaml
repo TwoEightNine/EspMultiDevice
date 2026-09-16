@@ -15,13 +15,19 @@ services:
     volumes:
       - ./.runtime/data:/opt/xiaozhi-esp32-server/data
       - ./.runtime/models/snakers4_silero-vad:/opt/xiaozhi-esp32-server/models/snakers4_silero-vad:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; [(lambda s,p: (s.settimeout(2), s.connect(('127.0.0.1',p)), s.close()))(socket.socket(),p) for p in (8000,8003)]"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
 
   caddy:
     image: caddy@sha256:8dbca3525dd8dce671e495665a0eb297a83ec87ee30f373947d0ea93115949db
     platform: linux/arm64
     restart: unless-stopped
     depends_on:
-      - xiaozhi
+      xiaozhi:
+        condition: service_healthy
     environment:
       XIAOZHI_LAN_HOST: ${XIAOZHI_LAN_HOST}
     ports:
@@ -30,3 +36,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./.runtime/caddy-data:/data
       - ./.runtime/caddy-config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

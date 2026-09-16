@@ -1,7 +1,8 @@
-#include "XiaozhiBootstrapClient.h"
+#include "XiaozhiBootstrap.h"
 
-#include "XiaozhiIdentity.h"
-#include "XiaozhiTrust.h"
+#include "AssistantTlsAllocator.h"
+#include "AssistantIdentity.h"
+#include "XiaozhiProtocol.h"
 
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
@@ -104,14 +105,18 @@ void XiaozhiBootstrapResponse::clear() {
   websocket.clear();
 }
 
-XiaozhiBootstrapClient::XiaozhiBootstrapClient()
-    : _endpoint{OfficialBootstrapUrl, OfficialActivationUrl,
-                XiaozhiTrust::DigiCertGlobalRootG2} {}
+XiaozhiBootstrap::XiaozhiBootstrap(const AssistantBackendConfig &config)
+    : _config(config) {}
 
-XiaozhiBootstrapClient::XiaozhiBootstrapClient(const XiaozhiBootstrapEndpoint &endpoint)
-    : _endpoint(endpoint) {}
+bool XiaozhiBootstrap::validConfiguration() const {
+  XiaozhiProtocol::ParsedUrl parsed = {};
+  return _config.caCertificate && _config.caCertificateLength > 1 &&
+         _config.caCertificate[0] != 0 &&
+         XiaozhiProtocol::parseHttpsUrl(_config.bootstrapUrl, parsed) &&
+         XiaozhiProtocol::parseHttpsUrl(_config.activationUrl, parsed);
+}
 
-bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
+bool XiaozhiBootstrap::check(const AssistantIdentity &identity,
                                    XiaozhiBootstrapResponse &response) {
   response.clear();
   String request;
@@ -125,7 +130,7 @@ bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
     return false;
   }
   size_t length = 0;
-  const bool posted = post(_endpoint.bootstrapUrl, identity, request.c_str(), body,
+  const bool posted = post(_config.bootstrapUrl, identity, request.c_str(), body,
                            MaxResponseBytes + 1, length);
   request = "";
   bool parsed = false;
@@ -139,10 +144,10 @@ bool XiaozhiBootstrapClient::check(const XiaozhiIdentity &identity,
   return posted && _lastHttpStatus == HTTP_CODE_OK && parsed;
 }
 
-XiaozhiActivationPoll XiaozhiBootstrapClient::activate(const XiaozhiIdentity &identity) {
+XiaozhiActivationPoll XiaozhiBootstrap::activate(const AssistantIdentity &identity) {
   char response[513] = {};
   size_t responseLength = 0;
-  if (!post(_endpoint.activationUrl, identity, "{}", response, sizeof(response), responseLength)) {
+  if (!post(_config.activationUrl, identity, "{}", response, sizeof(response), responseLength)) {
     memset(response, 0, sizeof(response));
     return XiaozhiActivationPoll::RetryableError;
   }
@@ -154,19 +159,22 @@ XiaozhiActivationPoll XiaozhiBootstrapClient::activate(const XiaozhiIdentity &id
   return XiaozhiActivationPoll::FatalError;
 }
 
-bool XiaozhiBootstrapClient::post(const char *url, const XiaozhiIdentity &identity,
+bool XiaozhiBootstrap::post(const char *url, const AssistantIdentity &identity,
                                   const char *body, char *response,
                                   size_t responseCapacity, size_t &responseLength) {
   responseLength = 0;
   _lastHttpStatus = 0;
-  if (!url || !startsWithIgnoreCase(url, "https://") || !_endpoint.caCertificate ||
-      _endpoint.caCertificate[0] == 0 || !body || !response || responseCapacity < 2) {
+  _lastTransportError = 0;
+  XiaozhiProtocol::ParsedUrl parsed = {};
+  if (!XiaozhiProtocol::parseHttpsUrl(url, parsed) || !validConfiguration() ||
+      !body || !response || responseCapacity < 2) {
     _lastError = F("Invalid bootstrap request");
     return false;
   }
 
+  AssistantTlsAllocatorScope tlsAllocator;
   NetworkClientSecure tls;
-  tls.setCACert(_endpoint.caCertificate);
+  tls.setCACert(_config.caCertificate);
   tls.setHandshakeTimeout(HttpTimeoutMs / 1000U);
   HTTPClient http;
   http.useHTTP10(true);
@@ -189,6 +197,8 @@ bool XiaozhiBootstrapClient::post(const char *url, const XiaozhiIdentity &identi
 
   _lastHttpStatus = http.POST(reinterpret_cast<uint8_t *>(const_cast<char *>(body)), strlen(body));
   if (_lastHttpStatus <= 0) {
+    char ignoredDetail[1] = {};
+    _lastTransportError = tls.lastError(ignoredDetail, sizeof(ignoredDetail));
     _lastError = F("Secure bootstrap POST failed");
     http.end();
     return false;
@@ -200,7 +210,7 @@ bool XiaozhiBootstrapClient::post(const char *url, const XiaozhiIdentity &identi
   return true;
 }
 
-bool XiaozhiBootstrapClient::readBoundedBody(HTTPClient &http, char *response,
+bool XiaozhiBootstrap::readBoundedBody(HTTPClient &http, char *response,
                                              size_t responseCapacity,
                                              size_t &responseLength) {
   const int declared = http.getSize();
@@ -247,7 +257,7 @@ bool XiaozhiBootstrapClient::readBoundedBody(HTTPClient &http, char *response,
   return true;
 }
 
-bool XiaozhiBootstrapClient::buildSystemInfoJson(const XiaozhiIdentity &identity,
+bool XiaozhiBootstrap::buildSystemInfoJson(const AssistantIdentity &identity,
                                                  String &output) {
   cJSON *root = cJSON_CreateObject();
   if (!root) {
@@ -339,7 +349,7 @@ bool XiaozhiBootstrapClient::buildSystemInfoJson(const XiaozhiIdentity &identity
   return true;
 }
 
-bool XiaozhiBootstrapClient::parseResponse(char *body, size_t length,
+bool XiaozhiBootstrap::parseResponse(char *body, size_t length,
                                            XiaozhiBootstrapResponse &response) {
   cJSON *root = cJSON_ParseWithLength(body, length);
   if (!root || !cJSON_IsObject(root)) {
@@ -402,7 +412,7 @@ bool XiaozhiBootstrapClient::parseResponse(char *body, size_t length,
   return true;
 }
 
-bool XiaozhiBootstrapClient::copyJsonString(void *objectValue, const char *name,
+bool XiaozhiBootstrap::copyJsonString(void *objectValue, const char *name,
                                             char *output, size_t capacity) {
   cJSON *object = static_cast<cJSON *>(objectValue);
   cJSON *value = cJSON_GetObjectItemCaseSensitive(object, name);

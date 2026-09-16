@@ -87,8 +87,7 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _filesHoldTriggered = false;
       _filesPressedMs = millis();
     } else if (app.action == AppAction::AiAssistant) {
-      // Placeholder entry: its screen is intentionally not implemented yet.
-      return;
+      _navigator.push(ScreenId::Assistant);
     } else if (app.action == AppAction::Recorder) {
       _navigator.push(ScreenId::VoiceRecorder);
     } else if (app.action == AppAction::Settings) {

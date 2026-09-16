@@ -133,6 +133,60 @@ and 8,371,432/8,371,528 bytes free PSRAM. The dedicated 48 KiB task retained
 21,076 bytes of stack. The public hosted result remains a no-go; only the
 self-hosted protocol path advances.
 
+## Stage 2 production assistant
+
+Stage 2 promotes the self-hosted path into normal firmware. Configure firmware
+by copying LocalAssistantBackendConfig.example.h to the ignored
+LocalAssistantBackendConfig.h. The borrowed backend object carries the
+bootstrap URL, activation URL, and PEM CA length. The tracked example contains
+no device ID or secret; without the ignored header, the normal image still
+builds and the Assistant screen reports a non-retryable configuration error.
+
+Production bootstrap and WSS never use the official/public Xiaozhi service.
+Both URLs require certificate-validated secure schemes and a DNS hostname for
+SNI. Deleting tools/xiaozhi_local/.runtime/caddy-data rotates Caddy's private
+CA; copy the replacement root into the ignored firmware configuration and
+rebuild before the device can connect again.
+
+The Mac pipeline selects SileroVAD, OpenaiASR, OpenAILLM, EdgeTTS, nointent,
+and nomem. The ASR snapshot is
+[gpt-4o-mini-transcribe-2025-12-15](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe);
+the chat snapshot is
+[gpt-5.4-mini-2026-03-17](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
+The OpenAI base URLs and English Edge voice live in the private runtime YAML.
+The API key is repeated only in the ASR and LLM sections of ignored
+.runtime/data/.config.yaml. Never put it in Compose, firmware, tracked
+examples, logs, or command arguments.
+
+Run tools/xiaozhi_local/check_backend.sh before live testing. It validates
+provider selection, exact pinned models, non-placeholder private keys, WSS DNS
+advertisement, disabled MQTT, the Caddy CA, container health, and a signed
+bootstrap response without printing credentials. It fails until the user
+supplies a valid API key in ignored runtime configuration; never restart the
+stack with a placeholder.
+
+The compile-time Stage 2 contract is selected with
+ESP_MEDIA_ASSISTANT_CONTRACT and built by
+tools/build_assistant_contract.sh. It covers URL rejection, explicit MCP
+disablement, protocol parsing, v1/v2/v3 envelopes, malformed/oversized input,
+session mismatch, caption truncation, state/timeout categories, bounded queue
+overflow, and generation filtering without network or audio I/O.
+
+Current compile gates on Arduino-ESP32 3.3.8:
+
+| Image | Result |
+| --- | ---: |
+| Normal Stage 2 firmware | 3,141,968 / 6,553,600 bytes |
+| Stage 2 assistant contract | 3,145,648 / 6,553,600 bytes |
+| Migrated Stage 0 dependency probe | 3,150,128 / 6,553,600 bytes |
+| Migrated Stage 1 compatibility probe | 3,149,264 / 4,718,592-byte diagnostic gate |
+
+Live provider startup, end-to-end speech, independent cancellation points,
+fault injection, ten-turn heap/PSRAM stability, and the production worker
+stack high-water mark require the API key and physical device. Do not copy the
+Stage 1 stack result into that acceptance row: production must independently
+retain at least 8 KiB.
+
 ## Generators and regression fixtures
 
 | Tool | Purpose |
@@ -144,6 +198,7 @@ self-hosted protocol path advances.
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
 | `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
+| `tests/assistant_contract/` | Compile-time-only Stage 2 URL, protocol, envelope, state, queue, overflow, and generation contract diagnostic. |
 | `tools/xiaozhi_local/` | Pinned local Xiaozhi/Caddy compatibility deployment; ignored runtime state contains its private config, CA, and model. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.

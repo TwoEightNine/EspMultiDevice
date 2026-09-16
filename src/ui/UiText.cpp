@@ -93,6 +93,14 @@ int16_t glyphAdvance(const uint8_t *font, uint16_t glyphCount, uint32_t codepoin
   if (cacheIndex >= 0 && advance > 0 && advance < 256) cached = advance;
   return advance;
 }
+
+bool hasGlyph(const uint8_t *font, uint16_t glyphCount, uint32_t codepoint) {
+  if (codepoint == ' ' || codepoint == '\r' || codepoint == '\n') return true;
+  for (uint16_t glyph = 0; glyph < glyphCount; ++glyph) {
+    if (fontValue(font, 24UL + (uint32_t)glyph * 28UL) == codepoint) return true;
+  }
+  return false;
+}
 }  // namespace
 
 void begin(TFT_eSPI &tft, Size size) {
@@ -161,6 +169,32 @@ String ellipsize(const String &text, int16_t maxWidth, Size size) {
     result = candidate;
   }
   return result.length() ? result + "..." : "";
+}
+
+String normalizeForFont(const String &text, Size size) {
+  const uint8_t *font = fontFor(size);
+  const uint16_t glyphCount = (uint16_t)fontValue(font, 0);
+  String result;
+  result.reserve(text.length());
+  uint16_t offset = 0;
+  uint32_t codepoint = 0;
+  while (nextCodepoint(text, offset, codepoint)) {
+    switch (codepoint) {
+      case 0x00a0: codepoint = ' '; break;
+      case 0x2018:
+      case 0x2019: codepoint = '\''; break;
+      case 0x201c:
+      case 0x201d: codepoint = '"'; break;
+      case 0x2013:
+      case 0x2014: codepoint = '-'; break;
+      case 0x2026:
+        result += "...";
+        continue;
+      default: break;
+    }
+    appendUtf8(result, hasGlyph(font, glyphCount, codepoint) ? codepoint : '?');
+  }
+  return result;
 }
 
 void draw(TFT_eSPI &tft, const String &text, int16_t x, int16_t y,
