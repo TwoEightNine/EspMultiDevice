@@ -116,7 +116,9 @@ static const int SD_CARD_DETECT_PIN = -1;
 static const int MIC_BCLK_PIN = 18;
 static const int MIC_WS_PIN = 21;
 static const int MIC_DATA_PIN = 17;
-static const int MIC_POWER_SENSE_PIN = 48;
+// GPIO 47 is unused by the display, shared SD/touch SPI, audio, USB, and
+// boot-memory interfaces. GPIO 48 is reserved for the DevKitC RGB LED.
+static const int MIC_POWER_SENSE_PIN = 47;
 
 // MAX98357A I2S speaker amplifier.
 static const int SPEAKER_BCLK_PIN = MIC_BCLK_PIN;
