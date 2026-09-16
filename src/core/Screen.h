@@ -29,6 +29,14 @@ public:
   virtual void onExit() {
   }
 
+  // Called only when this stack entry is being permanently removed, not when
+  // another screen temporarily covers it. Release screen-scoped buffers,
+  // sockets, codecs, queues, and task stacks here. Returning false defers the
+  // navigation so asynchronous workers can reach a safe stop in tick().
+  virtual bool releaseResources() {
+    return true;
+  }
+
   // Called when this screen becomes active again after the screen above it
   // is closed. The default preserves the existing behavior for screens that
   // do not need to distinguish a fresh entry from a return.

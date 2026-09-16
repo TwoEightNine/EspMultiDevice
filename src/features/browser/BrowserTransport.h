@@ -52,6 +52,11 @@ class BrowserTransport {
 public:
   BrowserTransport(WiFiController &wifi, BrowserDownloadStore &downloadStore);
 
+  bool begin();
+  // Releases clients, the transfer buffer, and the serialization mutex. The
+  // caller must first stop Browser workers; false means a transfer still owns
+  // the transport and shutdown must be retried from the UI loop.
+  bool end();
   Browser::TransferResult transfer(const Browser::HttpRequest &initialRequest,
                                    const Browser::RequestOptions &options,
                                    Browser::TransferObserver &observer,
@@ -94,6 +99,7 @@ private:
   void clearConnection();
   bool reusableConnectionFor(const Browser::Url &url) const;
   void retainConnection(const Browser::Url &url);
+  bool ensureStorage();
   bool requestOne(const Browser::Url &url, Browser::HttpMethod method,
                   const String &requestBody, const String &userAgent,
                   const String &cookieHeader, HttpResponse &response,

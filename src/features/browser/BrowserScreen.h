@@ -29,6 +29,7 @@ public:
 
   void onEnter() override;
   void onResume() override;
+  bool releaseResources() override;
   void onResult(const ScreenResult &result) override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
@@ -74,6 +75,7 @@ private:
   uint8_t _historyCount;
   bool _loaded;
   BrowserLifecycleWorker _lifecycle;
+  bool _closePending;
   bool _showStart;
   bool _showFavorites;
   uint8_t _startListScroll;
@@ -190,6 +192,8 @@ private:
   void collectImageResults();
   bool imageIsVisibleOnCurrentPage(uint16_t imageIndex) const;
   void startLifecycleLoad();
+  bool beginLifecycleWorker();
+  void resetSessionState();
   void runBrowserLifecycle(uint32_t generation) override;
   bool reflowDocument();
   bool hasNextPage() const;

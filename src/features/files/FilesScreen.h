@@ -25,6 +25,7 @@ public:
   void onEnter() override;
   void onEnter(const ScreenData &data) override;
   void onExit() override;
+  bool releaseResources() override;
   void onResume() override;
   void onResult(const ScreenResult &result) override;
   void handleTouch(const TouchPoint &point) override;
@@ -136,6 +137,7 @@ private:
   bool _sdMounted;
   bool _lastTouchDown;
   bool _retainCacheWhileCovered;
+  bool _closePending;
   bool _secretMode;
   DirectoryCache _cache[MaxCachedDirectories];
   Thumbnail _thumbnails[MaxCachedThumbnails];

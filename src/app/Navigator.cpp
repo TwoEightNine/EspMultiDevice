@@ -2,6 +2,19 @@
 
 #include "../core/Screen.h"
 
+namespace {
+struct HeapSnapshot {
+  uint32_t freeHeap;
+  uint32_t largestHeap;
+  uint32_t freePsram;
+  uint32_t largestPsram;
+};
+
+HeapSnapshot heapSnapshot() {
+  return {ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getFreePsram(), ESP.getMaxAllocPsram()};
+}
+}  // namespace
+
 Navigator::Navigator()
   : _registeredCount(0),
     _stackDepth(0) {
@@ -31,7 +44,10 @@ bool Navigator::setRoot(ScreenId id) {
     return false;
   }
 
-  exitActive();
+  while (_stackDepth > 0) {
+    if (!exitAndReleaseActive()) return false;
+    _stackDepth--;
+  }
   _stack[0].id = id;
   _stack[0].data = ScreenData();
   _stackDepth = 1;
@@ -73,7 +89,7 @@ bool Navigator::replace(ScreenId id, const ScreenData &data) {
     return true;
   }
 
-  exitActive();
+  if (!exitAndReleaseActive()) return false;
   _stack[_stackDepth - 1].id = id;
   _stack[_stackDepth - 1].data = data;
   enter(_stack[_stackDepth - 1]);
@@ -85,7 +101,7 @@ bool Navigator::pop() {
     return false;
   }
 
-  exitActive();
+  if (!exitAndReleaseActive()) return false;
   _stackDepth--;
   resumeActive();
   return true;
@@ -96,7 +112,7 @@ bool Navigator::pop(const ScreenResult &result) {
     return false;
   }
 
-  exitActive();
+  if (!exitAndReleaseActive()) return false;
   _stackDepth--;
   resumeActive();
   Screen *screen = activeScreen();
@@ -152,6 +168,21 @@ void Navigator::exitActive() {
   if (screen) {
     screen->onExit();
   }
+}
+
+bool Navigator::exitAndReleaseActive() {
+  Screen *screen = activeScreen();
+  if (!screen) return true;
+  const HeapSnapshot before = heapSnapshot();
+  screen->onExit();
+  if (!screen->releaseResources()) return false;
+  const HeapSnapshot after = heapSnapshot();
+  Serial.printf("[Navigator] release screen=%u heap=%u->%u largest=%u->%u psram=%u->%u "
+                "largest_psram=%u->%u\n",
+                static_cast<unsigned>(activeScreenId()), before.freeHeap, after.freeHeap,
+                before.largestHeap, after.largestHeap, before.freePsram, after.freePsram,
+                before.largestPsram, after.largestPsram);
+  return true;
 }
 
 void Navigator::resumeActive() {

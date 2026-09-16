@@ -1,6 +1,6 @@
 #include "XiaozhiBootstrap.h"
 
-#include "AssistantTlsAllocator.h"
+#include "../network/TlsMemoryScope.h"
 #include "AssistantIdentity.h"
 #include "XiaozhiProtocol.h"
 
@@ -172,7 +172,7 @@ bool XiaozhiBootstrap::post(const char *url, const AssistantIdentity &identity,
     return false;
   }
 
-  AssistantTlsAllocatorScope tlsAllocator;
+  TlsMemoryScope tlsMemory;
   NetworkClientSecure tls;
   tls.setCACert(_config.caCertificate);
   tls.setHandshakeTimeout(HttpTimeoutMs / 1000U);

@@ -7,6 +7,7 @@
 
 #include "BrowserDownloadStore.h"
 #include "BrowserLimits.h"
+#include "../../services/network/TlsMemoryScope.h"
 #include "../../services/network/WiFiController.h"
 
 namespace {
@@ -58,7 +59,13 @@ BrowserTransport::BrowserTransport(WiFiController &wifi, BrowserDownloadStore &d
       _closeRequested(false),
       _transferBuffer(nullptr),
       _transferBufferBytes(0),
-      _mutex(xSemaphoreCreateMutex()) {
+      _mutex(nullptr) {
+}
+
+bool BrowserTransport::ensureStorage() {
+  if (!_mutex) _mutex = xSemaphoreCreateMutex();
+  if (!_mutex) return false;
+  if (_transferBuffer) return true;
   _transferBuffer = static_cast<uint8_t *>(psramFound()
     ? ps_malloc(BrowserLimits::TransferReadBufferBytes)
     : malloc(BrowserLimits::TransferReadBufferBytes));
@@ -71,6 +78,33 @@ BrowserTransport::BrowserTransport(WiFiController &wifi, BrowserDownloadStore &d
   browserLog(String(F("transfer buffer: bytes=")) + String(_transferBufferBytes) +
              F(", psram=") + (psramFound() && _transferBufferBytes == BrowserLimits::TransferReadBufferBytes
                ? F("yes") : F("no")));
+  return _transferBuffer != nullptr;
+}
+
+bool BrowserTransport::begin() {
+  return ensureStorage();
+}
+
+bool BrowserTransport::end() {
+  if (!_mutex) return true;
+  if (xSemaphoreTake(_mutex, 0) != pdTRUE) {
+    _closeRequested = true;
+    return false;
+  }
+  stopClients();
+  clearConnection();
+  _connectionUrl.scheme = static_cast<const char *>(nullptr);
+  _connectionUrl.host = static_cast<const char *>(nullptr);
+  _connectionUrl.path = static_cast<const char *>(nullptr);
+  _closeRequested = false;
+  if (_transferBuffer) free(_transferBuffer);
+  _transferBuffer = nullptr;
+  _transferBufferBytes = 0;
+  xSemaphoreGive(_mutex);
+  vSemaphoreDelete(_mutex);
+  _mutex = nullptr;
+  browserLog(F("transport storage released"));
+  return true;
 }
 
 bool BrowserTransport::discardDownload(const String &path) {
@@ -116,6 +150,10 @@ Browser::TransferResult BrowserTransport::transfer(
     const Browser::CookieProvider &cookieProvider) {
   Browser::TransferResult result;
   result.finalUrl = initialRequest.url;
+  if (!ensureStorage()) {
+    result.error = "Not enough transfer memory";
+    return result;
+  }
   if (initialRequest.method == Browser::HttpMethod::Post &&
       initialRequest.body.length() > BrowserLimits::MaxFormPostBytes) {
     result.error = "Form data is too large";
@@ -324,6 +362,12 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
   browserLog(String(reusedConnection ? F("reusing: ") : F("connecting: ")) + url.scheme +
              F("://") + url.host + F(":") + String(url.port));
   if (!reusedConnection) {
+    // Certificate parsing and RSA public-key operations need a larger
+    // contiguous working set than internal RAM can reliably provide after
+    // other screen workers have started. This changes only allocation
+    // placement; the Browser's documented compatibility trust policy stays
+    // independent from the Assistant's verified TLS policy.
+    TlsMemoryScope tlsMemory(url.scheme == "https");
     stopClients();
     clearConnection();
     client = &_plainClient;

@@ -21,6 +21,10 @@ public:
                     BrowserPersistentState &persistentState);
 
   bool begin();
+  // Releases the task stack and retained job/result storage once no transfer
+  // is executing. Returns false while the cancelled worker is still unwinding.
+  bool end();
+  bool active() const { return _activeGeneration != 0; }
   bool load(const Browser::HttpRequest &request, const Browser::LoadOptions &options);
   void cancel();
   bool takeProgress(Browser::PageLoadProgress &progress);

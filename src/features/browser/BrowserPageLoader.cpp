@@ -38,7 +38,7 @@ BrowserPageLoader::BrowserPageLoader(BrowserTransport &transport,
     : _transport(transport),
       _sessionCache(sessionCache),
       _persistentState(persistentState),
-      _stateMutex(xSemaphoreCreateMutex()),
+      _stateMutex(nullptr),
       _task(nullptr),
       _jobPending(false),
       _busy(false),
@@ -49,6 +49,7 @@ BrowserPageLoader::BrowserPageLoader(BrowserTransport &transport,
 
 bool BrowserPageLoader::begin() {
   if (_task) return true;
+  if (!_stateMutex) _stateMutex = xSemaphoreCreateMutex();
   if (!_stateMutex) {
     loaderLog(F("worker unavailable: state mutex allocation failed"));
     return false;
@@ -64,6 +65,44 @@ bool BrowserPageLoader::begin() {
   if (started) loaderLog(String(F("worker started on core ")) + workerCore);
   else loaderLog(F("worker task creation failed"));
   return started;
+}
+
+bool BrowserPageLoader::end() {
+  cancel();
+  if (_activeGeneration != 0) return false;
+  if (_task && eTaskGetState(_task) != eBlocked) return false;
+  if (_task) {
+    vTaskDelete(_task);
+    _task = nullptr;
+  }
+  if (_stateMutex) {
+    {
+      StateLock lock(_stateMutex);
+      if (lock.locked()) {
+        _job.request.url = static_cast<const char *>(nullptr);
+        _job.request.body = static_cast<const char *>(nullptr);
+        _job.options.userAgent = static_cast<const char *>(nullptr);
+        _result.finalUrl = static_cast<const char *>(nullptr);
+        _result.contentType = static_cast<const char *>(nullptr);
+        _result.textBody = static_cast<const char *>(nullptr);
+        _result.downloadPath = static_cast<const char *>(nullptr);
+        _result.error = static_cast<const char *>(nullptr);
+        _progress.phase = static_cast<const char *>(nullptr);
+        _requestUrl = static_cast<const char *>(nullptr);
+        _job = {};
+        _result = {};
+        _progress = {};
+        _jobPending = false;
+        _busy = false;
+        _resultReady = false;
+        _progressPending = false;
+      }
+    }
+    vSemaphoreDelete(_stateMutex);
+    _stateMutex = nullptr;
+  }
+  loaderLog(F("worker stopped"));
+  return true;
 }
 
 bool BrowserPageLoader::load(const Browser::HttpRequest &request,

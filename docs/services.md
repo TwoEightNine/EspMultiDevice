@@ -74,7 +74,13 @@ MQTT, system, MCP, alert, custom, and unknown instructions are ignored.
 
 ### Stage 0/1 validation history
 
-The Stage 0 `SecureWebSocketClient` is the future assistant's bounded WSS layer over `NetworkClientSecure`. It requires a trust store and never uses the browser's HTTPS compatibility mode. Its connection handshake directs temporary TLS allocations to PSRAM so the internal-heap largest block remains available; future session code must perform this synchronous operation in worker-backed, non-UI work.
+`TlsMemoryScope` is the shared allocation adapter for mbedTLS handshakes. It
+reference-counts the process-global allocator hook, places temporary
+certificate/RSA/parser allocations in PSRAM with the ESP allocator as a
+fallback, and restores the platform hook after the final overlapping scope.
+It changes memory placement, never trust policy: `SecureWebSocketClient` still
+requires a trust store and never uses the Browser's insecure HTTPS
+compatibility behavior.
 
 The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960-sample) frames. Its decoder is initialized explicitly for 16 or 24 kHz, with maximum output of 960 or 1,440 samples respectively. Codec state lives in PSRAM. This dependency foundation does not capture, stream, or play audio in normal firmware; a future assistant must continue to arbitrate the shared BCLK and WS lines half-duplex through the microphone and speaker controllers.
 

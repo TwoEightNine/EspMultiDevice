@@ -15,6 +15,9 @@ public:
 
   void load();
   void save();
+  // Drops heap-backed copies after Browser closes. Durable state is reloaded
+  // from SD on the next session.
+  void releaseMemory();
 
   uint8_t recentCount() const { return _recentCount; }
   uint8_t favoriteCount() const { return _favoriteCount; }

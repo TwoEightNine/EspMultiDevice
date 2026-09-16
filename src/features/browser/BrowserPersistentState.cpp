@@ -26,6 +26,28 @@ void stateLog(const String &message) {
 BrowserPersistentState::BrowserPersistentState(SdCardController &sdCard)
     : _sdCard(sdCard), _recentCount(0), _favoriteCount(0), _cookieCount(0) {}
 
+void BrowserPersistentState::releaseMemory() {
+  for (auto &site : _recentSites) {
+    site.url = static_cast<const char *>(nullptr);
+    site.title = static_cast<const char *>(nullptr);
+  }
+  for (auto &site : _favoriteSites) {
+    site.url = static_cast<const char *>(nullptr);
+    site.title = static_cast<const char *>(nullptr);
+  }
+  for (auto &cookie : _cookies) {
+    cookie.name = static_cast<const char *>(nullptr);
+    cookie.value = static_cast<const char *>(nullptr);
+    cookie.domain = static_cast<const char *>(nullptr);
+    cookie.path = static_cast<const char *>(nullptr);
+    cookie.secure = false;
+    cookie.expiresAt = 0;
+  }
+  _recentCount = 0;
+  _favoriteCount = 0;
+  _cookieCount = 0;
+}
+
 const Browser::RecentSite &BrowserPersistentState::recentAt(uint8_t index) const {
   static const Browser::RecentSite Empty{"", ""};
   return index < _recentCount ? _recentSites[index] : Empty;

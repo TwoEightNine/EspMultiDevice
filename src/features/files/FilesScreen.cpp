@@ -52,9 +52,15 @@ public:
   struct Result { uint32_t generation; char path[MaxPath]; uint16_t *pixels; };
 
   FileThumbnailWorker(SecretStorage &secretStorage, MediaCache &mediaCache)
-    : _secretStorage(secretStorage), _mediaCache(mediaCache), _jobs(xQueueCreate(2, sizeof(Job))), _results(xQueueCreate(2, sizeof(Result))),
-      _task(nullptr), _encrypted(false), _pixels(nullptr), _sourceWidth(0), _sourceHeight(0),
+    : _secretStorage(secretStorage), _mediaCache(mediaCache), _jobs(nullptr), _results(nullptr),
+      _task(nullptr), _active(false), _encrypted(false), _pixels(nullptr), _sourceWidth(0), _sourceHeight(0),
       _decodedWidth(0), _decodedHeight(0), _sourceSize(0), _sourceWriteTime(0), _gif(nullptr) {
+  }
+
+  bool begin() {
+    if (_task) return true;
+    if (!_jobs) _jobs = xQueueCreate(2, sizeof(Job));
+    if (!_results) _results = xQueueCreate(2, sizeof(Result));
     if (_jobs && _results) {
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
       const BaseType_t core = 0;
@@ -63,8 +69,38 @@ public:
 #endif
       // Thumbnails are strictly best-effort: they must yield to the Arduino
       // task so a press on the close icon is never delayed by image decoding.
-      xTaskCreatePinnedToCore(taskMain, "file-thumbs", 12288, this, tskIDLE_PRIORITY, &_task, core);
+      if (xTaskCreatePinnedToCore(taskMain, "file-thumbs", 12288, this,
+                                  tskIDLE_PRIORITY, &_task, core) == pdPASS) return true;
     }
+    return false;
+  }
+
+  bool end() {
+    if (_jobs) {
+      Job ignored{};
+      while (xQueueReceive(_jobs, &ignored, 0) == pdTRUE) {}
+    }
+    if (_active) return false;
+    if (_results) {
+      Result result{};
+      while (xQueueReceive(_results, &result, 0) == pdTRUE) free(result.pixels);
+    }
+    if (_task && eTaskGetState(_task) != eBlocked) return false;
+    if (_task) {
+      vTaskDelete(_task);
+      _task = nullptr;
+    }
+    if (_jobs) {
+      vQueueDelete(_jobs);
+      _jobs = nullptr;
+    }
+    if (_results) {
+      vQueueDelete(_results);
+      _results = nullptr;
+    }
+    reset();
+    thumbnailLog(F("worker stopped"));
+    return true;
   }
 
   bool enqueue(const String &path, FileFormats::Format format, uint32_t generation, bool encrypted) {
@@ -86,6 +122,7 @@ private:
   QueueHandle_t _jobs;
   QueueHandle_t _results;
   TaskHandle_t _task;
+  volatile bool _active;
   StorageFile _file;
   bool _encrypted;
   JPEGDEC _jpeg;
@@ -109,11 +146,13 @@ private:
       Result result{};
       result.generation = job.generation;
       strncpy(result.path, job.path, sizeof(result.path) - 1);
+      worker->_active = true;
       thumbnailLog(String(F("start ")) + job.path);
       result.pixels = worker->decode(String(job.path), job.format, job.encrypted);
       thumbnailLog(result.pixels ? String(F("ready ")) + job.path
                                  : String(F("failed ")) + job.path + F(": ") + worker->_failure);
       xQueueSend(worker->_results, &result, portMAX_DELAY);
+      worker->_active = false;
     }
   }
 
@@ -625,6 +664,7 @@ FilesScreen::FilesScreen(Navigator &navigator,
     _sdMounted(false),
     _lastTouchDown(false),
     _retainCacheWhileCovered(false),
+    _closePending(false),
     _secretMode(false),
     _listing(nullptr),
     _thumbnailWorker(new FileThumbnailWorker(secretStorage, mediaCache)),
@@ -693,9 +733,16 @@ FilesScreen::~FilesScreen() {
   clearCache();
   clearThumbnails();
   delete[] _rows;
+  if (_thumbnailWorker) {
+    _thumbnailWorker->end();
+    delete _thumbnailWorker;
+    _thumbnailWorker = nullptr;
+  }
 }
 
 void FilesScreen::onEnter() {
+  _closePending = false;
+  if (_thumbnailWorker && !_thumbnailWorker->begin()) thumbnailLog(F("worker unavailable"));
   clearCache();
   clearThumbnails();
   _listingGeneration++;
@@ -736,6 +783,37 @@ void FilesScreen::onExit() {
       _secretMode = false;
     }
   }
+}
+
+bool FilesScreen::releaseResources() {
+  _closePending = true;
+  cancelDirectoryScan();
+  closeDirectoryScan();
+  clearCache();
+  clearThumbnails();
+  if (_thumbnailWorker && !_thumbnailWorker->end()) return false;
+  if (_moveSource) _moveSource.close();
+  if (_moveTarget) _moveTarget.close();
+  clearTasks();
+  delete[] _rows;
+  _rows = nullptr;
+  _rowCapacity = 0;
+  _rowCount = 0;
+  _listing = nullptr;
+  _currentPath = static_cast<const char *>(nullptr);
+  _pendingRenamePath = static_cast<const char *>(nullptr);
+  _renameSourcePath = static_cast<const char *>(nullptr);
+  _renameTargetPath = static_cast<const char *>(nullptr);
+  _deleteSourcePath = static_cast<const char *>(nullptr);
+  _message = static_cast<const char *>(nullptr);
+  _scanDirectory = fs::File();
+  _moveSourcePath = static_cast<const char *>(nullptr);
+  _moveTargetPath = static_cast<const char *>(nullptr);
+  _moveStagePath = static_cast<const char *>(nullptr);
+  _moveStagedPath = static_cast<const char *>(nullptr);
+  _operationFailure = static_cast<const char *>(nullptr);
+  _closePending = false;
+  return true;
 }
 
 void FilesScreen::onResume() {
@@ -826,6 +904,10 @@ void FilesScreen::handleTouch(const TouchPoint &point) {
 }
 
 void FilesScreen::tick(uint32_t nowMs) {
+  if (_closePending) {
+    _navigator.pop();
+    return;
+  }
   handleSdCardEvent(_sdCard.takeEvent());
   updateDirectoryScan();
   if (_listingDirty && (uint32_t)(nowMs - _lastListingDrawMs) >= 50) {

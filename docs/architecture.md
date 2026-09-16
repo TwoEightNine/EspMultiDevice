@@ -23,6 +23,11 @@ All screens inherit `Screen`, which receives shared references to `Navigator`, `
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
 - `onExit()` runs when leaving the active screen.
+- `releaseResources()` runs only when a stack entry is permanently popped or
+  replaced. It releases screen-scoped buffers, sockets, queues, codecs, and
+  task stacks; returning `false` defers navigation while a worker reaches a
+  safe cancellation point. `push()` does not call it because the covered
+  screen must be resumable.
 - `onResume()` runs when a stacked screen becomes active again; its default redraws through `onEnter()`.
 - `onResult(const ScreenResult&)` receives a result from `pop(result)`.
 - `handleTouch()` receives a changed `TouchPoint`; `tick()` must stay non-blocking.
@@ -46,6 +51,13 @@ Without a card-detect pin, `SdCardController` probes an attached card every 500 
 ## Concurrency and memory
 
 The UI loop must continue to process touch and redraw while expensive work is under way. Files thumbnails, browser inline images, and animated-image cache loading use worker work on the other core; results are returned to the UI task for display updates. Do not let a worker redraw UI directly.
+
+Navigator records free/largest internal heap and free/largest PSRAM before and
+after every successful final screen release. This is the hardware audit point
+for screen-scoped ownership: a deferred release remains on the active screen
+and continues `tick()` until cleanup is safe. Files thumbnail and Browser page,
+image, and lifecycle tasks are created on screen entry/use and delete their
+internal-RAM task stacks, queues, retained results, and buffers on final exit.
 
 SD and touch share clock/data lines. Long media reads are deliberately chunked, acquire `SpiBusLock` only around a read, and release it between chunks. Media decoders and frame rings rely on PSRAM. The supported N16R8 profile is not optional for the full animated-image/video feature set.
 
@@ -89,7 +101,10 @@ and progress callbacks. The store contains all download-specific `SD`,
 
 Browser transport allocates one bounded receive buffer in PSRAM and falls back
 to a 512-byte internal allocation only when necessary. The serialized transport
-is its sole user. Download and session-page-cache operations take the shared
+is its sole user. HTTPS handshake certificate/RSA/parser allocations also use
+PSRAM through the shared scoped mbedTLS allocator; this changes allocation
+placement only and does not change the Browser's insecure compatibility trust
+policy. Download and session-page-cache operations take the shared
 SPI lock only for bounded 4 KiB SD transactions, release it, and yield.
 `BrowserTransport::closeWhenIdle()` is UI-safe: it closes an idle connection
 immediately or asks the serialized worker to close after cancellation, so the
@@ -104,7 +119,10 @@ end a session, while cache state is never duplicated in the screen.
 task, generation invalidation, and completion signal. It invokes a narrow
 Browser callback for cache cleanup and persistent-state loading; the callback
 never draws, while `BrowserScreen::tick()` consumes the completion signal and
-redraws on the UI task.
+redraws on the UI task. Browser workers are session-scoped rather than created
+at firmware boot. Closing cancels their generations, waits without blocking the
+UI for active work to unwind, then releases all three task stacks and transport
+storage before Navigator returns to the previous screen.
 
 `BrowserDocument` owns the Browser's bounded parsed-document storage: rows,
 links, forms, styles, page boundaries, document background, and embedded-image
@@ -136,7 +154,12 @@ Stage 2 registers AssistantScreen only in normal composition. The Home AI tile
 opens it; USB Drive composition never creates assistant services.
 AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
 safe-close handshake. AssistantAvatar is display-only. Neither class performs
-network or audio work.
+network or audio work. Snapshot polling compares the actual avatar, text, and
+button fields: unchanged components are not repainted, and periodic avatar
+frames run only for Listening, Thinking, and Speaking. Captions use up to six
+wrapped compact-text lines. STT occupies that area while waiting; once TTS is
+available, the answer receives the complete caption area instead of being
+reduced to a single ellipsized line.
 
 AssistantController is the UI-facing boundary. Its commands are begin,
 activate, deactivate, startTurn, cancelTurn, retry, and tick; callers receive a

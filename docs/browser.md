@@ -32,7 +32,14 @@ filename selection, and the complete temporary-file transaction. It bounds and
 serializes each SD write with the shared SPI lock, then exposes only a verified,
 atomically committed path to the Browser screen.
 
-Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
+Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. HTTPS certificate parsing and RSA working allocations use PSRAM during the handshake so fragmented internal RAM is not required to provide one large BIGNUM block. This allocator policy does not add certificate verification. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
+
+Browser workers and transport storage are scoped to an open Browser session.
+Page and preview workers start lazily; closing Browser invalidates active work,
+keeps the screen present until it reaches a safe stop, then deletes worker task
+stacks/queues, closes both clients, frees the transfer buffer and parsed-page
+storage, and unloads the in-memory copy of durable browser state. Navigator's
+`[Navigator] release` line reports the resulting internal and PSRAM recovery.
 
 To retune on a physical device, compare 1/2/4/8 KiB receive buffers with 512-byte SD writes, then compare 512 B, 1/2/4/8 KiB SD writes using the fastest receive size. Run each candidate three times over controlled fixed-length and chunked HTTPS media responses, then keep the fastest median that completes ten cancel/retry cycles without corruption or missed touch input.
 

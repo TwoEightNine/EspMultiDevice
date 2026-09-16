@@ -24,6 +24,9 @@ public:
                      BrowserPersistentState &persistentState);
 
   bool begin();
+  // Releases all previews, queues, synchronization objects, and the worker
+  // stack after any cancelled decode/network operation has unwound.
+  bool end();
   bool available() const { return _task != nullptr; }
   bool active() const { return _activeGeneration != 0; }
   uint32_t generation() const { return _generation; }

@@ -53,8 +53,10 @@ void BrowserSessionCache::beginSession() {
 }
 
 void BrowserSessionCache::endSession() {
+  CacheLock lock(_sessionCacheMutex);
   _sessionCacheActive = false;
   _sessionCacheInitialized = false;
+  if (lock.locked()) resetCacheState();
 }
 
 bool BrowserSessionCache::prepareSession() {
@@ -70,10 +72,19 @@ void BrowserSessionCache::resetCacheState() {
   _sessionCacheBytes = 0;
   _sessionCacheClock = 0;
   _sessionCacheSequence = 0;
-  for (uint8_t i = 0; i < BrowserLimits::MaxSessionPages; ++i)
-    _sessionPages[i] = {"", "", "", 0, 0, false};
-  for (uint8_t i = 0; i < BrowserLimits::MaxSessionImages; ++i)
-    _sessionImages[i] = {"", "", 0, 0, false};
+  for (auto &page : _sessionPages) {
+    page.url = static_cast<const char *>(nullptr);
+    page.contentType = static_cast<const char *>(nullptr);
+    page.path = static_cast<const char *>(nullptr);
+    page.bytes = page.lastUse = 0;
+    page.used = false;
+  }
+  for (auto &image : _sessionImages) {
+    image.url = static_cast<const char *>(nullptr);
+    image.path = static_cast<const char *>(nullptr);
+    image.bytes = image.lastUse = 0;
+    image.used = false;
+  }
 }
 
 bool BrowserSessionCache::clearSessionCache() {

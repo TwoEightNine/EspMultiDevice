@@ -322,9 +322,9 @@ BrowserImageWorker::BrowserImageWorker(BrowserTransport &transport,
     : _transport(transport),
       _sessionCache(sessionCache),
       _persistentState(persistentState),
-      _jobs(xQueueCreate(BrowserLimits::ImageJobQueueLength, sizeof(QueuedJob))),
-      _results(xQueueCreate(BrowserLimits::ImageJobQueueLength, sizeof(Browser::ImageResult))),
-      _stateMutex(xSemaphoreCreateMutex()),
+      _jobs(nullptr),
+      _results(nullptr),
+      _stateMutex(nullptr),
       _task(nullptr),
       _generation(1),
       _activeGeneration(0) {
@@ -333,6 +333,10 @@ BrowserImageWorker::BrowserImageWorker(BrowserTransport &transport,
 
 bool BrowserImageWorker::begin() {
   if (_task) return true;
+  if (!_jobs) _jobs = xQueueCreate(BrowserLimits::ImageJobQueueLength, sizeof(QueuedJob));
+  if (!_results) _results = xQueueCreate(BrowserLimits::ImageJobQueueLength,
+                                         sizeof(Browser::ImageResult));
+  if (!_stateMutex) _stateMutex = xSemaphoreCreateMutex();
   if (!_jobs || !_results || !_stateMutex) {
     imageLog(F("worker unavailable: queue or state allocation failed"));
     return false;
@@ -348,6 +352,31 @@ bool BrowserImageWorker::begin() {
   if (started) imageLog(String(F("worker started on core ")) + workerCore);
   else imageLog(F("worker task creation failed"));
   return started;
+}
+
+bool BrowserImageWorker::end() {
+  cancel();
+  if (_activeGeneration != 0) return false;
+  if (_task && eTaskGetState(_task) != eBlocked) return false;
+  if (_task) {
+    vTaskDelete(_task);
+    _task = nullptr;
+  }
+  if (_jobs) {
+    vQueueDelete(_jobs);
+    _jobs = nullptr;
+  }
+  if (_results) {
+    vQueueDelete(_results);
+    _results = nullptr;
+  }
+  if (_stateMutex) {
+    vSemaphoreDelete(_stateMutex);
+    _stateMutex = nullptr;
+  }
+  for (auto &image : _completed) image = {};
+  imageLog(F("worker stopped"));
+  return true;
 }
 
 bool BrowserImageWorker::enqueue(const Browser::ImageJob &job, const String &userAgent) {

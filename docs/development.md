@@ -176,8 +176,8 @@ Current compile gates on Arduino-ESP32 3.3.8:
 
 | Image | Result |
 | --- | ---: |
-| Normal Stage 2 firmware | 3,141,968 / 6,553,600 bytes |
-| Stage 2 assistant contract | 3,145,648 / 6,553,600 bytes |
+| Normal Stage 2 firmware | 3,148,048 / 6,553,600 bytes |
+| Stage 2 assistant contract | 3,153,648 / 6,553,600 bytes |
 | Migrated Stage 0 dependency probe | 3,150,128 / 6,553,600 bytes |
 | Migrated Stage 1 compatibility probe | 3,149,264 / 4,718,592-byte diagnostic gate |
 

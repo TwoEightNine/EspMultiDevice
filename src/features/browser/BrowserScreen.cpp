@@ -8,6 +8,8 @@
 #include "../../services/network/WiFiController.h"
 #include "../../ui/icons.h"
 
+#include <new>
+
 namespace {
 const int16_t HeaderHeight = UiKit::AppBarHeight;
 const int16_t ControlsHeight = 42;
@@ -91,6 +93,7 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _historyCount(0),
     _loaded(false),
     _lifecycle(*this),
+    _closePending(false),
     _showStart(true),
     _showFavorites(false),
     _startListScroll(0),
@@ -129,29 +132,82 @@ BrowserScreen::BrowserScreen(Navigator &navigator,
     _startSiteBounds[i] = {0, 0, 0, 0};
     _startRemoveBounds[i] = {0, 0, 0, 0};
   }
-  _pageLoader.begin();
-  _imageWorker.begin();
-  {
+}
+
+bool BrowserScreen::beginLifecycleWorker() {
 #if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
-    const BaseType_t workerCore = 0;
+  const BaseType_t workerCore = 0;
 #else
-    const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
+  const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
 #endif
-    // This worker only prepares disposable cache data and saved state.  It
-    // must never outrun the core's idle task: on the usual Arduino dual-core
-    // setup it is pinned to CPU 0, whose idle task feeds the task watchdog.
-    if (!_lifecycle.begin(workerCore)) browserLog(F("browser startup worker unavailable"));
-  }
+  // This worker only prepares disposable cache data and saved state. It must
+  // never outrun the core's idle task, which feeds the task watchdog.
+  return _lifecycle.begin(workerCore);
 }
 
 void BrowserScreen::onEnter() {
   browserLog(F("entered"));
+  _closePending = false;
   _lastTouchDown = false;
+  if (!_transport.begin()) browserLog(F("browser transport storage unavailable"));
+  if (!beginLifecycleWorker()) browserLog(F("browser startup worker unavailable"));
   // Draw the interactive shell before any SD work.  The lifecycle worker
   // loads persistent state and clears the previous session cache on the
   // other core; this avoids holding the Home screen during Browser entry.
   if ((!_sessionCache.active() || !_loaded) && !_lifecycle.loading()) startLifecycleLoad();
   draw();
+}
+
+bool BrowserScreen::releaseResources() {
+  if (!_closePending) {
+    _closePending = true;
+    browserLog(F("release requested"));
+    abandonPageLoad();
+    releaseEmbeddedImages();
+    _lifecycle.cancel();
+    _transport.closeWhenIdle();
+  }
+
+  // Worker cancellation is generation-based. Keep this screen active until
+  // no task can still touch its queues, transport, cache, or borrowed pixels.
+  if (_pageLoader.active() || _imageWorker.active() || _lifecycle.active()) return false;
+  if (!_pageLoader.end() || !_imageWorker.end() || !_lifecycle.end()) return false;
+  if (!_transport.end()) return false;
+
+  _sessionCache.endSession();
+  resetSessionState();
+  _persistentState.releaseMemory();
+  _loaded = false;
+  _closePending = false;
+  browserLog(F("screen resources released"));
+  return true;
+}
+
+void BrowserScreen::resetSessionState() {
+  for (auto &entry : _history) {
+    entry.url = static_cast<const char *>(nullptr);
+    entry.anchorRow = 0;
+  }
+  _historyCount = 0;
+  _currentUrl = static_cast<const char *>(nullptr);
+  _downloadReturnUrl = static_cast<const char *>(nullptr);
+  _title = static_cast<const char *>(nullptr);
+  _message = static_cast<const char *>(nullptr);
+  _loadingPhase = static_cast<const char *>(nullptr);
+  _pendingNavigation.previousUrl = static_cast<const char *>(nullptr);
+  _pendingNavigation.request.url = static_cast<const char *>(nullptr);
+  _pendingNavigation.request.body = static_cast<const char *>(nullptr);
+  _pendingNavigation.options.userAgent = static_cast<const char *>(nullptr);
+  _pendingNavigation = {};
+  _document.~BrowserDocument();
+  new (&_document) BrowserDocument();
+  _editingFormControl = -1;
+  _page = 0;
+  _viewAnchorRow = 0;
+  _showStart = true;
+  _showFavorites = false;
+  _startListScroll = 0;
+  _menuOpen = false;
 }
 
 void BrowserScreen::onResume() {
@@ -188,6 +244,11 @@ void BrowserScreen::onResult(const ScreenResult &result) {
 }
 
 void BrowserScreen::tick(uint32_t nowMs) {
+  if (_closePending) {
+    _transport.closeWhenIdle();
+    _navigator.pop();
+    return;
+  }
   if (_lifecycle.takeDrawPending()) {
     draw();
   }
@@ -249,27 +310,6 @@ void BrowserScreen::handleTouch(const TouchPoint &point) {
 
   if (contains(_closeBounds, point.x, point.y)) {
     browserLog(F("close requested"));
-    abandonPageLoad();
-    releaseEmbeddedImages();
-    _transport.closeWhenIdle();
-    // Never wait for an image decoder or delete a directory from the touch
-    // handler.  The next Browser entry clears the disposable session cache
-    // from its lifecycle worker.
-    _lifecycle.cancel();
-    _sessionCache.endSession();
-    browserLog(F("session cache cleanup deferred"));
-    _historyCount = 0;
-    _currentUrl = "";
-    _downloadReturnUrl = "";
-    _title = "";
-    _message = "";
-    _document.clear();
-    _page = 0;
-    _viewAnchorRow = 0;
-    _showStart = true;
-    _showFavorites = false;
-    _startListScroll = 0;
-    _menuOpen = false;
     _navigator.pop();
     return;
   }
@@ -866,7 +906,8 @@ void BrowserScreen::startPendingPageLoad(uint32_t nowMs) {
     return;
   }
   setLoadingPhase(F("Preparing request"));
-  if (!_pageLoader.load(_pendingNavigation.request, _pendingNavigation.options)) {
+  if (!_pageLoader.begin() ||
+      !_pageLoader.load(_pendingNavigation.request, _pendingNavigation.options)) {
     browserLog(F("page loader rejected request"));
     _pendingNavigation = {};
     finishLoading();
@@ -1325,6 +1366,11 @@ void BrowserScreen::cancelPendingImageLoads() {
 
 void BrowserScreen::pumpImageJobs() {
   if (_showStart || _message.length()) return;
+  if (_nextImageToQueue < _document.imageCount() &&
+      !_imageWorker.available() && !_imageWorker.begin()) {
+    browserLog(F("image preview worker unavailable"));
+    return;
+  }
   const uint32_t generation = _imageWorker.generation();
   const String userAgent = _androidUserAgent ? String(MobileUserAgent) : String(EspUserAgent);
   while (_nextImageToQueue < _document.imageCount()) {
@@ -1333,11 +1379,6 @@ void BrowserScreen::pumpImageJobs() {
     // The image cache belongs to the browser session, not one cached page.
     // A shared icon on the next site can therefore decode locally too.
     if (!_document.beginImageJob(index, generation, _sessionCache.active(), job)) continue;
-    if (!_imageWorker.available()) {
-      _document.markImageFailed(index, generation);
-      browserLog(String(F("image preview unavailable #")) + String(index + 1));
-      continue;
-    }
     if (!_imageWorker.enqueue(job, userAgent)) {
       _document.returnImageJobToPending(index, generation);
       _nextImageToQueue--;

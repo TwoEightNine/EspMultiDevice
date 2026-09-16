@@ -1,5 +1,5 @@
 #include "SecureWebSocketClient.h"
-#include "AssistantTlsAllocator.h"
+#include "../network/TlsMemoryScope.h"
 
 #include <esp_system.h>
 #include <esp_heap_caps.h>
@@ -75,7 +75,7 @@ bool SecureWebSocketClient::connect(const Endpoint &endpoint, const Header *head
   else _tls.setCACert(reinterpret_cast<const char *>(trust.data));
   _tls.setHandshakeTimeout(ConnectTimeoutMs / 1000U);
   _tls.setTimeout(1000);
-  AssistantTlsAllocatorScope tlsAllocator;
+  TlsMemoryScope tlsMemory;
   const bool tlsConnected = _tls.connect(endpoint.host, endpoint.port,
                                          static_cast<int32_t>(ConnectTimeoutMs));
   if (!tlsConnected) {
