@@ -2,12 +2,15 @@
 
 #include "../../core/Screen.h"
 #include "../../services/assistant/AssistantController.h"
+#include "../../services/storage/SdCardController.h"
 #include "AssistantAvatar.h"
+#include "AssistantAvatarLoader.h"
 
 class AssistantScreen : public Screen {
 public:
   AssistantScreen(Navigator &navigator, TouchController &touch,
-                  DisplayController &display, AssistantController &controller);
+                  DisplayController &display, AssistantController &controller,
+                  SdCardController &sdCard);
 
   void onEnter() override;
   void onResume() override;
@@ -17,31 +20,34 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static constexpr int16_t ButtonX = 152;
-  static constexpr int16_t ButtonY = 274;
-  static constexpr int16_t ButtonWidth = 176;
-  static constexpr int16_t ButtonHeight = 42;
-  static constexpr int16_t AvatarCenterY = 98;
-  static constexpr int16_t TextTop = 149;
-  static constexpr int16_t CaptionTop = 173;
-  static constexpr uint8_t MaxCaptionLines = 6;
+  static constexpr uint16_t ScreenBackground = TFT_BLACK;
+  static constexpr int16_t TextTop = 48;
+  static constexpr int16_t AssistantBottomPadding = 16;
+  static constexpr int16_t AvatarWidth = 320;
+  static constexpr int16_t AvatarHeight = 240;
+  static constexpr uint8_t MaxTextLines = 4;
+  static constexpr int16_t TextPadding = 16;
 
   AssistantController &_controller;
+  SdCardController &_sdCard;
   AssistantAvatar _avatar;
+  AssistantAvatarLoader _avatarLoader;
   AssistantSnapshot _snapshot;
   bool _lastTouchDown;
   bool _closePending;
   bool _openingWiFi;
-  uint32_t _lastAnimationMs;
   uint32_t _lastCloseRequestMs;
+  uint32_t _lastAvatarRevision;
+  AssistantAvatar::Asset _avatarAsset;
+  bool _avatarAssetValid;
+  bool _underlayDrawn;
 
   void enter();
   void requestClose(bool openWiFi);
   void draw(bool full);
-  void drawAvatar(uint32_t nowMs);
+  void drawAvatar();
+  void clearAvatarPane();
   void drawText();
-  void drawButton();
-  const char *buttonLabel() const;
   bool active() const;
-  static bool avatarAnimated(AssistantPhase phase);
+  void handleSdCardEvent(SdCardEvent event);
 };

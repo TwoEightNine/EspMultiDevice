@@ -2,6 +2,7 @@
 #include <cJSON.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <string.h>
 
 namespace {
 uint16_t passed = 0;
@@ -153,6 +154,30 @@ void testStateAndQueues() {
   check(bounded, "queue overflow rejects producer");
   if (queue) vQueueDelete(queue);
 }
+
+void testAvatarAssets() {
+  check(AssistantAvatar::assetFor(AssistantPhase::Bootstrapping,
+                                  AssistantEmotion::Neutral) == AssistantAvatar::Asset::Waiting &&
+        AssistantAvatar::assetFor(AssistantPhase::Error,
+                                  AssistantEmotion::Happy) == AssistantAvatar::Asset::Waiting,
+        "waiting asset for setup and error");
+  check(AssistantAvatar::assetFor(AssistantPhase::Speaking,
+                                  AssistantEmotion::Sad) == AssistantAvatar::Asset::Speaking,
+        "speaking asset precedence");
+  check(AssistantAvatar::assetFor(AssistantPhase::Ready,
+                                  AssistantEmotion::Happy) == AssistantAvatar::Asset::Happy &&
+        AssistantAvatar::assetFor(AssistantPhase::Ready,
+                                  AssistantEmotion::Sad) == AssistantAvatar::Asset::Sad &&
+        AssistantAvatar::assetFor(AssistantPhase::Ready,
+                                  AssistantEmotion::Neutral) == AssistantAvatar::Asset::Neutral,
+        "emotion asset mapping");
+  check(!strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Waiting), "w.png") &&
+        !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Neutral), "n.png") &&
+        !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Sad), "s.png") &&
+        !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Happy), "h.png") &&
+        !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Speaking), "t.png"),
+        "avatar asset filenames");
+}
 }  // namespace
 
 void assistantContractSetup() {
@@ -163,6 +188,7 @@ void assistantContractSetup() {
   testJson();
   testAudio();
   testStateAndQueues();
+  testAvatarAssets();
   Serial.print(F("ASSISTANT_CONTRACT "));
   Serial.print(failed == 0 ? F("PASS ") : F("FAIL "));
   Serial.print(passed);

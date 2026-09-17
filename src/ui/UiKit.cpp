@@ -43,27 +43,31 @@ void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,
                    const String &title,
                    NavigationIcon icon,
-                   AppBarAction action) {
-  tft.fillRect(0, 0, width, AppBarHeight, AppBarColor);
+                   AppBarAction action,
+                   AppBarStyle style) {
+  tft.fillRect(0, 0, width, AppBarHeight, style.backgroundColor);
   const int16_t iconCenterX = NavigationIconLeft + NavigationIconSize / 2;
   const int16_t iconCenterY = NavigationIconTop + NavigationIconSize / 2;
   if (icon == NavigationIcon::Back) {
-    drawBackIcon(tft, iconCenterX, iconCenterY, TFT_WHITE, AppBarColor);
+    drawBackIcon(tft, iconCenterX, iconCenterY, style.foregroundColor,
+                 style.backgroundColor);
   } else {
-    drawCloseIcon(tft, iconCenterX, iconCenterY, TFT_WHITE, AppBarColor);
+    drawCloseIcon(tft, iconCenterX, iconCenterY, style.foregroundColor,
+                  style.backgroundColor);
   }
 
   const int16_t actionWidth = action == AppBarAction::None ? 0 : AppBarHeight;
   const int16_t titleWidth = width - TitleX - ContentPadding - actionWidth;
   if (titleWidth > 0 && title.length() > 0) {
     UiText::draw(tft, UiKit::ellipsize(title, titleWidth, UiText::Size::Title),
-                 TitleX, TitleCenterY, TFT_WHITE, AppBarColor,
+                 TitleX, TitleCenterY, style.foregroundColor, style.backgroundColor,
                  UiText::Size::Title, ML_DATUM);
   }
   if (action != AppBarAction::None) {
     const int16_t actionCenterX = width - AppBarHeight / 2;
     drawZoomIcon(tft, actionCenterX, iconCenterY, action == AppBarAction::ZoomOut,
-                 action == AppBarAction::ZoomOut ? TFT_CYAN : TFT_WHITE, AppBarColor);
+                 action == AppBarAction::ZoomOut ? TFT_CYAN : style.foregroundColor,
+                 style.backgroundColor);
   }
 }
 

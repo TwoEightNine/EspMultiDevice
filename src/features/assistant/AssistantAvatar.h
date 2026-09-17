@@ -7,11 +7,19 @@
 
 class AssistantAvatar {
 public:
-  void draw(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-            AssistantPhase phase, AssistantEmotion emotion,
-            uint32_t nowMs, uint16_t backgroundColor) const;
+  enum class Asset : uint8_t { Waiting, Neutral, Sad, Happy, Speaking };
+
+  static Asset assetFor(AssistantPhase phase, AssistantEmotion emotion);
+  static const char *filename(Asset asset);
+
+  static void drawUnderlay(TFT_eSPI &tft, int16_t x, int16_t y,
+                           const uint16_t *pixels, const uint8_t *alpha);
+  void draw(TFT_eSPI &tft, int16_t x, int16_t y,
+            const uint16_t *pixels, uint16_t backgroundColor,
+            const uint8_t *alpha = nullptr,
+            const uint16_t *underlayPixels = nullptr) const;
 
 private:
-  static uint16_t phaseColor(AssistantPhase phase);
+  static constexpr uint16_t Width = 320;
+  static constexpr uint16_t Height = 240;
 };
-

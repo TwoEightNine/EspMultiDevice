@@ -153,13 +153,24 @@ page and preview HTTP transfers.
 Stage 2 registers AssistantScreen only in normal composition. The Home AI tile
 opens it; USB Drive composition never creates assistant services.
 AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
-safe-close handshake. AssistantAvatar is display-only. Neither class performs
-network or audio work. Snapshot polling compares the actual avatar, text, and
-button fields: unchanged components are not repainted, and periodic avatar
-frames run only for Listening, Thinking, and Speaking. Captions use up to six
-wrapped compact-text lines. STT occupies that area while waiting; once TTS is
-available, the answer receives the complete caption area instead of being
-reduced to a single ellipsized line.
+safe-close handshake. AssistantAvatar is display-only and paints one prepared
+320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
+decodes the five exact PNG assets from `/.system/ai_avatars/default/` into
+PSRAM; it never draws or updates assistant state. SD reads remain bounded by
+`SpiBusLock`, and the UI task publishes frames to the TFT. It also decodes the
+alpha-capable `/.system/ai_avatars/blur.png` underlay and composites it over the
+black avatar pane before the selected avatar. Missing, invalid, or temporarily
+unavailable assets leave an otherwise empty pane at the screen background; once
+a frame is visible, replacement frames are pushed directly over it to avoid a
+transition blink. SD removal/remount explicitly clears the pane so stale
+artwork cannot remain.
+The portrait layout uses a 48px app bar, a 192px text area, and the native
+avatar frame at the bottom. User/STT text is top-aligned and assistant/TTS text
+is bottom-aligned, both in four wrapped Content lines. Technical status text,
+including errors and activation instructions, uses the assistant slot in light
+gray (light red for errors) until a reply is available; replies and user text
+are white. The assistant reply is offset above the avatar with a bottom gutter.
+The full avatar rectangle is the state-dependent primary touch target.
 
 AssistantController is the UI-facing boundary. Its commands are begin,
 activate, deactivate, startTurn, cancelTurn, retry, and tick; callers receive a

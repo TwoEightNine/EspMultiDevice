@@ -10,7 +10,7 @@ Clear the screen, then draw the bar before screen content:
 UiKit::drawTopAppBar(_display.tft(), _display.width(), F("My screen"));
 ```
 
-The helper draws a 48px `#111` bar. Its close glyph uses the generated 40×40 alpha asset, centered inside the 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history. A screen can reserve the trailing 48×48 cell through `UiKit::AppBarAction`; the title then ellipsizes before that complete action target. The built-in zoom action uses antialiased zoom-in/zoom-out glyphs.
+The helper draws a 48px `#111` bar by default. Its close glyph uses the generated 40×40 alpha asset, centered inside the 48×48 leading hit target. The title begins at x=48, sits 2px high for visual centering, and ellipsizes before the 16px trailing margin. Close is standard; use Back only for in-screen history. A screen can reserve the trailing 48×48 cell through `UiKit::AppBarAction`; the title then ellipsizes before that complete action target. The built-in zoom action uses antialiased zoom-in/zoom-out glyphs. `drawTopAppBar` accepts an optional `UiKit::AppBarStyle` for screens that need a different solid background and foreground; existing callers retain the dark defaults.
 
 Reserve y=0–47. Make the entire 48×48 cell tappable:
 

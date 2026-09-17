@@ -76,7 +76,8 @@ USBMSC usbMsc;
 #endif
 
 static const uint32_t SERIAL_BAUD = 115200;
-static const uint8_t DISPLAY_ROTATION = 4;
+// ILI9488 native portrait frame: 320 x 480. (TFT_eSPI rotations are 0..3.)
+static const uint8_t DISPLAY_ROTATION = 0;
 // Development-only diagnostic. Enable for three cold boots with a target card,
 // then restore false before normal use.
 static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
@@ -383,7 +384,7 @@ void setup() {
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
   usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
   assistantScreen = new AssistantScreen(
-    *navigator, *touch, *display, *assistantController
+    *navigator, *touch, *display, *assistantController, *sdCard
   );
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {

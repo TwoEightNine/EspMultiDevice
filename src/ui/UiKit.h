@@ -22,6 +22,13 @@ constexpr uint16_t MaxRgba565IconWidth = 64;
 constexpr uint16_t AppBarColor = 0x1082;  // #111111 in RGB565.
 constexpr uint16_t DividerColor = TFT_DARKGREY;
 
+struct AppBarStyle {
+  uint16_t backgroundColor;
+  uint16_t foregroundColor;
+};
+
+constexpr AppBarStyle DefaultAppBarStyle = {AppBarColor, TFT_WHITE};
+
 enum class NavigationIcon : uint8_t {
   Back,
   Close
@@ -45,7 +52,8 @@ void drawTopAppBar(TFT_eSPI &tft,
                    int16_t width,
                    const String &title,
                    NavigationIcon icon = NavigationIcon::Close,
-                   AppBarAction action = AppBarAction::None);
+                   AppBarAction action = AppBarAction::None,
+                   AppBarStyle style = DefaultAppBarStyle);
 
 // Anti-aliased 24px navigation/control icons. Pass the colour immediately
 // behind an icon so edge pixels blend correctly without display readback.
