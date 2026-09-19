@@ -361,6 +361,46 @@ void drawFilledButton(TFT_eSPI &tft,
                textColor, fillColor, UiText::Size::Content, MC_DATUM);
 }
 
+void drawToggle(TFT_eSPI &tft,
+                int16_t x,
+                int16_t y,
+                int16_t width,
+                int16_t height,
+                bool enabled,
+                uint16_t activeColor,
+                uint16_t backgroundColor) {
+  if (width < 2 || height < 2) return;
+  const int16_t radius = height / 2;
+  const uint16_t fill = enabled ? activeColor : TFT_DARKGREY;
+  tft.fillSmoothRoundRect(x, y, width, height, radius, fill, backgroundColor);
+  const int16_t knobRadius = max<int16_t>(2, height / 2 - 6);
+  const int16_t knobX = enabled ? x + width - height / 2 : x + height / 2;
+  tft.fillSmoothCircle(knobX, y + height / 2, knobRadius, TFT_WHITE, fill);
+}
+
+void drawColorSwatch(TFT_eSPI &tft,
+                     int16_t x,
+                     int16_t y,
+                     int16_t width,
+                     int16_t height,
+                     const String &label,
+                     uint16_t fillColor,
+                     bool selected,
+                     uint16_t backgroundColor) {
+  if (width <= 0 || height <= 0) return;
+  const int16_t radius = min<int16_t>(8, height / 2);
+  tft.fillSmoothRoundRect(x, y, width, height, radius, fillColor, backgroundColor);
+  const uint16_t textColor = fillColor == TFT_GREEN || fillColor == TFT_YELLOW || fillColor == TFT_CYAN
+                               ? TFT_BLACK : TFT_WHITE;
+  UiText::draw(tft, UiKit::ellipsize(label, width - ContentPadding * 2,
+                                     UiText::Size::Content),
+               x + width / 2, y + height / 2, textColor, fillColor,
+               UiText::Size::Content, MC_DATUM);
+  if (selected) {
+    tft.fillSmoothCircle(x + width - 14, y + 14, 5, TFT_WHITE, fillColor);
+  }
+}
+
 void drawProgressBar(TFT_eSPI &tft,
                      int16_t x,
                      int16_t y,

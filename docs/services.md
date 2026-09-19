@@ -120,7 +120,7 @@ after automatic reboot. Further assistant work may target this self-hosted
 protocol path, but no assistant UI or audio-session behavior is introduced by
 the probe.
 
-`AudioSettings` persists the speaker volume using ESP32 Preferences. `WorkoutScreen` has configurable work/rest periods in five-second steps from 5 to 600 seconds and plays audible stage cues using the shared speaker and volume setting.
+`AudioSettings` persists the speaker volume using ESP32 Preferences. `LedSettings` persists the initial DevKitC-1 RGB LED under the `led` Preferences namespace: an enabled flag and one of six palette values (red, green, blue, yellow, cyan, or magenta). Fresh installs select cyan but leave the LED off. `Settings → LED` applies toggles and palette changes immediately; disabling it preserves the chosen color for its next enable and both values restore at boot. `WorkoutScreen` has configurable work/rest periods in five-second steps from 5 to 600 seconds and plays audible stage cues using the shared speaker and volume setting.
 
 ## Touch, battery, and startup diagnostics
 

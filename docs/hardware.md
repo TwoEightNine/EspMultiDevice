@@ -27,6 +27,7 @@ For the first upload, select the serial device belonging to the USB-to-UART brid
 | INMP441 | DOUT 17, BCLK 18, WS 21, power sense 47 | `L/R` to GND for left channel |
 | MAX98357A | DIN 1, BCLK 18, LRC 21, enable 2 | 100k pulldown on enable recommended |
 | Battery divider | ADC 3 | 100k/100k divider and 100nF midpoint capacitor |
+| Built-in RGB LED | 48 | Initial ESP32-S3-DevKitC-1 only; WS2812-compatible, controlled in Settings |
 
 The TFT is preferred on GPIO 4–16 because TFT_eSPI’s fast parallel path uses low GPIOs. Do **not** connect the TFT module `SDO`/`MISO` to the SD SPI bus: many ILI9488 modules fail to release it when deselected.
 
@@ -67,9 +68,9 @@ Supply the display and SD module according to their module documentation. A pin 
 
 ## Audio connections
 
-The INMP441 receives switched 3.3V through a physical mic-power switch; the same switched node connects to GPIO 47 for sensing. GPIO 48 is intentionally left free for the addressable RGB LED fitted to the initial ESP32-S3-DevKitC-1 revision. If no sense wire exists, set `MIC_POWER_SENSE_PIN` to `MicController::NoPowerSensePin`.
+The INMP441 receives switched 3.3V through a physical mic-power switch; the same switched node connects to GPIO 47 for sensing. GPIO 48 drives the addressable RGB LED fitted to the initial ESP32-S3-DevKitC-1 revision. `LedSettings` sends its WS2812-compatible GRB frame through the Arduino core RMT peripheral; do not attach another peripheral to GPIO 48. If no sense wire exists, set `MIC_POWER_SENSE_PIN` to `MicController::NoPowerSensePin`.
 
-The ESP32-S3-DevKitC-1 v1.1 moves its addressable RGB LED from GPIO 48 to GPIO 38. This project uses GPIO 38 as the XPT2046 touch chip-select, so v1.1 boards will need a board-specific LED/touch pin remap if the onboard RGB LED is to be used; do not connect the mic sense wire to GPIO 38.
+The ESP32-S3-DevKitC-1 v1.1 moves its addressable RGB LED from GPIO 48 to GPIO 38. This project uses GPIO 38 as the XPT2046 touch chip-select, so `LedSettings` supports the initial GPIO 48 board only; v1.1 boards need a board-specific LED/touch pin remap before their onboard LED can be used. Do not connect the mic sense wire to GPIO 38.
 
 Use 5V for MAX98357A `VIN` when the module and power budget allow it, otherwise 3.3V. `GAIN` uses a 100k resistor to ground for 15dB gain. The speaker output is differential: connect both terminals only to the speaker, never to ground. Do not tie `SD`/`EN` to VIN because the firmware mutes it at boot/recording.
 

@@ -34,10 +34,12 @@ USBMSC usbMsc;
 #include "src/core/BatteryController.h"
 #include "src/core/DisplayController.h"
 #include "src/services/audio/AudioSettings.h"
+#include "src/services/led/LedSettings.h"
 #include "src/services/assistant/AssistantBackendConfigLoader.h"
 #include "src/services/assistant/AssistantController.h"
 #include "src/features/assistant/AssistantScreen.h"
 #include "src/features/settings/AudioSettingsScreen.h"
+#include "src/features/settings/LedScreen.h"
 #include "src/features/audio_player/AudioPlayerScreen.h"
 #include "src/features/video_player/VideoPlayerScreen.h"
 #include "src/features/browser/BrowserScreen.h"
@@ -118,8 +120,13 @@ static const int MIC_BCLK_PIN = 18;
 static const int MIC_WS_PIN = 21;
 static const int MIC_DATA_PIN = 17;
 // GPIO 47 is unused by the display, shared SD/touch SPI, audio, USB, and
-// boot-memory interfaces. GPIO 48 is reserved for the DevKitC RGB LED.
+// boot-memory interfaces.
 static const int MIC_POWER_SENSE_PIN = 47;
+
+// Initial ESP32-S3-DevKitC-1 boards place their WS2812-compatible RGB LED on
+// GPIO 48. DevKitC-1 v1.1 instead uses GPIO 38, which this project reserves
+// for touch chip-select and therefore does not support as an LED GPIO.
+static const int BUILTIN_RGB_LED_PIN = 48;
 
 // MAX98357A I2S speaker amplifier.
 static const int SPEAKER_BCLK_PIN = MIC_BCLK_PIN;
@@ -135,6 +142,7 @@ SpeakerController *speaker = nullptr;
 SecretStorage *secretStorage = nullptr;
 MediaCache *mediaCache = nullptr;
 AudioSettings *audioSettings = nullptr;
+LedSettings *ledSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 BatteryController *batteryController = nullptr;
@@ -148,6 +156,7 @@ VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
 AudioSettingsScreen *audioSettingsScreen = nullptr;
+LedScreen *ledScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
@@ -352,6 +361,14 @@ void setup() {
   Serial.print(F("Audio volume: "));
   Serial.println(audioSettings->volume());
 
+  ledSettings = new LedSettings(BUILTIN_RGB_LED_PIN);
+  if (ledSettings->begin()) {
+    Serial.println(F("Built-in RGB LED ready."));
+  } else {
+    Serial.print(F("Built-in RGB LED unavailable: "));
+    Serial.println(ledSettings->error());
+  }
+
   wifiController = new WiFiController();
   wifiController->begin();
   Serial.println(F("Wi-Fi controller ready."));
@@ -374,6 +391,7 @@ void setup() {
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
+  ledScreen = new LedScreen(*navigator, *touch, *display, *ledSettings);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
@@ -404,6 +422,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::AudioSettings, *audioSettingsScreen)) {
     Serial.println(F("Navigator failed to register Audio Settings screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::Led, *ledScreen)) {
+    Serial.println(F("Navigator failed to register LED screen."));
   }
   if (!navigator->registerScreen(ScreenId::WiFi, *wifiScreen)) {
     Serial.println(F("Navigator failed to register Wi-Fi screen."));
