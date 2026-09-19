@@ -49,6 +49,9 @@ struct Message {
 
 bool parseHttpsUrl(const char *url, ParsedUrl &output);
 bool parseWssUrl(const char *url, ParsedUrl &output);
+// Copies only complete, valid UTF-8 code points and replaces malformed input
+// with '?'. The result is always NUL-terminated when capacity is nonzero.
+bool copyUtf8Bounded(const char *value, char *output, size_t capacity);
 bool buildClientHello(uint8_t version, char *output, size_t capacity);
 bool buildListenStart(const char *sessionId, char *output, size_t capacity);
 bool buildListenStop(const char *sessionId, char *output, size_t capacity);

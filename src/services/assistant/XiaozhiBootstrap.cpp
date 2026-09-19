@@ -192,7 +192,7 @@ bool XiaozhiBootstrap::post(const char *url, const AssistantIdentity &identity,
   http.addHeader(F("Activation-Version"), F("1"));
   http.addHeader(F("Device-Id"), identity.deviceId());
   http.addHeader(F("Client-Id"), identity.clientId());
-  http.addHeader(F("Accept-Language"), F("en-US"));
+  http.addHeader(F("Accept-Language"), F("zh-CN"));
   http.addHeader(F("Content-Type"), F("application/json"));
 
   _lastHttpStatus = http.POST(reinterpret_cast<uint8_t *>(const_cast<char *>(body)), strlen(body));
@@ -265,7 +265,7 @@ bool XiaozhiBootstrap::buildSystemInfoJson(const AssistantIdentity &identity,
     return false;
   }
   cJSON_AddNumberToObject(root, "version", 2);
-  cJSON_AddStringToObject(root, "language", "en-US");
+  cJSON_AddStringToObject(root, "language", "zh-CN");
   cJSON_AddNumberToObject(root, "flash_size", ESP.getFlashChipSize());
   cJSON_AddNumberToObject(root, "psram_size", ESP.getPsramSize());
   char minimumHeap[24];

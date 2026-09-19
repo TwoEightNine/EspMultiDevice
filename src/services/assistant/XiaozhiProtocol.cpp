@@ -171,6 +171,49 @@ bool isAuthenticationError(cJSON *root) {
 
 namespace XiaozhiProtocol {
 
+bool copyUtf8Bounded(const char *value, char *output, size_t capacity) {
+  if (!output || capacity == 0) return false;
+  output[0] = 0;
+  if (!value) return true;
+  const size_t limit = capacity - 1;
+  size_t input = 0;
+  size_t written = 0;
+  bool complete = true;
+  while (value[input]) {
+    const uint8_t first = static_cast<uint8_t>(value[input]);
+    uint8_t count = first < 0x80 ? 1 :
+                    (first >= 0xc2 && first <= 0xdf ? 2 :
+                    (first >= 0xe0 && first <= 0xef ? 3 :
+                    (first >= 0xf0 && first <= 0xf4 ? 4 : 0)));
+    bool valid = count != 0;
+    for (uint8_t offset = 1; valid && offset < count; ++offset) {
+      if (!value[input + offset] ||
+          (static_cast<uint8_t>(value[input + offset]) & 0xc0) != 0x80) valid = false;
+    }
+    if (valid && count == 3) {
+      const uint8_t second = static_cast<uint8_t>(value[input + 1]);
+      if ((first == 0xe0 && second < 0xa0) ||
+          (first == 0xed && second > 0x9f)) valid = false;
+    } else if (valid && count == 4) {
+      const uint8_t second = static_cast<uint8_t>(value[input + 1]);
+      if ((first == 0xf0 && second < 0x90) ||
+          (first == 0xf4 && second > 0x8f)) valid = false;
+    }
+    if (!valid) {
+      if (written == limit) { complete = false; break; }
+      output[written++] = '?';
+      ++input;
+      continue;
+    }
+    if (written + count > limit) { complete = false; break; }
+    memcpy(output + written, value + input, count);
+    written += count;
+    input += count;
+  }
+  output[written] = 0;
+  return complete && value[input] == 0;
+}
+
 void Message::clear() {
   memset(this, 0, sizeof(*this));
   type = MessageType::Invalid;
@@ -284,7 +327,7 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
   } else if (!strcmp(type->valuestring, "stt")) {
     cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
     if (!cJSON_IsString(text)) { cJSON_Delete(root); return false; }
-    copyBounded(text->valuestring, message.text, sizeof(message.text));
+    copyUtf8Bounded(text->valuestring, message.text, sizeof(message.text));
     message.type = MessageType::Stt;
   } else if (!strcmp(type->valuestring, "tts")) {
     cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
@@ -293,14 +336,14 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
     else if (!strcmp(state->valuestring, "stop")) message.type = MessageType::TtsStop;
     else if (!strcmp(state->valuestring, "sentence_start")) {
       cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
-      if (cJSON_IsString(text)) copyBounded(text->valuestring, message.text, sizeof(message.text));
+      if (cJSON_IsString(text)) copyUtf8Bounded(text->valuestring, message.text, sizeof(message.text));
       message.type = MessageType::TtsCaption;
     } else message.type = MessageType::Ignored;
   } else if (!strcmp(type->valuestring, "llm")) {
     cJSON *emotion = cJSON_GetObjectItemCaseSensitive(root, "emotion");
     cJSON *text = cJSON_GetObjectItemCaseSensitive(root, "text");
     if (cJSON_IsString(emotion)) message.emotion = parseEmotion(emotion->valuestring);
-    if (cJSON_IsString(text)) copyBounded(text->valuestring, message.text, sizeof(message.text));
+    if (cJSON_IsString(text)) copyUtf8Bounded(text->valuestring, message.text, sizeof(message.text));
     message.type = MessageType::Emotion;
   } else if (!strcmp(type->valuestring, "goodbye")) {
     message.type = MessageType::Goodbye;

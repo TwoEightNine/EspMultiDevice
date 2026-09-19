@@ -51,9 +51,9 @@ curl --silent --show-error --cacert "$ca_file" --output "$response_file" \
   -H 'Activation-Version: 1' \
   -H 'Device-Id: 02:00:00:00:00:01' \
   -H 'Client-Id: 00000000-0000-4000-8000-000000000001' \
-  -H 'Accept-Language: en-US' \
+  -H 'Accept-Language: zh-CN' \
   -H 'Content-Type: application/json' \
-  --data '{"version":2,"language":"en-US"}' \
+  --data '{"version":2,"language":"zh-CN"}' \
   "https://$host:8443/xiaozhi/ota/"
 ruby "$tool_dir/check_config.rb" bootstrap "$response_file"
 echo "BACKEND_READINESS PASS"

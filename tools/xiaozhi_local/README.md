@@ -2,9 +2,12 @@
 
 This pinned arm64 Compose stack is the Stage 2 production target for ESP Media.
 It runs Xiaozhi's authenticated bootstrap and voice WebSocket service behind
-Caddy-managed HTTPS/WSS. The English pipeline is `SileroVAD`, `OpenaiASR`,
-`OpenAILLM`, `EdgeTTS`, `nointent`, and `nomem`; MQTT and public Xiaozhi fallback
-remain disabled.
+Caddy-managed HTTPS/WSS. The language-matching pipeline is `SileroVAD`, `OpenaiASR`,
+`OpenAILLM`, `EdgeTTS`, `nointent`, and `nomem`; it uses
+`zh-CN-XiaoxiaoNeural`, the Edge TTS voice supported by the local service, so
+Chinese input receives Simplified-Chinese speech. The prompt still makes replies
+match other input languages, although the fixed Mandarin voice may give non-Chinese
+speech a Mandarin accent. MQTT and public Xiaozhi fallback remain disabled.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only

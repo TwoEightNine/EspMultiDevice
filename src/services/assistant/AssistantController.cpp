@@ -274,9 +274,5 @@ bool AssistantController::turnActive(AssistantPhase phase) {
 }
 
 void AssistantController::copyBounded(const char *value, char *output, size_t capacity) {
-  if (!output || capacity == 0) return;
-  if (!value) value = "";
-  const size_t length = strnlen(value, capacity - 1);
-  memcpy(output, value, length);
-  output[length] = 0;
+  XiaozhiProtocol::copyUtf8Bounded(value, output, capacity);
 }

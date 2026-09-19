@@ -153,7 +153,8 @@ and nomem. The ASR snapshot is
 [gpt-4o-mini-transcribe-2025-12-15](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe);
 the chat snapshot is
 [gpt-5.4-mini-2026-03-17](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
-The OpenAI base URLs and English Edge voice live in the private runtime YAML.
+The OpenAI base URLs, language-matching prompt, and supported Mandarin Edge
+voice live in the private runtime YAML.
 The API key is repeated only in the ASR and LLM sections of ignored
 .runtime/data/.config.yaml. Never put it in Compose, firmware, tracked
 examples, logs, or command arguments.
@@ -192,6 +193,7 @@ retain at least 8 KiB.
 | Tool | Purpose |
 | --- | --- |
 | `tools/generate_browser_freesans_font.py` | Reproducibly generates `src/ui/fonts/BrowserFreeSans.h` from redistributable GNU FreeSans. Preserve `LICENSE.FreeFont`. |
+| `tools/generate_assistant_noto_sans_sc_font.py` | Reproducibly generates the assistant-only GB2312-level 18 px `AssistantNotoSansSC18.h` from OFL-licensed Noto Sans CJK SC. Preserve `LICENSE.NotoSansCJKSC`. |
 | `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates H.263/3GP and MPEG-4 Part 2/MP4 176×144, 10fps fixtures in `tests/video/fixtures/`. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |

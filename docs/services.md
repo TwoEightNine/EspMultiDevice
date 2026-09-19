@@ -72,6 +72,14 @@ seconds. Tokens, Authorization, complete WSS URLs, session IDs, raw JSON,
 audio, and captions are prohibited from logs and snapshots. Firmware-update,
 MQTT, system, MCP, alert, custom, and unknown instructions are ignored.
 
+The self-hosted assistant advertises `zh-CN` during bootstrap and its local
+configuration uses a language-matching prompt plus the Edge-TTS-supported
+`zh-CN-XiaoxiaoNeural` voice. Chinese speech receives Simplified-Chinese replies;
+other speech is answered in its source language, but may have a Mandarin accent
+because this backend uses one fixed voice.
+Caption buffers preserve only complete UTF-8 code points and replace malformed
+input with `?` before the UI renders it.
+
 ### Stage 0/1 validation history
 
 `TlsMemoryScope` is the shared allocation adapter for mbedTLS handshakes. It

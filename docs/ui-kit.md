@@ -60,7 +60,11 @@ Use `UiText` for all application text:
 - `Content`: normal content and button labels.
 - `Title`: app-bar titles and deliberate emphasis.
 
-`UiText` supplies smooth FreeSans faces covering Latin and Cyrillic. Redrawing text or an antialiased icon requires the same immediate background color used on its first draw.
+`UiText` supplies smooth FreeSans faces covering Latin and Cyrillic. Assistant
+captions additionally select an embedded 18 px Noto Sans CJK SC face when Han
+characters are present; this GB2312-level Simplified-Chinese coverage is scoped
+to that screen, not the shared app chrome. Redrawing text or an antialiased
+icon requires the same immediate background color used on its first draw.
 
 ## Buttons, inputs, and progress
 

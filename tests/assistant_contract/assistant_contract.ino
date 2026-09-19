@@ -95,6 +95,29 @@ void testJson() {
                                       strlen(captionJson), nullptr, message) &&
         strlen(message.text) == AssistantSnapshot::CaptionBytes,
         "truncate caption");
+
+  const char chineseStt[] = "{\"type\":\"stt\",\"text\":\"\\u4f60\\u597d\\uff0c\\u4e16\\u754c\"}";
+  check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(chineseStt),
+                                      strlen(chineseStt), nullptr, message) &&
+        !strcmp(message.text, "\xE4\xBD\xA0\xE5\xA5\xBD\xEF\xBC\x8C\xE4\xB8\x96\xE7\x95\x8C"),
+        "parse Simplified-Chinese caption");
+
+  const char fourChinese[] =
+      "\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96\xE7\x95\x8C";
+  char truncated[10] = {};
+  check(!XiaozhiProtocol::copyUtf8Bounded(fourChinese, truncated, sizeof(truncated)) &&
+        !strcmp(truncated, "\xE4\xBD\xA0\xE5\xA5\xBD\xE4\xB8\x96"),
+        "truncate Chinese caption at UTF-8 boundary");
+
+  const char malformedUtf8[] = {'\xE4', 'A', 0};
+  char repaired[8] = {};
+  check(XiaozhiProtocol::copyUtf8Bounded(malformedUtf8, repaired, sizeof(repaired)) &&
+        !strcmp(repaired, "?A"), "replace malformed UTF-8");
+
+  const char overlongUtf8[] = {'\xE0', '\x80', '\x80', 0};
+  memset(repaired, 0, sizeof(repaired));
+  check(XiaozhiProtocol::copyUtf8Bounded(overlongUtf8, repaired, sizeof(repaired)) &&
+        !strcmp(repaired, "???"), "replace overlong UTF-8");
 }
 
 void testAudio() {

@@ -21,7 +21,7 @@ uint16_t nextUtf8Offset(const String &text, uint16_t offset) {
 }
 
 uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
-                    int16_t maxWidth, UiText::Size size = UiText::Size::Compact) {
+                    int16_t maxWidth) {
   if (!lines || capacity == 0 || text.length() == 0) return 0;
   uint16_t position = 0;
   uint8_t count = 0;
@@ -45,7 +45,7 @@ uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
       }
       if (text[end] == ' ') lastSpace = end;
       const uint16_t next = nextUtf8Offset(text, end);
-      if (UiText::measure(text.substring(start, next), size) > maxWidth) {
+      if (UiText::measureAssistantCaption(text.substring(start, next)) > maxWidth) {
         uint16_t split = lastSpace >= static_cast<int32_t>(start)
           ? static_cast<uint16_t>(lastSpace) : end;
         if (split == start) split = next;
@@ -68,7 +68,7 @@ uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
   if (position < text.length() && count > 0) {
     String remainder = lines[count - 1] + " " + text.substring(position);
     remainder.trim();
-    lines[count - 1] = UiText::ellipsize(remainder, maxWidth, size);
+    lines[count - 1] = UiText::ellipsizeAssistantCaption(remainder, maxWidth);
   }
   return count;
 }
@@ -251,16 +251,14 @@ void AssistantScreen::drawText() {
   const int16_t avatarTop = _display.height() - AvatarHeight;
   tft.fillRect(0, TextTop, _display.width(), avatarTop - TextTop, ScreenBackground);
 
-  String userCaption = UiText::normalizeForFont(String(_snapshot.sttCaption),
-                                                 UiText::Size::Content);
+  String userCaption = UiText::normalizeAssistantCaption(String(_snapshot.sttCaption));
   String userLines[MaxTextLines];
   const uint8_t userCount = wrapCaption(userCaption, userLines, MaxTextLines,
-                                        _display.width() - TextPadding * 2,
-                                        UiText::Size::Content);
+                                        _display.width() - TextPadding * 2);
   for (uint8_t index = 0; index < userCount; ++index) {
-    UiText::draw(tft, userLines[index], TextPadding,
-                 TextTop + index * UiText::lineHeight(UiText::Size::Content),
-                 TFT_WHITE, ScreenBackground, UiText::Size::Content, TL_DATUM);
+    UiText::drawAssistantCaption(tft, userLines[index], TextPadding,
+                                 TextTop + index * UiText::lineHeight(UiText::Size::Content),
+                                 TFT_WHITE, ScreenBackground, TL_DATUM);
   }
 
   String assistantCaption;
@@ -275,19 +273,17 @@ void AssistantScreen::drawText() {
   } else {
     assistantCaption = String(_snapshot.status);
   }
-  assistantCaption = UiText::normalizeForFont(assistantCaption,
-                                              UiText::Size::Content);
+  assistantCaption = UiText::normalizeAssistantCaption(assistantCaption);
   String assistantLines[MaxTextLines];
   const uint8_t assistantCount = wrapCaption(assistantCaption, assistantLines,
                                              MaxTextLines,
-                                             _display.width() - TextPadding * 2,
-                                             UiText::Size::Content);
+                                             _display.width() - TextPadding * 2);
   const int16_t assistantTop = avatarTop -
       AssistantBottomPadding - assistantCount * UiText::lineHeight(UiText::Size::Content);
   for (uint8_t index = 0; index < assistantCount; ++index) {
-    UiText::draw(tft, assistantLines[index], TextPadding,
-                 assistantTop + index * UiText::lineHeight(UiText::Size::Content),
-                 assistantColor, ScreenBackground, UiText::Size::Content, TL_DATUM);
+    UiText::drawAssistantCaption(tft, assistantLines[index], TextPadding,
+                                 assistantTop + index * UiText::lineHeight(UiText::Size::Content),
+                                 assistantColor, ScreenBackground, TL_DATUM);
   }
 }
 

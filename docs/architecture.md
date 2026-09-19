@@ -167,7 +167,10 @@ transition blink. SD removal/remount explicitly clears the pane so stale
 artwork cannot remain.
 The portrait layout uses a 48px app bar, a 192px text area, and the native
 avatar frame at the bottom. User/STT text is top-aligned and assistant/TTS text
-is bottom-aligned, both in four wrapped Content lines. Technical status text,
+is bottom-aligned, both in four wrapped Content lines. Captions select the
+assistant-only 18 px Noto Sans CJK SC face when they contain Han text; its
+embedded GB2312 coverage includes common Simplified Chinese, punctuation, and
+Latin, while unsupported characters become `?`. Technical status text,
 including errors and activation instructions, uses the assistant slot in light
 gray (light red for errors) until a reply is available; replies and user text
 are white. The assistant reply is offset above the avatar with a bottom gutter.

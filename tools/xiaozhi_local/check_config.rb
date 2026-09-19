@@ -77,15 +77,18 @@ fail_check("OpenAILLM provider is incomplete") unless
   fail_check("OpenAI API key is missing or still a placeholder") unless
     key.is_a?(String) && !key.empty? && !key.match?(/replace|placeholder|your|你的/i)
 end
-fail_check("EdgeTTS English voice is not configured") unless
+fail_check("Simplified-Chinese EdgeTTS voice is not configured") unless
   fetch_path(config, "TTS", "EdgeTTS", "type") == "edge" &&
-  fetch_path(config, "TTS", "EdgeTTS", "voice").to_s.start_with?("en-")
+  fetch_path(config, "TTS", "EdgeTTS", "voice") == "zh-CN-XiaoxiaoNeural" &&
+  fetch_path(config, "TTS", "EdgeTTS", "language") == "中文"
 fail_check("Silero VAD is not configured") unless
   fetch_path(config, "VAD", "SileroVAD", "type") == "silero"
 fail_check("nointent is not configured") unless
   fetch_path(config, "Intent", "nointent", "type") == "nointent"
 fail_check("nomem is not configured") unless
   fetch_path(config, "Memory", "nomem", "type") == "nomem"
-fail_check("English prompt is missing") unless config["prompt"].to_s.match?(/English/i)
+prompt = config["prompt"].to_s
+fail_check("language-matching bilingual prompt is missing") unless
+  prompt.match?(/Simplified Chinese/i) && prompt.match?(/same language/i)
 
 puts "PASS private backend configuration"

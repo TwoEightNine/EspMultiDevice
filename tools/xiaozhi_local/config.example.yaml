@@ -7,7 +7,8 @@ server:
   mqtt_signature_key: null
 
 prompt: |
-  You are a concise, friendly voice assistant. Reply in clear natural English.
+  You are a concise, friendly voice assistant. Reply in Simplified Chinese when
+  the user speaks Chinese; otherwise reply in the same language as the user.
   Prefer one or two short sentences unless the user asks for more detail.
 
 selected_module:
@@ -44,9 +45,9 @@ LLM:
 TTS:
   EdgeTTS:
     type: edge
-    voice: en-US-JennyNeural
+    voice: zh-CN-XiaoxiaoNeural
     output_dir: tmp/
-    language: English
+    language: 中文
 
 Intent:
   nointent:

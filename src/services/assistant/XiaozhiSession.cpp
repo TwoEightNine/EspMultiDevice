@@ -751,7 +751,7 @@ void XiaozhiSession::publishCaption(uint32_t generation, XiaozhiSessionEventType
   XiaozhiSessionEvent event = {};
   event.type = type;
   event.generation = generation;
-  copyText(caption, event.text, sizeof(event.text));
+  XiaozhiProtocol::copyUtf8Bounded(caption, event.text, sizeof(event.text));
   publish(event);
 }
 
