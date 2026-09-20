@@ -13,6 +13,7 @@ extern "C" {
 
 #include "../../app/Navigator.h"
 #include "../../core/SpiBusLock.h"
+#include "../../media/FragmentedMp4Demuxer.h"
 #include "../../media/VideoH264.h"
 #include "../../media/VideoLegacy.h"
 
@@ -23,8 +24,6 @@ extern "C" {
 #include <string.h>
 
 namespace {
-constexpr uint16_t MaxVideoWidth = 320;
-constexpr uint16_t MaxVideoHeight = 480;
 constexpr uint8_t FrameSlots = 2;
 constexpr uint16_t IoChunkBytes = 8192;
 constexpr uint16_t PcmFrames = 512;
@@ -34,8 +33,6 @@ constexpr uint32_t AudioLowMs = 80;
 constexpr uint32_t AudioTargetMs = 160;
 constexpr uint16_t MaxI2sFramesPerPass = 256;
 constexpr uint32_t WorkQuantumUs = 8000;
-constexpr uint32_t LateFrameMs = 250;
-constexpr uint32_t ForcedFrameMs = 250;
 constexpr uint32_t SnapshotIntervalMs = 100;
 constexpr uint32_t VideoWorkerStackBytes = 24576;
 constexpr uint8_t MaxAudioPacketsPerQuantum = 4;
@@ -71,6 +68,10 @@ int readMp4(int64_t offset, void *buffer, size_t bytes, void *token) {
   const bool ok = file->seek((uint32_t)offset) && file->read(buffer, bytes) == (int)bytes;
   SpiBusLock::unlock();
   return ok ? 0 : 1;
+}
+
+bool readFragmentedMp4(uint32_t offset, void *buffer, uint32_t bytes, void *token) {
+  return readMp4(offset, buffer, bytes, token) == 0;
 }
 
 uint8_t clampChannel(int value) {
@@ -260,7 +261,8 @@ String probeCodecLabel(uint32_t entry) {
 }
 
 bool probeCodecIsSupported(uint32_t entry) {
-  return entry == fourCc('a', 'v', 'c', '1') || entry == fourCc('a', 'v', 'c', '3') ||
+  return entry == fourCc('a', 'v', 'c', '1') || entry == fourCc('a', 'v', 'c', '2') ||
+         entry == fourCc('a', 'v', 'c', '3') || entry == fourCc('a', 'v', 'c', '4') ||
          entry == fourCc('m', 'p', '4', 'v') || entry == fourCc('s', '2', '6', '3');
 }
 
@@ -279,6 +281,25 @@ String invalidContainerError(StorageFile &source, uint32_t sourceSize) {
   } else {
     error += F("\nVideo sample entry not found");
   }
+  return error;
+}
+
+String compactError(const String &value) {
+  const int newline = value.indexOf('\n');
+  return newline < 0 ? value : value.substring(0, newline);
+}
+
+String hardwareLimitError(uint16_t width, uint16_t height, const String &reason) {
+  String error = F("Video hardware limit\nVideo: ");
+  error += width;
+  error += 'x';
+  error += height;
+  error += '\n';
+  error += compactError(reason);
+  error += F("\nPSRAM free/largest: ");
+  error += ESP.getFreePsram();
+  error += '/';
+  error += ESP.getMaxAllocPsram();
   return error;
 }
 
@@ -321,8 +342,10 @@ public:
         _pauseAfterViewportFrame(false),
         _task(nullptr), _command(Command::None), _generation(0), _commandGeneration(0),
         _stopGeneration(0), _stopAcknowledgedGeneration(0), _secretAccess(false),
-        _sourceSize(0), _demux(nullptr), _videoCodec(VideoCodec::None), _audioCodec(AudioCodec::None),
-        _videoTrack(0), _audioTrack(0), _videoSamples(0), _audioSamples(0), _videoSample(0), _audioSample(0),
+        _sourceSize(0), _demux(nullptr), _fragmentDemux(nullptr), _fragmented(false),
+        _videoCodec(VideoCodec::None), _audioCodec(AudioCodec::None),
+        _videoTrack(0), _audioTrack(0), _videoTrackId(0), _audioTrackId(0), _videoSamples(0), _audioSamples(0),
+        _videoSample(0), _audioSample(0), _fragmentVideoCursor{}, _fragmentAudioCursor{},
         _videoTimeScale(0), _audioTimeScale(0), _presentation(nullptr), _presentationCount(0),
         _presentationIndex(0), _videoFlushed(false), _videoFinished(false), _firstVideoTimestamp(0),
         _firstVideoTimestampSet(false), _sampleBuffer(nullptr), _sampleBufferBytes(0), _annexBuffer(nullptr),
@@ -493,11 +516,16 @@ private:
   uint32_t _sourceSize;
   StorageFile _source;
   MP4D_demux_t *_demux;
+  FragmentedMp4Demuxer *_fragmentDemux;
+  bool _fragmented;
   VideoH264 _h264;
   VideoLegacy _legacy;
   VideoCodec _videoCodec;
   AudioCodec _audioCodec;
-  uint32_t _videoTrack, _audioTrack, _videoSamples, _audioSamples, _videoSample, _audioSample;
+  uint32_t _videoTrack, _audioTrack, _videoTrackId, _audioTrackId, _videoSamples, _audioSamples,
+           _videoSample, _audioSample;
+  FragmentedMp4Demuxer::Cursor _fragmentVideoCursor;
+  FragmentedMp4Demuxer::Cursor _fragmentAudioCursor;
   uint32_t _videoTimeScale, _audioTimeScale;
   int64_t *_presentation;
   uint32_t _presentationCount, _presentationIndex;
@@ -741,7 +769,7 @@ private:
     if (!_demux || !MP4D_open(_demux, readMp4, &_source, _sourceSize)) {
       setError(invalidContainerError(_source, _sourceSize)); return false;
     }
-    if (!inspectTracks() || !preparePresentationTimeline() || !allocateSlots() || !beginVideoDecoder() ||
+    if (!inspectTracks() || !configureSampleSource() || !preparePresentationTimeline() || !allocateSlots() || !beginVideoDecoder() ||
         !initAudioDecoder() || !primeAudio()) return false;
     // Decode until both slots are ready before exposing the play action. This
     // is deliberately source-direct: no cache is read or written.
@@ -756,11 +784,11 @@ private:
   }
 
   bool inspectTracks() {
-    bool videoFound = false;
+    bool videoConfigured = false;
     String unsupported;
     for (unsigned index = 0; index < _demux->track_count; ++index) {
       const MP4D_track_t &track = _demux->track[index];
-      if (!videoFound && track.handler_type == MP4D_HANDLER_TYPE_VIDE) {
+      if (!videoConfigured && track.handler_type == MP4D_HANDLER_TYPE_VIDE) {
         VideoCodec codec = VideoCodec::None;
         if (track.object_type_indication == MP4_OBJECT_TYPE_AVC) codec = VideoCodec::H264;
         else if (track.object_type_indication == MP4_OBJECT_TYPE_H263) codec = VideoCodec::H263;
@@ -781,20 +809,22 @@ private:
         }
         const uint16_t width = (uint16_t)track.SampleDescription.video.width;
         const uint16_t height = (uint16_t)track.SampleDescription.video.height;
-        if (!width || !height || width > MaxVideoWidth || height > MaxVideoHeight) {
-          setError(String(F("Video ")) + width + 'x' + height + F(" exceeds\n320x480 maximum"));
+        if (!width || !height) {
+          setError(F("Invalid video dimensions"));
           return false;
         }
         _videoCodec = codec;
         _videoTrack = index;
+        _videoTrackId = track.track_id;
         _videoSamples = track.sample_count;
         _videoTimeScale = track.timescale;
-        videoFound = _videoSamples && _videoTimeScale;
+        videoConfigured = _videoTimeScale;
         _sourceWidth = width;
         _sourceHeight = height;
         _durationMs = track.duration_lo ? timestampMs(track.duration_lo, _videoTimeScale) : 0;
       } else if (_audioCodec == AudioCodec::None && track.handler_type == MP4D_HANDLER_TYPE_SOUN) {
         _audioTrack = index;
+        _audioTrackId = track.track_id;
         _audioSamples = track.sample_count;
         _audioTimeScale = track.timescale;
         _audioChannels = track.SampleDescription.audio.channelcount;
@@ -811,9 +841,8 @@ private:
         }
       }
     }
-    if (!videoFound) { setError(unsupported.length() ? unsupported
-                                                       : String(F("No video track found"))); return false; }
-    if (_audioCodec == AudioCodec::Unsupported) _audioCodec = AudioCodec::None;
+    if (!videoConfigured) { setError(unsupported.length() ? unsupported
+                                                            : String(F("No video track found"))); return false; }
     Serial.printf("[Video] metadata video=%s %ux%u samples=%lu timescale=%lu audio=%s samples=%lu timescale=%lu rate=%lu channels=%lu duration=%lu\n",
                   videoCodecName(), _sourceWidth, _sourceHeight,
                   static_cast<unsigned long>(_videoSamples), static_cast<unsigned long>(_videoTimeScale),
@@ -821,6 +850,62 @@ private:
                   static_cast<unsigned long>(_audioSampleRate), static_cast<unsigned long>(_audioChannels),
                   static_cast<unsigned long>(_durationMs));
     publishSnapshot(true);
+    return true;
+  }
+
+  void setFragmentedError() {
+    const String detail = _fragmentDemux ? _fragmentDemux->lastError() : String(F("Fragment reader unavailable"));
+    if (detail.indexOf(F("PSRAM")) >= 0) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, detail));
+    } else {
+      setError(String(F("Fragmented MP4 error\n")) + detail);
+    }
+  }
+
+  bool configureSampleSource() {
+    if (_videoSamples) {
+      if (_audioCodec == AudioCodec::Unsupported) _audioCodec = AudioCodec::None;
+      return true;
+    }
+    if (_videoCodec != VideoCodec::H264) {
+      setError(F("Fragmented MP4 supports H.264 video only"));
+      return false;
+    }
+    if (!_videoTrackId) {
+      setError(F("Fragmented MP4 has no track ID"));
+      return false;
+    }
+    _fragmentDemux = new FragmentedMp4Demuxer();
+    if (!_fragmentDemux || !_fragmentDemux->open(readFragmentedMp4, &_source, _sourceSize)) {
+      setFragmentedError();
+      return false;
+    }
+    _fragmented = true;
+    if (_audioCodec == AudioCodec::Unsupported ||
+        (_audioCodec != AudioCodec::None && _audioCodec != AudioCodec::Aac)) {
+      setError(F("Fragmented MP4 supports AAC audio only"));
+      return false;
+    }
+    if (!_fragmentDemux->countSamples(_videoTrackId, _videoSamples) || !_videoSamples) {
+      if (!_fragmentDemux->lastError().length()) setError(F("Fragmented MP4 has no video samples"));
+      else setFragmentedError();
+      return false;
+    }
+    if (_audioCodec == AudioCodec::Aac) {
+      if (!_audioTrackId || !_fragmentDemux->countSamples(_audioTrackId, _audioSamples)) {
+        setFragmentedError();
+        return false;
+      }
+      if (!_audioSamples) _audioCodec = AudioCodec::None;
+    }
+    if (!_fragmentDemux->initCursor(_videoTrackId, _fragmentVideoCursor) ||
+        (_audioCodec == AudioCodec::Aac && !_fragmentDemux->initCursor(_audioTrackId, _fragmentAudioCursor))) {
+      setFragmentedError();
+      return false;
+    }
+    Serial.printf("[Video] fragmented MP4 videoTrack=%lu audioTrack=%lu videoSamples=%lu audioSamples=%lu\n",
+                  static_cast<unsigned long>(_videoTrackId), static_cast<unsigned long>(_audioTrackId),
+                  static_cast<unsigned long>(_videoSamples), static_cast<unsigned long>(_audioSamples));
     return true;
   }
 
@@ -841,11 +926,27 @@ private:
   bool preparePresentationTimeline() {
     if (!_demux || !_videoSamples || !_videoTimeScale) return false;
     const size_t bytes = (size_t)_videoSamples * sizeof(int64_t);
-    if (bytes / sizeof(int64_t) != _videoSamples) { setError(F("Video timeline too large")); return false; }
+    if (bytes / sizeof(int64_t) != _videoSamples) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Video timeline is too large")));
+      return false;
+    }
     _presentation = static_cast<int64_t *>(ps_malloc(bytes));
-    if (!_presentation) { setError(F("Video needs more PSRAM")); return false; }
-    for (uint32_t sample = 0; sample < _videoSamples; ++sample)
-      _presentation[sample] = MP4D_frame_presentation_timestamp(_demux, _videoTrack, sample);
+    if (!_presentation) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Video timeline needs PSRAM")));
+      return false;
+    }
+    uint32_t fragmentDuration = 0;
+    if (_fragmented) {
+      if (!_fragmentDemux->fillPresentationTimestamps(_videoTrackId, _presentation, _videoSamples,
+                                                       fragmentDuration)) {
+        setFragmentedError();
+        return false;
+      }
+      _durationMs = timestampMs(fragmentDuration, _videoTimeScale);
+    } else {
+      for (uint32_t sample = 0; sample < _videoSamples; ++sample)
+        _presentation[sample] = MP4D_frame_presentation_timestamp(_demux, _videoTrack, sample);
+    }
     qsort(_presentation, _videoSamples, sizeof(int64_t), comparePresentationPoints);
     _presentationCount = _videoSamples;
     _presentationIndex = 0;
@@ -866,7 +967,10 @@ private:
     const size_t bytes = (size_t)_drawWidth * _drawHeight * sizeof(uint16_t);
     for (uint8_t index = 0; index < FrameSlots; ++index) {
       _slots[index].pixels = static_cast<uint16_t *>(ps_malloc(bytes));
-      if (!_slots[index].pixels) { setError(F("Video frame buffers need more PSRAM")); return false; }
+      if (!_slots[index].pixels) {
+        setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Display frame buffers need PSRAM")));
+        return false;
+      }
       _slots[index].state = SlotState::Free;
     }
     Serial.printf("[Video] presentation rect=%u,%u %ux%u slotBytes=%lu\n", _drawX, _drawY,
@@ -876,15 +980,19 @@ private:
 
   bool beginVideoDecoder() {
     if (_videoCodec == VideoCodec::H264) {
-      if (!_h264.begin(MaxVideoWidth, MaxVideoHeight)) { setError(_h264.lastError()); return false; }
+      if (!_h264.begin(_sourceWidth, _sourceHeight)) {
+        setError(hardwareLimitError(_sourceWidth, _sourceHeight, _h264.lastError()));
+        return false;
+      }
     } else {
       const MP4D_track_t &track = _demux->track[_videoTrack];
       const VideoLegacy::Codec codec = _videoCodec == VideoCodec::H263 ? VideoLegacy::Codec::H263
                                                                           : VideoLegacy::Codec::Mpeg4Part2;
       const uint8_t *configuration = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi : nullptr;
       const uint32_t configurationBytes = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi_bytes : 0;
-      if (!_legacy.begin(codec, MaxVideoWidth, MaxVideoHeight, configuration, configurationBytes)) {
-        setError(_legacy.lastError()); return false;
+      if (!_legacy.begin(codec, _sourceWidth, _sourceHeight, configuration, configurationBytes)) {
+        setError(hardwareLimitError(_sourceWidth, _sourceHeight, _legacy.lastError()));
+        return false;
       }
     }
     return true;
@@ -943,7 +1051,7 @@ private:
     if (_audioCodec == AudioCodec::None || !_audioSamples) return true;
     _pcmRing = static_cast<int16_t *>(ps_malloc(AudioRingFrames * sizeof(int16_t)));
     if (!_pcmRing) {
-      setError(F("Audio buffer needs more PSRAM"));
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Audio buffer needs PSRAM")));
       return false;
     }
     _pcmRead = _pcmWrite = _pcmCount = 0;
@@ -1009,13 +1117,17 @@ private:
     }
     uint32_t bytes = 0, timestamp = 0, duration = 0;
     if (!readSample(_videoTrack, _videoSample, bytes, timestamp, duration)) {
-      setError(F("Video sample read failed")); return false;
+      if (_phase != Phase::Error) setError(F("Video sample read failed"));
+      return false;
     }
     bool decoded = false;
     if (_videoCodec == VideoCodec::H264) {
       uint32_t annexBytes = 0;
-      decoded = buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes) &&
-                _h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this);
+      if (!buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes)) {
+        if (_phase != Phase::Error) setError(F("Invalid H.264 access unit"));
+        return false;
+      }
+      decoded = _h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this);
     } else {
       decoded = _legacy.decode(_sampleBuffer, bytes, _videoSample, decodedFrame, this);
     }
@@ -1038,19 +1150,9 @@ private:
     const uint32_t timestamp = presentationTimestampMs(rawTimestamp, _videoTimeScale);
     if (!_firstVideoTimestampSet) { _firstVideoTimestampSet = true; _firstVideoTimestamp = timestamp; }
     const uint32_t relativeTimestamp = timestamp - _firstVideoTimestamp;
-    // Decode reference frames to keep the codec healthy, but skip their
-    // expensive RGB conversion when they are already behind the audio clock.
-    // This lets a slow software decoder catch up instead of converting frames
-    // that the UI would immediately discard.
-    const uint32_t now = millis();
-    const bool overdueForPresentation =
-      now - __atomic_load_n(&_lastPresentedAtMs, __ATOMIC_ACQUIRE) >= ForcedFrameMs;
-    if (_phase == Phase::Playing && !overdueForPresentation &&
-        (int32_t)(playbackElapsedMs(false) - relativeTimestamp) > (int32_t)LateFrameMs) {
-      __atomic_add_fetch(&_droppedFrames, 1, __ATOMIC_RELAXED);
-      __atomic_add_fetch(&_droppedSinceLog, 1, __ATOMIC_RELAXED);
-      return true;
-    }
+    // Each decoded frame is downscaled and made available immediately. There
+    // is no minimum presentation cadence: a resource-constrained clip can
+    // legitimately render below 1 fps while the audio clock remains real-time.
     uint8_t slot = 0xff;
     for (;;) {
       {
@@ -1250,12 +1352,33 @@ private:
 
   bool readSample(uint32_t track, uint32_t sample, uint32_t &bytes, uint32_t &timestamp, uint32_t &duration) {
     bytes = timestamp = duration = 0;
+    if (_fragmented) {
+      if (!_fragmentDemux || track != _videoTrack) return false;
+      FragmentedMp4Demuxer::Sample fragmentSample;
+      if (!_fragmentDemux->nextSample(_fragmentVideoCursor, fragmentSample)) {
+        if (_fragmentDemux->lastError().length()) setFragmentedError();
+        return false;
+      }
+      if (!fragmentSample.bytes || !ensureSampleBuffer(fragmentSample.bytes)) {
+        setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Compressed video sample needs PSRAM")));
+        return false;
+      }
+      if (!readSource(fragmentSample.offset, _sampleBuffer, fragmentSample.bytes)) return false;
+      bytes = fragmentSample.bytes;
+      timestamp = fragmentSample.decodeTimestamp;
+      duration = fragmentSample.duration;
+      return true;
+    }
     if (!_demux || track >= _demux->track_count) return false;
     if (sample >= _demux->track[track].sample_count) return false;
     unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
     const MP4D_file_offset_t offset = MP4D_frame_offset(_demux, track, sample, &sampleBytes,
                                                          &sampleTimestamp, &sampleDuration);
-    if (!sampleBytes || offset > 0xffffffffULL || !ensureSampleBuffer(sampleBytes)) return false;
+    if (!sampleBytes || offset > 0xffffffffULL) return false;
+    if (!ensureSampleBuffer(sampleBytes)) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Compressed video sample needs PSRAM")));
+      return false;
+    }
     const bool ok = readSource((uint32_t)offset, _sampleBuffer, sampleBytes);
     bytes = sampleBytes;
     timestamp = sampleTimestamp;
@@ -1285,6 +1408,20 @@ private:
 
   bool readAudioSample(uint32_t &bytes, uint32_t &timestamp, uint32_t &duration) {
     bytes = timestamp = duration = 0;
+    if (_fragmented) {
+      if (!_fragmentDemux || _audioCodec != AudioCodec::Aac) return false;
+      FragmentedMp4Demuxer::Sample fragmentSample;
+      if (!_fragmentDemux->nextSample(_fragmentAudioCursor, fragmentSample)) {
+        if (_fragmentDemux->lastError().length()) setFragmentedError();
+        return false;
+      }
+      if (!fragmentSample.bytes || !ensureAudioBuffer(fragmentSample.bytes) ||
+          !readSource(fragmentSample.offset, _audioBuffer, fragmentSample.bytes)) return false;
+      bytes = fragmentSample.bytes;
+      timestamp = fragmentSample.decodeTimestamp;
+      duration = fragmentSample.duration;
+      return true;
+    }
     if (!_demux || _audioTrack >= _demux->track_count || _audioSample >= _demux->track[_audioTrack].sample_count) return false;
     unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
     const MP4D_file_offset_t offset = MP4D_frame_offset(_demux, _audioTrack, _audioSample, &sampleBytes,
@@ -1370,7 +1507,10 @@ private:
       required += 4 + size;
       offset += size;
     }
-    if (!ensureAnnexBuffer(required)) return false;
+    if (!ensureAnnexBuffer(required)) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("H.264 packet conversion needs PSRAM")));
+      return false;
+    }
     uint32_t output = 0;
     auto append = [&](const uint8_t *data, uint32_t size) {
       _annexBuffer[output++] = 0; _annexBuffer[output++] = 0; _annexBuffer[output++] = 0; _annexBuffer[output++] = 1;
@@ -1499,6 +1639,12 @@ private:
     _legacy.end();
     releaseAudioDecoder();
     if (_source) _source.close();
+    if (_fragmentDemux) {
+      _fragmentDemux->resetCursor(_fragmentVideoCursor);
+      _fragmentDemux->resetCursor(_fragmentAudioCursor);
+      delete _fragmentDemux;
+      _fragmentDemux = nullptr;
+    }
     if (_demux) { MP4D_close(_demux); delete _demux; _demux = nullptr; }
     free(_presentation); _presentation = nullptr;
     free(_sampleBuffer); _sampleBuffer = nullptr; _sampleBufferBytes = 0;
@@ -1510,6 +1656,8 @@ private:
     releaseFrameSlots();
     _videoCodec = VideoCodec::None;
     _audioCodec = AudioCodec::None;
+    _fragmented = false;
+    _videoTrackId = _audioTrackId = 0;
     _videoSamples = _audioSamples = _videoSample = _audioSample = 0;
     _presentationCount = _presentationIndex = 0;
     _videoFlushed = _videoFinished = _firstVideoTimestampSet = false;

@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include <esp32-hal-psram.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,7 +26,9 @@ struct DecoderState {
 void *allocateAlignedPsram(uint32_t bytes, uint32_t alignment) {
   if (!bytes) return nullptr;
   if (alignment < sizeof(void *)) alignment = sizeof(void *);
-  uint8_t *raw = static_cast<uint8_t *>(ps_malloc((size_t)bytes + alignment - 1 + sizeof(void *)));
+  const size_t overhead = (size_t)alignment - 1 + sizeof(void *);
+  if (bytes > SIZE_MAX - overhead) return nullptr;
+  uint8_t *raw = static_cast<uint8_t *>(ps_malloc((size_t)bytes + overhead));
   if (!raw) return nullptr;
   uintptr_t address = reinterpret_cast<uintptr_t>(raw + sizeof(void *));
   address = (address + alignment - 1) & ~(uintptr_t)(alignment - 1);
@@ -54,6 +57,13 @@ bool VideoH264::begin(uint16_t maximumWidth, uint16_t maximumHeight) {
   end();
   if (!psramFound() || !maximumWidth || !maximumHeight) {
     _error = F("H.264 needs PSRAM");
+    return false;
+  }
+  const uint64_t alignedWidth = ((uint64_t)maximumWidth + 15U) & ~15ULL;
+  const uint64_t alignedHeight = ((uint64_t)maximumHeight + 15U) & ~15ULL;
+  const uint64_t yBytes64 = alignedWidth * alignedHeight;
+  if (!yBytes64 || yBytes64 > UINT32_MAX) {
+    _error = F("H.264 frame dimensions overflow");
     return false;
   }
 
@@ -199,7 +209,7 @@ bool VideoH264::begin(uint16_t maximumWidth, uint16_t maximumHeight) {
     return false;
   }
 
-  uint32_t yBytes = (uint32_t)((maximumWidth + 15) & ~15U) * ((maximumHeight + 15) & ~15U);
+  const uint32_t yBytes = (uint32_t)yBytes64;
   state->outputBytes[0] = yBytes;
   state->outputBytes[1] = yBytes / 4;
   state->outputBytes[2] = yBytes / 4;

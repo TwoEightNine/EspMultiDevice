@@ -19,7 +19,7 @@ The source trees below are pinned under `third_party/`, retained with their noti
 | AnimatedGIF | GIF decoding | Upstream Apache-2.0; version in `third_party/AnimatedGIF/VERSION.txt` |
 | libwebp | decode-only WebP subset | BSD; version and copying notice retained beside source |
 | minimp3 | MP3 decoding | Public-domain implementation |
-| minimp4 | MP4 demuxing | CC0-1.0, pinned revision in `third_party/VIDEO_DEPENDENCIES.md` |
+| minimp4 | MP4 initialization and ordinary MP4 demuxing | CC0-1.0, pinned revision in `third_party/VIDEO_DEPENDENCIES.md`; project patches recognize standard H.264 `avc2`/`avc3`/`avc4` sample entries, retain `tkhd` track IDs, and treat zero-entry initialization sample tables as valid for fMP4. `src/media/FragmentedMp4Demuxer` is the separate project-owned reader for local fMP4 fragment metadata. |
 | lib264 | H.264 decoding | BSD-3-Clause-Clear with upstream AVC patent notice; generic C only |
 | FFmpeg 9.0.1 subset | H.263/MPEG-4 Part 2 decoding | LGPL-2.1-or-later; details in `third_party/ffmpeg/README.esp-media.md` |
 | OpenCORE AMR 0.1.6 subset | AMR-NB decoding | Apache-2.0; details in `third_party/opencore-amr/README.esp-media.md` |
@@ -194,7 +194,7 @@ retain at least 8 KiB.
 | --- | --- |
 | `tools/generate_browser_freesans_font.py` | Reproducibly generates `src/ui/fonts/BrowserFreeSans.h` from redistributable GNU FreeSans. Preserve `LICENSE.FreeFont`. |
 | `tools/generate_assistant_noto_sans_sc_font.py` | Reproducibly generates the assistant-only GB2312-level 18 px `AssistantNotoSansSC18.h` from OFL-licensed Noto Sans CJK SC. Preserve `LICENSE.NotoSansCJKSC`. |
-| `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates 320×480, 30fps H.263/3GP, MPEG-4 Part 2/MP4, and H.264/AAC MP4 streaming fixtures in `tests/video/fixtures/`. |
+| `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates native-display, 640×360 adaptive-size, fast-start/moov-last H.264/AAC, H.263, MPEG-4 Part 2, and 1280×720 PSRAM-limit candidate fixtures in `tests/video/fixtures/`. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |

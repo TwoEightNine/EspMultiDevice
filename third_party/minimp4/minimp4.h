@@ -183,6 +183,10 @@ typedef struct
     // The 'sample' is MP4 term, denoting audio or video frame
     unsigned sample_count;
 
+    // ISO-BMFF track_ID from tkhd. Static MP4 users do not need it, but a
+    // fragmented file's trex/tfhd records identify tracks by this value.
+    unsigned track_id;
+
     // Decoder-specific info (DSI) data
     unsigned char *dsi;
 
@@ -605,6 +609,8 @@ enum
     // http://www.itscj.ipsj.or.jp/sc29/open/29view/29n7644t.doc
     BOX_avc1    = FOUR_CHAR_INT( 'a', 'v', 'c', '1' ),
     BOX_avc2    = FOUR_CHAR_INT( 'a', 'v', 'c', '2' ),
+    BOX_avc3    = FOUR_CHAR_INT( 'a', 'v', 'c', '3' ),
+    BOX_avc4    = FOUR_CHAR_INT( 'a', 'v', 'c', '4' ),
     BOX_svc1    = FOUR_CHAR_INT( 's', 'v', 'c', '1' ),
     BOX_avcC    = FOUR_CHAR_INT( 'a', 'v', 'c', 'C' ),
     BOX_svcC    = FOUR_CHAR_INT( 's', 'v', 'c', 'C' ),
@@ -2598,7 +2604,12 @@ static void *minimp4_bounded_malloc(size_t size)
 // twice for one track; re-running a MALLOC for a field that's already
 // populated would leak the earlier block. free() is a no-op on NULL, so
 // this is free for the (common) single-occurrence case.
-#define MALLOC(t, p, size) { free(p); p = (t)minimp4_bounded_malloc(size); if (!(p)) { ERROR("out of memory"); } }
+#define MALLOC(t, p, size) { \
+    size_t minimp4_alloc_size = (size_t)(size); \
+    free(p); \
+    p = minimp4_alloc_size ? (t)minimp4_bounded_malloc(minimp4_alloc_size) : NULL; \
+    if (minimp4_alloc_size && !(p)) { ERROR("out of memory"); } \
+}
 
 /*
 *   On error: release resources.
@@ -2673,6 +2684,7 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
 #if MP4D_INFO_SUPPORTED
             {BOX_mdhd, 1, 1},
             {BOX_mvhd, 1, 0},
+            {BOX_tkhd, 1, 1},
             {BOX_hdlr, 0, 0},
             {BOX_meta, 0, 0},   // Android can produce meta box without 'FullBox' field, comment this line to simulate the bug
 #endif
@@ -2717,8 +2729,10 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
 #if MP4D_AVC_SUPPORTED
             {BOX_mp4v, BOX_ATOM},
             {BOX_avc1, BOX_ATOM},
+            {BOX_avc2, BOX_ATOM},
+            {BOX_avc3, BOX_ATOM},
+            {BOX_avc4, BOX_ATOM},
             {BOX_s263, BOX_ATOM},
-            //{BOX_avc2, BOX_ATOM},
             //{BOX_svc1, BOX_ATOM},
 #endif
 #if MP4D_HEVC_SUPPORTED
@@ -3101,6 +3115,13 @@ broken_android_meta_hack:
             break;
 
 #if MP4D_INFO_SUPPORTED
+        case BOX_tkhd:
+            if (!tr)
+                break;
+            SKIP(((FullAtomVersionAndFlags >> 24) == 1) ? 8 + 8 : 4 + 4);
+            tr->track_id = READ(4);
+            break;
+
         case BOX_mvhd:
             SKIP(((FullAtomVersionAndFlags >> 24) == 1) ? 8 + 8 : 4 + 4);
             mp4->timescale = READ(4);
@@ -3187,7 +3208,9 @@ broken_android_meta_hack:
 
 #if MP4D_AVC_SUPPORTED
         case BOX_avc1:  // AVCSampleEntry extends VisualSampleEntry
-//         case BOX_avc2:   - no test
+        case BOX_avc2:
+        case BOX_avc3:
+        case BOX_avc4:
 //         case BOX_svc1:   - no test
         case BOX_mp4v:
         case BOX_s263:  // H263SampleEntry also extends VisualSampleEntry
