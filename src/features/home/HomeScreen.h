@@ -24,7 +24,7 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t AppCount = 6;
+  static const uint8_t AppCount = 7;
   static const uint8_t AppColumns = 3;
   static const uint8_t FilesAppIndex = 2;
   static const int16_t StatusBarHeight = 24;
@@ -37,6 +37,7 @@ private:
     Recorder,
     Settings,
     Browser,
+    UsbDrive,
     Workout
   };
 

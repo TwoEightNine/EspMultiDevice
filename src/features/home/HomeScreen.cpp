@@ -42,7 +42,8 @@ HomeScreen::HomeScreen(Navigator &navigator,
   _apps[2] = { "Files", AppAction::Files, 0x065f, 0, 0, 0, 0 };
   _apps[3] = { "Recorder", AppAction::Recorder, 0x9adf, 0, 0, 0, 0 };
   _apps[4] = { "Settings", AppAction::Settings, 0xfda0, 0, 0, 0, 0 };
-  _apps[5] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
+  _apps[5] = { "USB Drive", AppAction::UsbDrive, 0x0799, 0, 0, 0, 0 };
+  _apps[6] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -94,6 +95,8 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::Settings);
     } else if (app.action == AppAction::Browser) {
       _navigator.push(ScreenId::Browser);
+    } else if (app.action == AppAction::UsbDrive) {
+      _navigator.push(ScreenId::UsbDrive);
     } else if (app.action == AppAction::Workout) {
       _navigator.push(ScreenId::Workout);
     }
@@ -272,6 +275,11 @@ void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t center
     alpha = ic_browser_alpha;
     width = ic_browser_width;
     height = ic_browser_height;
+  } else if (app.action == AppAction::UsbDrive) {
+    colors = ic_usb_colors;
+    alpha = ic_usb_alpha;
+    width = ic_usb_width;
+    height = ic_usb_height;
   }
 
   if (colors && alpha) {

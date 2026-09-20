@@ -42,8 +42,6 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::Led);
     } else if (option == 3) {
       _navigator.push(ScreenId::TouchCalibration);
-    } else if (option == 4) {
-      _navigator.push(ScreenId::UsbDrive);
     }
     return;
   }
@@ -69,7 +67,7 @@ void SettingsScreen::drawTopBar() {
 
 void SettingsScreen::drawOptions() {
   const char *labels[OptionCount] = {
-    "Wi-Fi", "Audio", "LED", "Touch screen", "USB Drive", "About"
+    "Wi-Fi", "Audio", "LED", "Touch screen", "About"
   };
 
   for (uint8_t i = 0; i < OptionCount; i++) {
