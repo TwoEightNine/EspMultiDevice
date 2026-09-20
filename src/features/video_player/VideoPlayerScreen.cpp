@@ -92,7 +92,194 @@ String objectTypeLabel(unsigned objectType) {
   if (objectType == MP4_OBJECT_TYPE_AMR_NB) return F("AMR-NB");
   if (objectType == MP4_OBJECT_TYPE_HEVC) return F("HEVC/H.265");
   if (objectType == 0x20) return F("MPEG-4 Part 2");
+  if (objectType >= 0x60 && objectType <= 0x65) return F("MPEG-2 video");
+  if (objectType == 0x6a) return F("MPEG-1 video");
+  if (objectType == 0x6c) return F("Motion JPEG");
   return String(F("object 0x")) + String(objectType, HEX);
+}
+
+String fourCcLabel(unsigned value) {
+  if (!value) return F("unknown");
+  char text[5] = {
+      (char)(value >> 24), (char)(value >> 16), (char)(value >> 8), (char)value, '\0'};
+  for (uint8_t index = 0; index < 4; ++index) {
+    if (text[index] < 0x20 || text[index] > 0x7e) return String(F("0x")) + String(value, HEX);
+  }
+  return String(text);
+}
+
+String describeVideoTrack(const MP4D_track_t &track) {
+  String details = String(F("Codec: ")) + objectTypeLabel(track.object_type_indication);
+  if (track.sample_entry) details += String(F(" (")) + fourCcLabel(track.sample_entry) + ')';
+  if (track.object_type_indication) {
+    details += String(F("\nObject type: 0x")) + String(track.object_type_indication, HEX);
+  }
+  const uint16_t width = (uint16_t)track.SampleDescription.video.width;
+  const uint16_t height = (uint16_t)track.SampleDescription.video.height;
+  if (width && height) details += String(F("\nVideo: ")) + width + 'x' + height;
+  return details;
+}
+
+String unsupportedVideoError(const MP4D_track_t &track) {
+  return String(F("Unsupported video codec\n")) + describeVideoTrack(track) +
+         F("\nAdd a decoder for this codec");
+}
+
+constexpr uint32_t fourCc(char a, char b, char c, char d) {
+  return ((uint32_t)(uint8_t)a << 24) | ((uint32_t)(uint8_t)b << 16) |
+         ((uint32_t)(uint8_t)c << 8) | (uint8_t)d;
+}
+
+uint32_t readBigEndian32(const uint8_t *bytes) {
+  return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+         ((uint32_t)bytes[2] << 8) | bytes[3];
+}
+
+// This deliberately tiny probe is separate from minimp4. It does not demux
+// samples or accept a file for playback; it only finds the selected video
+// sample entry when minimp4 rejected the container before exposing tracks.
+class IsoBmffProbe {
+public:
+  struct Result {
+    uint32_t majorBrand = 0;
+    uint32_t videoEntry = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+  };
+
+  IsoBmffProbe(StorageFile &source, uint32_t sourceSize) : _source(source), _sourceSize(sourceSize), _result{} {}
+
+  Result inspect() {
+    if (_sourceSize < 12) return _result;
+    uint8_t header[12] = {};
+    if (read(0, header, sizeof(header)) && readBigEndian32(header + 4) == fourCc('f', 't', 'y', 'p')) {
+      _result.majorBrand = readBigEndian32(header + 8);
+    }
+    scanBoxes(0, _sourceSize, 0, nullptr);
+    return _result;
+  }
+
+private:
+  struct Box { uint32_t type = 0; uint32_t dataOffset = 0; uint32_t endOffset = 0; };
+  struct Track { uint32_t handler = 0; uint32_t entry = 0; uint16_t width = 0; uint16_t height = 0; };
+  static constexpr uint8_t MaxDepth = 8;
+  static constexpr uint16_t MaxBoxes = 128;
+
+  StorageFile &_source;
+  uint32_t _sourceSize;
+  Result _result;
+
+  bool read(uint32_t offset, void *destination, uint32_t bytes) const {
+    return bytes <= _sourceSize && offset <= _sourceSize - bytes &&
+           readMp4(offset, destination, bytes, &_source) == 0;
+  }
+
+  bool readBox(uint32_t offset, uint32_t rangeEnd, Box &box) const {
+    uint8_t header[16] = {};
+    if (offset > rangeEnd || rangeEnd - offset < 8 || !read(offset, header, 8)) return false;
+    uint64_t size = readBigEndian32(header);
+    const uint32_t type = readBigEndian32(header + 4);
+    uint32_t headerBytes = 8;
+    if (size == 1) {
+      if (rangeEnd - offset < 16 || !read(offset + 8, header + 8, 8)) return false;
+      size = ((uint64_t)readBigEndian32(header + 8) << 32) | readBigEndian32(header + 12);
+      headerBytes = 16;
+    } else if (size == 0) {
+      size = rangeEnd - offset;
+    }
+    if (size < headerBytes || size > rangeEnd - offset || size > UINT32_MAX) return false;
+    box = {type, offset + headerBytes, offset + (uint32_t)size};
+    return true;
+  }
+
+  static bool isContainer(uint32_t type) {
+    return type == fourCc('m', 'o', 'o', 'v') || type == fourCc('m', 'd', 'i', 'a') ||
+           type == fourCc('m', 'i', 'n', 'f') || type == fourCc('s', 't', 'b', 'l') ||
+           type == fourCc('e', 'd', 't', 's') || type == fourCc('d', 'i', 'n', 'f');
+  }
+
+  void readHandler(const Box &box, Track &track) const {
+    uint8_t bytes[4] = {};
+    if (box.endOffset - box.dataOffset >= 12 && read(box.dataOffset + 8, bytes, sizeof(bytes))) {
+      track.handler = readBigEndian32(bytes);
+    }
+  }
+
+  void readSampleEntry(const Box &box, Track &track) const {
+    uint8_t bytes[36] = {};
+    // stsd: FullBox (4), entry count (4), then a sample entry size and FourCC.
+    if (box.endOffset - box.dataOffset < 16 || !read(box.dataOffset + 8, bytes, 8)) return;
+    const uint32_t entryBytes = readBigEndian32(bytes);
+    if (entryBytes < 8 || entryBytes > box.endOffset - box.dataOffset - 8) return;
+    track.entry = readBigEndian32(bytes + 4);
+    // VisualSampleEntry width/height start 32 bytes after its box header.
+    if (entryBytes >= 36 && read(box.dataOffset + 8, bytes, sizeof(bytes))) {
+      track.width = (uint16_t)((bytes[32] << 8) | bytes[33]);
+      track.height = (uint16_t)((bytes[34] << 8) | bytes[35]);
+    }
+  }
+
+  void acceptTrack(const Track &track) {
+    if (track.handler != MP4D_HANDLER_TYPE_VIDE || !track.entry || _result.videoEntry) return;
+    _result.videoEntry = track.entry;
+    _result.width = track.width;
+    _result.height = track.height;
+  }
+
+  void scanBoxes(uint32_t offset, uint32_t rangeEnd, uint8_t depth, Track *track) {
+    if (depth > MaxDepth) return;
+    uint16_t boxes = 0;
+    while (offset < rangeEnd && boxes++ < MaxBoxes) {
+      Box box;
+      if (!readBox(offset, rangeEnd, box) || box.endOffset <= offset) return;
+      if (box.type == fourCc('t', 'r', 'a', 'k')) {
+        Track child;
+        scanBoxes(box.dataOffset, box.endOffset, depth + 1, &child);
+        acceptTrack(child);
+      } else if (track && box.type == fourCc('h', 'd', 'l', 'r')) {
+        readHandler(box, *track);
+      } else if (track && box.type == fourCc('s', 't', 's', 'd')) {
+        readSampleEntry(box, *track);
+      } else if (isContainer(box.type)) {
+        scanBoxes(box.dataOffset, box.endOffset, depth + 1, track);
+      }
+      offset = box.endOffset;
+    }
+  }
+};
+
+String probeCodecLabel(uint32_t entry) {
+  if (entry == fourCc('a', 'v', 'c', '1') || entry == fourCc('a', 'v', 'c', '3')) return F("H.264");
+  if (entry == fourCc('h', 'v', 'c', '1') || entry == fourCc('h', 'e', 'v', '1')) return F("HEVC/H.265");
+  if (entry == fourCc('v', 'p', '0', '9')) return F("VP9");
+  if (entry == fourCc('a', 'v', '0', '1')) return F("AV1");
+  if (entry == fourCc('m', 'p', '4', 'v')) return F("MPEG-4 Part 2");
+  if (entry == fourCc('s', '2', '6', '3')) return F("H.263");
+  if (entry == fourCc('m', 'j', 'p', '2') || entry == fourCc('j', 'p', 'e', 'g')) return F("Motion JPEG");
+  return entry ? String(F("unknown")) : String(F("not found"));
+}
+
+bool probeCodecIsSupported(uint32_t entry) {
+  return entry == fourCc('a', 'v', 'c', '1') || entry == fourCc('a', 'v', 'c', '3') ||
+         entry == fourCc('m', 'p', '4', 'v') || entry == fourCc('s', '2', '6', '3');
+}
+
+String invalidContainerError(StorageFile &source, uint32_t sourceSize) {
+  const IsoBmffProbe::Result result = IsoBmffProbe(source, sourceSize).inspect();
+  String error = F("MP4/3GP parser rejected file");
+  error += String(F("\nContainer: ")) + (result.majorBrand ? String(F("ISO-BMFF (")) + fourCcLabel(result.majorBrand) + ')'
+                                                               : String(F("ftyp not found")));
+  if (result.videoEntry) {
+    error += String(F("\nCodec: ")) + probeCodecLabel(result.videoEntry) +
+             String(F(" (")) + fourCcLabel(result.videoEntry) + ')';
+    if (result.width && result.height) error += String(F("\nVideo: ")) + result.width + 'x' + result.height;
+    error += probeCodecIsSupported(result.videoEntry)
+                 ? F("\nCodec is supported; container/layout is not")
+                 : F("\nAdd a decoder for this codec");
+  } else {
+    error += F("\nVideo sample entry not found");
+  }
+  return error;
 }
 
 int comparePresentationPoints(const void *left, const void *right) {
@@ -552,7 +739,7 @@ private:
     if (!_source || _sourceSize < 12) { setError(F("Unable to open video")); return false; }
     _demux = new MP4D_demux_t();
     if (!_demux || !MP4D_open(_demux, readMp4, &_source, _sourceSize)) {
-      setError(F("Invalid MP4/3GP container")); return false;
+      setError(invalidContainerError(_source, _sourceSize)); return false;
     }
     if (!inspectTracks() || !preparePresentationTimeline() || !allocateSlots() || !beginVideoDecoder() ||
         !initAudioDecoder() || !primeAudio()) return false;
@@ -578,12 +765,15 @@ private:
         if (track.object_type_indication == MP4_OBJECT_TYPE_AVC) codec = VideoCodec::H264;
         else if (track.object_type_indication == MP4_OBJECT_TYPE_H263) codec = VideoCodec::H263;
         else if (track.object_type_indication == 0x20) codec = VideoCodec::Mpeg4Part2;
-        else { unsupported = objectTypeLabel(track.object_type_indication); continue; }
+        else { unsupported = unsupportedVideoError(track); continue; }
         if (codec == VideoCodec::H264 &&
             (!track.dsi_bytes || track.avc_nal_length_size < 1 || track.avc_nal_length_size > 4 ||
              (track.avc_profile != 66 && track.avc_profile != 77 && track.avc_profile != 100))) {
-          setError(track.avc_profile ? String(F("H.264 ")) + avcProfileName(track.avc_profile) +
-                                      F(" unsupported") : String(F("Invalid H.264 config")));
+          String error = String(F("Unsupported H.264 video\n")) + describeVideoTrack(track);
+          if (track.avc_profile) error += String(F("\nProfile: ")) + avcProfileName(track.avc_profile);
+          else error += F("\nMissing or invalid AVC config");
+          error += F("\nDecoder is present; this profile/config is not");
+          setError(error);
           return false;
         }
         if (codec == VideoCodec::H263 && (!track.dsi || track.dsi_bytes < 7)) {
@@ -621,7 +811,7 @@ private:
         }
       }
     }
-    if (!videoFound) { setError(unsupported.length() ? String(F("Unsupported video\n")) + unsupported
+    if (!videoFound) { setError(unsupported.length() ? unsupported
                                                        : String(F("No video track found"))); return false; }
     if (_audioCodec == AudioCodec::Unsupported) _audioCodec = AudioCodec::None;
     Serial.printf("[Video] metadata video=%s %ux%u samples=%lu timescale=%lu audio=%s samples=%lu timescale=%lu rate=%lu channels=%lu duration=%lu\n",
@@ -1705,15 +1895,24 @@ void VideoPlayerScreen::drawProgress() {
 
 void VideoPlayerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
-  const int newline = _error.indexOf('\n');
-  const String first = newline < 0 ? _error : _error.substring(0, newline);
-  const String second = newline < 0 ? String() : _error.substring(newline + 1);
+  constexpr uint8_t MaxErrorLines = 6;
+  String lines[MaxErrorLines];
+  uint8_t count = 0;
+  int start = 0;
+  while (count < MaxErrorLines && start <= _error.length()) {
+    const int newline = _error.indexOf('\n', start);
+    lines[count++] = newline < 0 ? _error.substring(start) : _error.substring(start, newline);
+    if (newline < 0) break;
+    start = newline + 1;
+  }
+  if (!count) return;
   const int16_t centerY = viewportTop() + _viewportHeight / 2;
-  UiText::draw(tft, UiKit::ellipsize(first, _display.width() - 32, UiText::Size::Compact), _display.width() / 2,
-               second.length() ? centerY - 12 : centerY, TFT_RED, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
-  if (second.length()) UiText::draw(tft, UiKit::ellipsize(second, _display.width() - 32, UiText::Size::Compact),
-                                    _display.width() / 2, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
-                                    UiText::Size::Compact, MC_DATUM);
+  const int16_t firstY = centerY - ((int16_t)count - 1) * 10;
+  for (uint8_t index = 0; index < count; ++index) {
+    UiText::draw(tft, UiKit::ellipsize(lines[index], _display.width() - 32, UiText::Size::Compact),
+                 _display.width() / 2, firstY + index * 20,
+                 index == 0 ? TFT_RED : TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
+  }
 }
 
 bool VideoPlayerScreen::playButtonContains(int16_t x, int16_t y) const {
