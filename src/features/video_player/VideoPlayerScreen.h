@@ -28,32 +28,53 @@ public:
 
 private:
   enum class State : uint8_t { Opening, Buffering, Playing, Paused, Finished, Closing, Error };
+  enum class ViewMode : uint8_t { FullScreen, Embedded };
 
-  static constexpr uint16_t ViewportTop = UiKit::AppBarHeight + 32;
-  static constexpr uint16_t ViewportBottomReserve = 32;
+  static constexpr uint16_t EmbeddedViewportTop = UiKit::AppBarHeight;
+  static constexpr uint16_t EmbeddedProgressReserve = 32;
+  static constexpr uint16_t PlaybackControlSize = 40;
+  static constexpr uint16_t PlaybackControlUnderlaySize = PlaybackControlSize + 4;
+  static constexpr uint32_t AutoFullScreenDelayMs = 2000;
 
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   SecretStorage &_secretStorage;
   VideoStreamWorker *_stream;
   String _path;
-  String _fileName;
   String _error;
-  String _status;
   State _state;
+  ViewMode _viewMode;
+  ViewMode _pendingViewMode;
   bool _secretAccess;
   bool _sdMounted;
   bool _lastTouchDown;
   bool _closeRequested;
   bool _autoPlay;
+  bool _viewModeChangePending;
+  bool _playButtonUnderlayValid;
   uint32_t _durationMs;
   uint32_t _elapsedMs;
   uint32_t _lastDrawMs;
+  uint32_t _autoFullScreenAtMs;
   uint16_t _viewportWidth;
   uint16_t _viewportHeight;
+  uint16_t _sourceWidth;
+  uint16_t _sourceHeight;
+  int16_t _playButtonUnderlayX;
+  int16_t _playButtonUnderlayY;
+  uint16_t _playButtonUnderlay[PlaybackControlUnderlaySize * PlaybackControlUnderlaySize];
 
   void resetView();
   void requestClose();
+  void requestViewMode(ViewMode mode, bool pauseAfterFrame = false);
+  void applyViewMode(ViewMode mode, bool clearOutgoingChrome);
+  void updateViewportForViewMode();
+  void useEmbeddedErrorMode();
+  void clearEmbeddedChrome();
+  void capturePlayButtonUnderlay(const uint16_t *pixels, int16_t frameX, int16_t frameY,
+                                 uint16_t frameWidth, uint16_t frameHeight);
+  void restorePlayButtonUnderlay();
+  void scheduleAutoFullScreen();
   void updateStream(uint32_t nowMs);
   void presentFrames();
   void handleSdCardEvent(SdCardEvent event);
@@ -61,8 +82,9 @@ private:
   void drawTopBar();
   void drawPlayButton();
   void drawProgress();
-  void drawStatus();
   void drawError();
-  bool controlContains(int16_t x, int16_t y) const;
-  String displayName(const String &path) const;
+  uint16_t viewportTop() const;
+  bool playButtonContains(int16_t x, int16_t y) const;
+  bool videoCanvasContains(int16_t x, int16_t y) const;
+  void videoFrameRect(int16_t &x, int16_t &y, uint16_t &width, uint16_t &height) const;
 };

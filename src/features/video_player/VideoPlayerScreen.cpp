@@ -129,6 +129,9 @@ public:
   VideoStreamWorker(SpeakerController &speaker, SecretStorage &storage,
                     uint16_t viewportWidth, uint16_t viewportHeight)
       : _speaker(speaker), _storage(storage), _viewportWidth(viewportWidth), _viewportHeight(viewportHeight),
+        _requestedViewportWidth(viewportWidth), _requestedViewportHeight(viewportHeight),
+        _viewportReconfigurePending(false), _pauseAfterViewportReconfigure(false),
+        _pauseAfterViewportFrame(false),
         _task(nullptr), _command(Command::None), _generation(0), _commandGeneration(0),
         _stopGeneration(0), _stopAcknowledgedGeneration(0), _secretAccess(false),
         _sourceSize(0), _demux(nullptr), _videoCodec(VideoCodec::None), _audioCodec(AudioCodec::None),
@@ -208,6 +211,21 @@ public:
   void replay() { command(Command::Replay); }
   void requestStop() { command(Command::Stop); }
 
+  // The UI changes presentation geometry without disturbing source, decoder,
+  // or audio-clock ownership. The worker applies the latest request only
+  // between frame presentations, when no slot is borrowed by the UI.
+  bool configureViewport(uint16_t width, uint16_t height, bool pauseAfterFrame = false) {
+    if (_ended || !_task || !width || !height) return false;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked() || _stopGeneration) return false;
+    _requestedViewportWidth = width;
+    _requestedViewportHeight = height;
+    _viewportReconfigurePending = true;
+    _pauseAfterViewportReconfigure = _pauseAfterViewportReconfigure || pauseAfterFrame;
+    xTaskNotifyGive(_task);
+    return true;
+  }
+
   Snapshot snapshot() const {
     Snapshot copy;
     if (_ended) return copy;
@@ -226,10 +244,17 @@ public:
     if (_ended) return false;
     StateLock lock(videoStreamStateMutex());
     if (!lock.locked()) return false;
+    // Hold old-geometry frames until the worker has replaced the packed slots;
+    // the UI keeps its current canvas visible until a replacement arrives.
+    if (_viewportReconfigurePending) return false;
     const uint32_t presentationClockMs = __atomic_load_n(&_presentationClockMs, __ATOMIC_ACQUIRE);
     uint8_t selected = 0xff;
     for (uint8_t index = 0; index < FrameSlots; ++index) {
-      if (_slots[index].state != SlotState::Ready || _slots[index].timestampMs > presentationClockMs) continue;
+      // A full-screen tap pauses only after a newly resized embedded frame is
+      // ready. A paused clock no longer advances to that timestamp, so it is
+      // deliberately eligible for this final presentation.
+      if (_slots[index].state != SlotState::Ready ||
+          (_phase != Phase::Paused && _slots[index].timestampMs > presentationClockMs)) continue;
       if (selected == 0xff || _slots[index].timestampMs < _slots[selected].timestampMs) selected = index;
     }
     if (selected == 0xff) return false;
@@ -264,6 +289,11 @@ private:
   SecretStorage &_storage;
   uint16_t _viewportWidth;
   uint16_t _viewportHeight;
+  uint16_t _requestedViewportWidth;
+  uint16_t _requestedViewportHeight;
+  bool _viewportReconfigurePending;
+  bool _pauseAfterViewportReconfigure;
+  bool _pauseAfterViewportFrame;
   TaskHandle_t _task;
   Command _command;
   uint32_t _generation;
@@ -411,6 +441,7 @@ private:
         return;
       }
       if (pending != Command::None) handleCommand(pending);
+      reconfigureViewportIfReady();
       if (_phase == Phase::Playing) {
         pump();
       } else {
@@ -430,15 +461,7 @@ private:
         if (_phase == Phase::Buffered || _phase == Phase::Paused) beginPlayback();
         break;
       case Command::Pause:
-        if (_phase == Phase::Playing) {
-          _pausedElapsedMs = playbackElapsedMs(false);
-          if (_audioCodec != AudioCodec::None && !_speaker.pauseOutput()) {
-            Serial.printf("[Video] audio pause failed: %s\n", _speaker.lastError().c_str());
-            disableAudio(F("Audio unavailable"));
-          }
-          Serial.printf("[Video] paused at=%lu\n", static_cast<unsigned long>(_pausedElapsedMs));
-          setPhase(Phase::Paused, F("Paused"));
-        }
+        pausePlayback();
         break;
       case Command::Stop:
         // Stop is handled in run() so the task can acknowledge it and exit.
@@ -446,6 +469,55 @@ private:
       case Command::None:
         break;
     }
+  }
+
+  void pausePlayback() {
+    if (_phase != Phase::Playing) return;
+    _pausedElapsedMs = playbackElapsedMs(false);
+    if (_audioCodec != AudioCodec::None && !_speaker.pauseOutput()) {
+      Serial.printf("[Video] audio pause failed: %s\n", _speaker.lastError().c_str());
+      disableAudio(F("Audio unavailable"));
+    }
+    Serial.printf("[Video] paused at=%lu\n", static_cast<unsigned long>(_pausedElapsedMs));
+    setPhase(Phase::Paused, F("Paused"));
+  }
+
+  void releaseFrameSlots() {
+    for (uint8_t index = 0; index < FrameSlots; ++index) {
+      free(_slots[index].pixels);
+      _slots[index] = {};
+    }
+  }
+
+  void reconfigureViewportIfReady() {
+    uint16_t width = 0;
+    uint16_t height = 0;
+    bool pauseAfterFrame = false;
+    {
+      StateLock lock(videoStreamStateMutex());
+      if (!lock.locked() || !_viewportReconfigurePending || !_sourceWidth || !_sourceHeight) return;
+      for (uint8_t index = 0; index < FrameSlots; ++index) {
+        if (_slots[index].state == SlotState::Presenting) return;
+      }
+      width = _requestedViewportWidth;
+      height = _requestedViewportHeight;
+      _viewportReconfigurePending = false;
+      pauseAfterFrame = _pauseAfterViewportReconfigure;
+      _pauseAfterViewportReconfigure = false;
+      if (width == _viewportWidth && height == _viewportHeight) {
+        _pauseAfterViewportFrame = _pauseAfterViewportFrame || pauseAfterFrame;
+        return;
+      }
+      // Invalidate ready frames while holding the state lock so the UI cannot
+      // borrow an old-geometry buffer after the canvas has changed.
+      for (uint8_t index = 0; index < FrameSlots; ++index) _slots[index].state = SlotState::Free;
+    }
+    _viewportWidth = width;
+    _viewportHeight = height;
+    releaseFrameSlots();
+    if (!allocateSlots()) return;
+    _pauseAfterViewportFrame = pauseAfterFrame;
+    Serial.printf("[Video] viewport=%ux%u\n", _viewportWidth, _viewportHeight);
   }
 
   void stopAndExit(uint32_t generation) {
@@ -700,6 +772,7 @@ private:
     const Command pending = takeCommand(generation);
     if (pending == Command::Stop) { stopAndExit(generation); return; }
     if (pending != Command::None) { handleCommand(pending); return; }
+    reconfigureViewportIfReady();
     const uint32_t elapsed = playbackElapsedMs(false);
     __atomic_store_n(&_presentationClockMs, elapsed, __ATOMIC_RELEASE);
     if (_audioCodec != AudioCodec::None) {
@@ -806,12 +879,16 @@ private:
     scaleFrame(frame, _slots[slot].pixels);
     _scaleUs += micros() - scaleStartedUs;
     ++_scaleCount;
+    bool pauseAfterFrame = false;
     {
       StateLock lock(videoStreamStateMutex());
       if (!lock.locked()) return false;
       _slots[slot].timestampMs = relativeTimestamp;
       _slots[slot].state = SlotState::Ready;
+      pauseAfterFrame = _pauseAfterViewportFrame;
+      _pauseAfterViewportFrame = false;
     }
+    if (pauseAfterFrame) pausePlayback();
     return true;
   }
 
@@ -1240,7 +1317,7 @@ private:
     free(_readWindow); _readWindow = nullptr; _readWindowStart = _readWindowBytes = 0;
     free(_audioScratch); _audioScratch = nullptr;
     free(_pcmRing); _pcmRing = nullptr; _pcmRead = _pcmWrite = _pcmCount = 0;
-    for (uint8_t index = 0; index < FrameSlots; ++index) { free(_slots[index].pixels); _slots[index] = {}; }
+    releaseFrameSlots();
     _videoCodec = VideoCodec::None;
     _audioCodec = AudioCodec::None;
     _videoSamples = _audioSamples = _videoSample = _audioSample = 0;
@@ -1256,6 +1333,7 @@ private:
     _videoDecodeUs = _scaleUs = 0;
     _videoDecodeCount = _scaleCount = 0;
     _audioUnderrun = false;
+    _pauseAfterViewportReconfigure = _pauseAfterViewportFrame = false;
   }
 };
 
@@ -1263,9 +1341,12 @@ VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touc
                                      SdCardController &sdCard, SpeakerController &speaker,
                                      SecretStorage &secretStorage)
     : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
-      _stream(nullptr), _state(State::Opening), _secretAccess(false), _sdMounted(false), _lastTouchDown(false),
-      _closeRequested(false), _autoPlay(false), _durationMs(0), _elapsedMs(0), _lastDrawMs(0),
-      _viewportWidth(0), _viewportHeight(0) {}
+      _stream(nullptr), _state(State::Opening), _viewMode(ViewMode::FullScreen),
+      _pendingViewMode(ViewMode::FullScreen), _secretAccess(false), _sdMounted(false), _lastTouchDown(false),
+      _closeRequested(false), _autoPlay(false), _viewModeChangePending(false),
+      _playButtonUnderlayValid(false), _durationMs(0), _elapsedMs(0), _lastDrawMs(0),
+      _autoFullScreenAtMs(0), _viewportWidth(0), _viewportHeight(0), _sourceWidth(0),
+      _sourceHeight(0), _playButtonUnderlayX(0), _playButtonUnderlayY(0), _playButtonUnderlay{} {}
 
 VideoPlayerScreen::~VideoPlayerScreen() {
   delete _stream;
@@ -1276,19 +1357,30 @@ void VideoPlayerScreen::onEnter(const ScreenData &data) {
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _sdMounted = _sdCard.isMounted();
   _path = data.kind == ScreenDataKind::VideoPath ? data.text : "";
-  _fileName = displayName(_path);
   _viewportWidth = _display.width();
-  _viewportHeight = _display.height() > ViewportTop + ViewportBottomReserve
-                      ? _display.height() - ViewportTop - ViewportBottomReserve : 0;
+  _viewportHeight = _display.height();
   Serial.printf("[Video] screen enter path=%s viewport=%ux%u\n", _path.c_str(), _viewportWidth, _viewportHeight);
   draw();
-  if (!_path.length()) { _state = State::Error; _error = F("No video selected"); draw(); return; }
-  if (!_sdMounted) { _state = State::Error; _error = F("SD card unavailable"); draw(); return; }
+  if (!_path.length()) {
+    _state = State::Error;
+    _error = F("No video selected");
+    useEmbeddedErrorMode();
+    draw();
+    return;
+  }
+  if (!_sdMounted) {
+    _state = State::Error;
+    _error = F("SD card unavailable");
+    useEmbeddedErrorMode();
+    draw();
+    return;
+  }
   delete _stream;
   _stream = new VideoStreamWorker(_speaker, _secretStorage, _viewportWidth, _viewportHeight);
   if (!_stream || !_stream->prepare(_path, _secretAccess)) {
     _state = State::Error;
     _error = F("Video worker unavailable");
+    useEmbeddedErrorMode();
   }
   draw();
 }
@@ -1315,32 +1407,134 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) { _lastTouchDown = false; return; }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
+  if (_viewMode == ViewMode::FullScreen) {
+    requestViewMode(ViewMode::Embedded, _state == State::Playing);
+    return;
+  }
   if (UiKit::navigationIconContains(point.x, point.y)) { requestClose(); return; }
-  if (!controlContains(point.x, point.y) || !_stream || _state == State::Closing || _state == State::Error) return;
-  if (_state == State::Playing) { Serial.println(F("[Video] UI pause")); _stream->pause(); }
-  else if (_state == State::Paused || _state == State::Buffering) { Serial.println(F("[Video] UI play")); _stream->play(); }
-  else if (_state == State::Finished) { Serial.println(F("[Video] UI replay")); _autoPlay = true; _stream->replay(); }
+  if (playButtonContains(point.x, point.y) && _stream && _state != State::Closing && _state != State::Error) {
+    if (_state == State::Playing) {
+      _autoFullScreenAtMs = 0;
+      Serial.println(F("[Video] UI pause"));
+      _stream->pause();
+    }
+    else if (_state == State::Paused || _state == State::Buffering) {
+      Serial.println(F("[Video] UI play"));
+      _stream->configureViewport(_viewportWidth, _viewportHeight);
+      _stream->play();
+      scheduleAutoFullScreen();
+    }
+    else if (_state == State::Finished) {
+      Serial.println(F("[Video] UI replay"));
+      _autoPlay = true;
+      _stream->replay();
+      scheduleAutoFullScreen();
+    }
+    return;
+  }
+  if (videoCanvasContains(point.x, point.y)) {
+    _autoFullScreenAtMs = 0;
+    requestViewMode(ViewMode::FullScreen);
+  }
+}
+
+void VideoPlayerScreen::requestViewMode(ViewMode mode, bool pauseAfterFrame) {
+  const ViewMode target = _viewModeChangePending ? _pendingViewMode : _viewMode;
+  if (target == mode) return;
+  if (mode == ViewMode::FullScreen) _autoFullScreenAtMs = 0;
+  // A paused/finished worker cannot decode a replacement frame. Preserve the
+  // current image and only change chrome; playback will configure the current
+  // mode before it resumes.
+  if (_state == State::Paused || _state == State::Finished) {
+    applyViewMode(mode, true);
+    return;
+  }
+  _pendingViewMode = mode;
+  _viewModeChangePending = true;
+  const uint16_t width = _display.width();
+  const uint16_t height = mode == ViewMode::FullScreen
+                          ? _display.height()
+                          : (_display.height() > EmbeddedViewportTop + EmbeddedProgressReserve
+                             ? _display.height() - EmbeddedViewportTop - EmbeddedProgressReserve : 0);
+  Serial.printf("[Video] view pending=%s viewport=%ux%u\n",
+                mode == ViewMode::FullScreen ? "full" : "embedded", width, height);
+  if (_stream) _stream->configureViewport(width, height, pauseAfterFrame);
+}
+
+void VideoPlayerScreen::applyViewMode(ViewMode mode, bool clearOutgoingChrome) {
+  if (_viewMode == mode) return;
+  if (clearOutgoingChrome && _viewMode == ViewMode::Embedded && mode == ViewMode::FullScreen) {
+    restorePlayButtonUnderlay();
+    clearEmbeddedChrome();
+  }
+  _viewMode = mode;
+  _pendingViewMode = mode;
+  _viewModeChangePending = false;
+  updateViewportForViewMode();
+  if (mode == ViewMode::Embedded) {
+    drawTopBar();
+    drawProgress();
+    drawPlayButton();
+  }
+}
+
+void VideoPlayerScreen::updateViewportForViewMode() {
+  _viewportWidth = _display.width();
+  _viewportHeight = _viewMode == ViewMode::FullScreen
+                      ? _display.height()
+                      : (_display.height() > EmbeddedViewportTop + EmbeddedProgressReserve
+                         ? _display.height() - EmbeddedViewportTop - EmbeddedProgressReserve : 0);
+}
+
+void VideoPlayerScreen::useEmbeddedErrorMode() {
+  _autoFullScreenAtMs = 0;
+  _viewModeChangePending = false;
+  _pendingViewMode = ViewMode::Embedded;
+  if (_viewMode != ViewMode::Embedded) applyViewMode(ViewMode::Embedded, false);
+}
+
+void VideoPlayerScreen::clearEmbeddedChrome() {
+  if (!_display.isReady()) return;
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(0, 0, _display.width(), UiKit::AppBarHeight, TFT_BLACK);
+  tft.fillRect(0, _display.height() - EmbeddedProgressReserve, _display.width(),
+               EmbeddedProgressReserve, TFT_BLACK);
+}
+
+void VideoPlayerScreen::scheduleAutoFullScreen() {
+  _autoFullScreenAtMs = millis() + AutoFullScreenDelayMs;
 }
 
 void VideoPlayerScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
   updateStream(nowMs);
+  if (_autoFullScreenAtMs && _state == State::Playing &&
+      (int32_t)(nowMs - _autoFullScreenAtMs) >= 0) {
+    _autoFullScreenAtMs = 0;
+    requestViewMode(ViewMode::FullScreen);
+  }
   if (_closeRequested && (!_stream || _stream->stopped())) _navigator.pop();
 }
 
 void VideoPlayerScreen::resetView() {
-  _path = _fileName = _error = _status = "";
+  _path = _error = "";
   _state = State::Opening;
+  _viewMode = ViewMode::FullScreen;
+  _pendingViewMode = ViewMode::FullScreen;
   _lastTouchDown = _closeRequested = false;
   _autoPlay = true;
+  _viewModeChangePending = false;
   _durationMs = _elapsedMs = _lastDrawMs = 0;
+  _autoFullScreenAtMs = 0;
+  _sourceWidth = _sourceHeight = 0;
+  _playButtonUnderlayValid = false;
 }
 
 void VideoPlayerScreen::requestClose() {
   if (_closeRequested) return;
   _closeRequested = true;
   _state = State::Closing;
-  _status = F("Closing");
+  _autoFullScreenAtMs = 0;
   Serial.println(F("[Video] UI close"));
   if (_stream) _stream->requestStop();
   draw();
@@ -1351,7 +1545,8 @@ void VideoPlayerScreen::updateStream(uint32_t nowMs) {
   const VideoStreamWorker::Snapshot snapshot = _stream->snapshot();
   _durationMs = snapshot.durationMs;
   _elapsedMs = snapshot.elapsedMs;
-  _status = snapshot.status;
+  _sourceWidth = snapshot.sourceWidth;
+  _sourceHeight = snapshot.sourceHeight;
   switch (snapshot.phase) {
     case VideoStreamWorker::Phase::Opening: _state = State::Opening; break;
     case VideoStreamWorker::Phase::Buffered:
@@ -1359,20 +1554,24 @@ void VideoPlayerScreen::updateStream(uint32_t nowMs) {
       if (_autoPlay && !_closeRequested) { _autoPlay = false; _stream->play(); }
       break;
     case VideoStreamWorker::Phase::Playing: _state = State::Playing; presentFrames(); break;
-    case VideoStreamWorker::Phase::Paused: _state = State::Paused; break;
+    case VideoStreamWorker::Phase::Paused: _state = State::Paused; presentFrames(); break;
     case VideoStreamWorker::Phase::Finished: _state = State::Finished; presentFrames(); break;
-    case VideoStreamWorker::Phase::Error: _state = State::Error; _error = snapshot.error; break;
+    case VideoStreamWorker::Phase::Error:
+      _state = State::Error;
+      _error = snapshot.error;
+      useEmbeddedErrorMode();
+      break;
     case VideoStreamWorker::Phase::Stopping: _state = State::Closing; break;
     case VideoStreamWorker::Phase::Idle: break;
   }
   if (nowMs - _lastDrawMs >= 150 || _state == State::Error) {
     _lastDrawMs = nowMs;
-    draw(false);
+    draw(_state == State::Error);
   }
 }
 
 void VideoPlayerScreen::presentFrames() {
-  if (!_stream || _state != State::Playing && _state != State::Finished) return;
+  if (!_stream || (_state != State::Playing && _state != State::Paused && _state != State::Finished)) return;
   VideoStreamWorker::Frame newest;
   bool haveFrame = false;
   VideoStreamWorker::Frame frame;
@@ -1385,11 +1584,19 @@ void VideoPlayerScreen::presentFrames() {
     haveFrame = true;
   }
   if (!haveFrame) return;
+  if (_viewModeChangePending) applyViewMode(_pendingViewMode, true);
   if (newest.pixels && newest.width && newest.height) {
-    _display.tft().pushImage(newest.x, ViewportTop + newest.y, newest.width, newest.height,
+    _display.tft().pushImage(newest.x, viewportTop() + newest.y, newest.width, newest.height,
                              const_cast<uint16_t *>(newest.pixels));
+    capturePlayButtonUnderlay(newest.pixels, newest.x, viewportTop() + newest.y,
+                              newest.width, newest.height);
   }
   _stream->releaseFrame(newest.slot, false);
+  if (_viewMode == ViewMode::Embedded) {
+    drawTopBar();
+    drawProgress();
+    drawPlayButton();
+  }
 }
 
 void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
@@ -1400,12 +1607,8 @@ void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (_stream) _stream->requestStop();
   _state = State::Error;
   _error = event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable");
+  useEmbeddedErrorMode();
   draw();
-}
-
-String VideoPlayerScreen::displayName(const String &path) const {
-  const int slash = path.lastIndexOf('/');
-  return slash < 0 ? path : path.substring(slash + 1);
 }
 
 void VideoPlayerScreen::draw(bool full) {
@@ -1413,26 +1616,85 @@ void VideoPlayerScreen::draw(bool full) {
   TFT_eSPI &tft = _display.tft();
   if (full) {
     tft.fillScreen(TFT_BLACK);
-    drawTopBar();
-    tft.fillRect(0, UiKit::AppBarHeight, _display.width(), 32, TFT_BLACK);
-    tft.fillRect(0, _display.height() - ViewportBottomReserve, _display.width(), ViewportBottomReserve, TFT_BLACK);
+    if (_viewMode == ViewMode::Embedded) drawTopBar();
   }
-  drawPlayButton();
-  drawProgress();
-  drawStatus();
+  if (_viewMode == ViewMode::Embedded) {
+    drawPlayButton();
+    drawProgress();
+  }
   if (_state == State::Error) drawError();
 }
 
-void VideoPlayerScreen::drawTopBar() { UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Video")); }
+void VideoPlayerScreen::drawTopBar() {
+  const int slash = _path.lastIndexOf('/');
+  const String name = slash < 0 ? _path : _path.substring(slash + 1);
+  UiKit::drawTopAppBar(_display.tft(), _display.width(), name);
+}
+
+void VideoPlayerScreen::capturePlayButtonUnderlay(const uint16_t *pixels, int16_t frameX, int16_t frameY,
+                                                   uint16_t frameWidth, uint16_t frameHeight) {
+  if (!pixels) { _playButtonUnderlayValid = false; return; }
+  int16_t activeX = 0, activeY = 0;
+  uint16_t activeWidth = 0, activeHeight = 0;
+  videoFrameRect(activeX, activeY, activeWidth, activeHeight);
+  const int16_t left = activeX + activeWidth / 2 - PlaybackControlUnderlaySize / 2;
+  const int16_t top = activeY + activeHeight / 2 - PlaybackControlUnderlaySize / 2;
+  const int16_t sourceX = left - frameX;
+  const int16_t sourceY = top - frameY;
+  if (sourceX < 0 || sourceY < 0 || sourceX + PlaybackControlUnderlaySize > frameWidth ||
+      sourceY + PlaybackControlUnderlaySize > frameHeight) {
+    _playButtonUnderlayValid = false;
+    return;
+  }
+  for (uint16_t row = 0; row < PlaybackControlUnderlaySize; ++row) {
+    memcpy(_playButtonUnderlay + row * PlaybackControlUnderlaySize,
+           pixels + (sourceY + row) * frameWidth + sourceX,
+           PlaybackControlUnderlaySize * sizeof(uint16_t));
+  }
+  _playButtonUnderlayX = left;
+  _playButtonUnderlayY = top;
+  _playButtonUnderlayValid = true;
+}
+
+void VideoPlayerScreen::restorePlayButtonUnderlay() {
+  if (!_playButtonUnderlayValid || !_display.isReady()) return;
+  _display.tft().pushImage(_playButtonUnderlayX, _playButtonUnderlayY,
+                           PlaybackControlUnderlaySize, PlaybackControlUnderlaySize,
+                           _playButtonUnderlay);
+  _playButtonUnderlayValid = false;
+}
+
+uint16_t VideoPlayerScreen::viewportTop() const {
+  return _display.height() > _viewportHeight ? (_display.height() - _viewportHeight) / 2 : 0;
+}
+
+void VideoPlayerScreen::videoFrameRect(int16_t &x, int16_t &y, uint16_t &width, uint16_t &height) const {
+  width = _viewportWidth;
+  height = _viewportHeight;
+  x = 0;
+  y = viewportTop();
+  if (!_sourceWidth || !_sourceHeight || !_viewportWidth || !_viewportHeight) return;
+  if ((uint32_t)_sourceWidth * _viewportHeight > (uint32_t)_sourceHeight * _viewportWidth) {
+    height = max<uint32_t>(1, ((uint32_t)_sourceHeight * _viewportWidth) / _sourceWidth);
+    y += (_viewportHeight - height) / 2;
+  } else {
+    width = max<uint32_t>(1, ((uint32_t)_sourceWidth * _viewportHeight) / _sourceHeight);
+    x = (_viewportWidth - width) / 2;
+  }
+}
 
 void VideoPlayerScreen::drawPlayButton() {
+  if (_viewMode != ViewMode::Embedded) return;
   TFT_eSPI &tft = _display.tft();
-  const int16_t cx = _display.width() - 24;
-  const int16_t cy = UiKit::AppBarHeight + 16;
+  int16_t frameX = 0, frameY = 0;
+  uint16_t frameWidth = 0, frameHeight = 0;
+  videoFrameRect(frameX, frameY, frameWidth, frameHeight);
+  const int16_t cx = frameX + frameWidth / 2;
+  const int16_t cy = frameY + frameHeight / 2;
   const bool enabled = _state != State::Opening && _state != State::Closing && _state != State::Error && _sdMounted;
-  tft.fillSmoothCircle(cx, cy, 14, enabled ? TFT_DARKGREY : TFT_BLACK, enabled ? TFT_DARKGREY : TFT_BLACK);
-  if (!enabled) return;
-  UiKit::drawPlaybackIcon(tft, cx, cy, _state == State::Playing, TFT_WHITE, TFT_DARKGREY);
+  const uint16_t background = TFT_DARKGREY;
+  tft.fillSmoothCircle(cx, cy, PlaybackControlSize / 2, background, TFT_BLACK);
+  UiKit::drawPlaybackIcon(tft, cx, cy, _state == State::Playing, enabled ? TFT_WHITE : TFT_LIGHTGREY, background);
 }
 
 void VideoPlayerScreen::drawProgress() {
@@ -1441,20 +1703,12 @@ void VideoPlayerScreen::drawProgress() {
   UiKit::drawProgressBar(_display.tft(), x, y, width, 10, percent, false, TFT_CYAN, TFT_DARKGREY, TFT_BLACK, true);
 }
 
-void VideoPlayerScreen::drawStatus() {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillRect(48, UiKit::AppBarHeight + 2, _display.width() - 96, 28, TFT_BLACK);
-  String text = _status.length() ? _status : _fileName;
-  UiText::draw(tft, UiKit::ellipsize(text, _display.width() - 104, UiText::Size::Compact),
-               50, UiKit::AppBarHeight + 16, TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, ML_DATUM);
-}
-
 void VideoPlayerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
   const int newline = _error.indexOf('\n');
   const String first = newline < 0 ? _error : _error.substring(0, newline);
   const String second = newline < 0 ? String() : _error.substring(newline + 1);
-  const int16_t centerY = ViewportTop + _viewportHeight / 2;
+  const int16_t centerY = viewportTop() + _viewportHeight / 2;
   UiText::draw(tft, UiKit::ellipsize(first, _display.width() - 32, UiText::Size::Compact), _display.width() / 2,
                second.length() ? centerY - 12 : centerY, TFT_RED, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
   if (second.length()) UiText::draw(tft, UiKit::ellipsize(second, _display.width() - 32, UiText::Size::Compact),
@@ -1462,7 +1716,17 @@ void VideoPlayerScreen::drawError() {
                                     UiText::Size::Compact, MC_DATUM);
 }
 
-bool VideoPlayerScreen::controlContains(int16_t x, int16_t y) const {
-  return x >= _display.width() - 48 && x < _display.width() && y >= UiKit::AppBarHeight &&
-         y < UiKit::AppBarHeight + 32;
+bool VideoPlayerScreen::playButtonContains(int16_t x, int16_t y) const {
+  if (_viewMode != ViewMode::Embedded) return false;
+  int16_t frameX = 0, frameY = 0;
+  uint16_t frameWidth = 0, frameHeight = 0;
+  videoFrameRect(frameX, frameY, frameWidth, frameHeight);
+  const int16_t cx = frameX + frameWidth / 2;
+  const int16_t cy = frameY + frameHeight / 2;
+  const int16_t half = PlaybackControlSize / 2;
+  return x >= cx - half && x < cx + half && y >= cy - half && y < cy + half;
+}
+
+bool VideoPlayerScreen::videoCanvasContains(int16_t x, int16_t y) const {
+  return x >= 0 && x < _display.width() && y >= viewportTop() && y < viewportTop() + _viewportHeight;
 }
