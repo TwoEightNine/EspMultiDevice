@@ -160,8 +160,9 @@ page and preview HTTP transfers.
 Stage 2 registers AssistantScreen only in normal composition. The Home AI tile
 opens it; USB Drive composition never creates assistant services.
 AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
-safe-close handshake. AssistantAvatar is display-only and paints one prepared
-320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
+safe-close handshake. AssistantAvatar owns the lower 320×240 avatar pane,
+including clearing it before a new asset set is available, and paints one
+prepared 320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
 decodes the five exact PNG assets from `/.system/ai_avatars/default/` into
 PSRAM; it never draws or updates assistant state. SD reads remain bounded by
 `SpiBusLock`, and the UI task publishes frames to the TFT. It also decodes the
@@ -171,9 +172,13 @@ unavailable assets leave an otherwise empty pane at the screen background; once
 a frame is visible, replacement frames are pushed directly over it to avoid a
 transition blink. SD removal/remount explicitly clears the pane so stale
 artwork cannot remain.
-The portrait layout uses a 48px app bar, a 192px text area, and the native
-avatar frame at the bottom. User/STT text is top-aligned and assistant/TTS text
-is bottom-aligned, both in four wrapped Content lines. Captions select the
+The portrait layout uses a 48px app bar, a black 319×192 text viewport at
+`(0,48)`–`(318,239)`, and the native avatar frame at the bottom. The text
+renderer never paints the avatar pane. User/STT text is top-aligned in a black,
+white-outlined rounded bubble at `(62,58)`–`(307,112)` with an upward V-tail on
+its top-right edge and wraps to two Content lines. Assistant/TTS text is
+top-aligned in a matching bubble at `(12,125)`–`(257,227)` with a downward
+V-tail on its bottom-left edge and wraps to four Content lines. Captions select the
 assistant-only 18 px Noto Sans CJK SC face when they contain Han text; its
 embedded GB2312 coverage includes common Simplified Chinese, punctuation, and
 Latin, while unsupported characters become `?`. Technical status text,

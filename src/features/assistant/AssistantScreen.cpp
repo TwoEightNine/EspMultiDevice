@@ -8,6 +8,42 @@
 
 namespace {
 constexpr uint16_t LightErrorColor = 0xF986;  // soft red on black
+constexpr uint16_t BubbleBorderColor = TFT_WHITE;
+constexpr int16_t BubbleRadius = 8;
+
+constexpr int16_t UserBubbleX = 62;
+constexpr int16_t UserBubbleY = 58;
+constexpr int16_t UserBubbleWidth = 246;
+constexpr int16_t UserBubbleHeight = 55;
+constexpr int16_t UserTextTop = 66;
+
+constexpr int16_t AssistantBubbleX = 12;
+constexpr int16_t AssistantBubbleY = 125;
+constexpr int16_t AssistantBubbleWidth = 246;
+constexpr int16_t AssistantBubbleHeight = 103;
+constexpr int16_t AssistantTextTop = 134;
+
+void drawSpeechBubble(TFT_eSPI &tft, int16_t x, int16_t y,
+                      int16_t width, int16_t height, bool tailPointsUp) {
+  // The V stays within the text viewport: the upper tip is y=50 and the
+  // lower tip is y=237. Draw the frame after the tail so the joins remain
+  // crisp at the bubble edge.
+  if (tailPointsUp) {
+    tft.drawWideLine(x + width - 29, y, x + width - 19, y - 8,
+                     2.0f, BubbleBorderColor, TFT_BLACK);
+    tft.drawWideLine(x + width - 19, y - 8, x + width - 9, y,
+                     2.0f, BubbleBorderColor, TFT_BLACK);
+  } else {
+    tft.drawWideLine(x + 12, y + height - 1, x + 22, y + height + 9,
+                     2.0f, BubbleBorderColor, TFT_BLACK);
+    tft.drawWideLine(x + 22, y + height + 9, x + 32, y + height - 1,
+                     2.0f, BubbleBorderColor, TFT_BLACK);
+  }
+  tft.fillSmoothRoundRect(x, y, width, height, BubbleRadius,
+                          TFT_BLACK, TFT_BLACK);
+  tft.drawSmoothRoundRect(x, y, BubbleRadius, BubbleRadius, width, height,
+                          BubbleBorderColor, TFT_BLACK);
+}
 
 uint16_t nextUtf8Offset(const String &text, uint16_t offset) {
   if (offset >= text.length()) return offset;
@@ -201,11 +237,11 @@ void AssistantScreen::draw(bool full) {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   if (full) {
-    tft.fillScreen(ScreenBackground);
     UiKit::drawTopAppBar(tft, _display.width(), F("Assistant"));
+    clearAvatarPane();
   }
-  drawAvatar();
   drawText();
+  drawAvatar();
 }
 
 void AssistantScreen::drawAvatar() {
@@ -241,23 +277,27 @@ void AssistantScreen::clearAvatarPane() {
   if (!_display.isReady()) return;
   const int16_t x = (_display.width() - AvatarWidth) / 2;
   const int16_t y = _display.height() - AvatarHeight;
-  _display.tft().fillRect(x, y, AvatarWidth, AvatarHeight, ScreenBackground);
+  _avatar.clear(_display.tft(), x, y, ScreenBackground);
   _underlayDrawn = false;
 }
 
 void AssistantScreen::drawText() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  const int16_t avatarTop = _display.height() - AvatarHeight;
-  tft.fillRect(0, TextTop, _display.width(), avatarTop - TextTop, ScreenBackground);
+  tft.fillRect(TextLeft, TextTop, TextWidth, TextHeight, ScreenBackground);
+  drawSpeechBubble(tft, UserBubbleX, UserBubbleY,
+                   UserBubbleWidth, UserBubbleHeight, true);
+  drawSpeechBubble(tft, AssistantBubbleX, AssistantBubbleY,
+                   AssistantBubbleWidth, AssistantBubbleHeight, false);
 
   String userCaption = UiText::normalizeAssistantCaption(String(_snapshot.sttCaption));
-  String userLines[MaxTextLines];
-  const uint8_t userCount = wrapCaption(userCaption, userLines, MaxTextLines,
-                                        _display.width() - TextPadding * 2);
+  String userLines[MaxUserTextLines];
+  const uint8_t userCount = wrapCaption(userCaption, userLines, MaxUserTextLines,
+                                        UserBubbleWidth - BubbleTextPadding * 2);
   for (uint8_t index = 0; index < userCount; ++index) {
-    UiText::drawAssistantCaption(tft, userLines[index], TextPadding,
-                                 TextTop + index * UiText::lineHeight(UiText::Size::Content),
+    UiText::drawAssistantCaption(tft, userLines[index],
+                                 UserBubbleX + BubbleTextPadding,
+                                 UserTextTop + index * UiText::lineHeight(UiText::Size::Content),
                                  TFT_WHITE, ScreenBackground, TL_DATUM);
   }
 
@@ -274,15 +314,14 @@ void AssistantScreen::drawText() {
     assistantCaption = String(_snapshot.status);
   }
   assistantCaption = UiText::normalizeAssistantCaption(assistantCaption);
-  String assistantLines[MaxTextLines];
+  String assistantLines[MaxAssistantTextLines];
   const uint8_t assistantCount = wrapCaption(assistantCaption, assistantLines,
-                                             MaxTextLines,
-                                             _display.width() - TextPadding * 2);
-  const int16_t assistantTop = avatarTop -
-      AssistantBottomPadding - assistantCount * UiText::lineHeight(UiText::Size::Content);
+                                             MaxAssistantTextLines,
+                                             AssistantBubbleWidth - BubbleTextPadding * 2);
   for (uint8_t index = 0; index < assistantCount; ++index) {
-    UiText::drawAssistantCaption(tft, assistantLines[index], TextPadding,
-                                 assistantTop + index * UiText::lineHeight(UiText::Size::Content),
+    UiText::drawAssistantCaption(tft, assistantLines[index],
+                                 AssistantBubbleX + BubbleTextPadding,
+                                 AssistantTextTop + index * UiText::lineHeight(UiText::Size::Content),
                                  assistantColor, ScreenBackground, TL_DATUM);
   }
 }

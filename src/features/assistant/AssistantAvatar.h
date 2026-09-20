@@ -12,6 +12,10 @@ public:
   static Asset assetFor(AssistantPhase phase, AssistantEmotion emotion);
   static const char *filename(Asset asset);
 
+  // Owns clearing the complete native avatar frame before a new asset set is
+  // available. Text chrome must not paint this region.
+  static void clear(TFT_eSPI &tft, int16_t x, int16_t y,
+                    uint16_t backgroundColor);
   static void drawUnderlay(TFT_eSPI &tft, int16_t x, int16_t y,
                            const uint16_t *pixels, const uint8_t *alpha);
   void draw(TFT_eSPI &tft, int16_t x, int16_t y,

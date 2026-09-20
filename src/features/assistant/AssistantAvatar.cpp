@@ -27,6 +27,11 @@ const char *AssistantAvatar::filename(Asset asset) {
   }
 }
 
+void AssistantAvatar::clear(TFT_eSPI &tft, int16_t x, int16_t y,
+                            uint16_t backgroundColor) {
+  tft.fillRect(x, y, Width, Height, backgroundColor);
+}
+
 void AssistantAvatar::drawUnderlay(TFT_eSPI &tft, int16_t x, int16_t y,
                                    const uint16_t *pixels,
                                    const uint8_t *alpha) {

@@ -21,12 +21,15 @@ public:
 
 private:
   static constexpr uint16_t ScreenBackground = TFT_BLACK;
+  static constexpr int16_t TextLeft = 0;
   static constexpr int16_t TextTop = 48;
-  static constexpr int16_t AssistantBottomPadding = 16;
+  static constexpr int16_t TextWidth = 319;
+  static constexpr int16_t TextHeight = 192;
   static constexpr int16_t AvatarWidth = 320;
   static constexpr int16_t AvatarHeight = 240;
-  static constexpr uint8_t MaxTextLines = 4;
-  static constexpr int16_t TextPadding = 16;
+  static constexpr uint8_t MaxUserTextLines = 2;
+  static constexpr uint8_t MaxAssistantTextLines = 4;
+  static constexpr int16_t BubbleTextPadding = 12;
 
   AssistantController &_controller;
   SdCardController &_sdCard;
