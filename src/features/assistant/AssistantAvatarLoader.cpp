@@ -12,7 +12,7 @@ namespace {
 // the display's packed RGB565 value. Keeping this in the screen palette
 // prevents transparent avatar pixels from becoming a green fringe/pane.
 constexpr uint32_t BackgroundColor = 0x00000000;  // black RGB888 compositing
-constexpr const char *AvatarDirectory = "/.system/ai_avatars/ch/";
+constexpr const char *AvatarDirectory = "/.system/ai_avatars/default/";
 // The first path is the user-facing SD path. The absolute variants keep the
 // loader tolerant of the two path spellings accepted by Arduino FS builds.
 constexpr const char *UnderlayPaths[] = {

@@ -108,6 +108,20 @@ void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   }
 }
 
+void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      bool paused, uint16_t color, uint16_t backgroundColor) {
+  if (paused) {
+    tft.fillSmoothRoundRect(centerX - 6, centerY - 7, 4, 14, 2, color, backgroundColor);
+    tft.fillSmoothRoundRect(centerX + 2, centerY - 7, 4, 14, 2, color, backgroundColor);
+    return;
+  }
+  // Three antialiased strokes make a compact filled play chevron without a
+  // pixelated triangle edge.
+  tft.drawWideLine(centerX - 4, centerY - 7, centerX - 4, centerY + 7, 3.0f, color, backgroundColor);
+  tft.drawWideLine(centerX - 3, centerY - 6, centerX + 7, centerY, 3.0f, color, backgroundColor);
+  tft.drawWideLine(centerX - 3, centerY + 6, centerX + 7, centerY, 3.0f, color, backgroundColor);
+}
+
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         uint16_t color, uint16_t backgroundColor) {
   drawAlphaIcon(tft, centerX - ic_back_width / 2, centerY - ic_back_height / 2,

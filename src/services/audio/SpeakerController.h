@@ -28,6 +28,12 @@ public:
   const String &lastError() const;
 
   size_t writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs = 100);
+  // Attempts one immediate write and may accept fewer samples than requested.
+  // A zero result is normal I2S backpressure and is not an output failure.
+  size_t tryWritePcm16(const int16_t *samples, size_t sampleCount);
+  // Preserve the installed driver and queued DMA samples across a player pause.
+  bool pauseOutput();
+  bool resumeOutput();
   bool drain(uint32_t timeoutMs = 2000);
   void stop();
 
@@ -40,6 +46,7 @@ private:
   uint32_t _sampleRate;
   uint8_t _volume;
   bool _ready;
+  bool _paused;
   bool _controlStarted;
   String _lastError;
 

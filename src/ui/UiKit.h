@@ -63,6 +63,9 @@ void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
 void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool zoomed, uint16_t color, uint16_t backgroundColor);
+// Compact playback control used by streaming media screens.
+void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                      bool paused, uint16_t color, uint16_t backgroundColor);
 // 40px assets used by Files and Browser footer controls. The visual canvas
 // fills the 40px-tall footer cells while their complete cells remain tappable.
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

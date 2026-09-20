@@ -194,7 +194,7 @@ retain at least 8 KiB.
 | --- | --- |
 | `tools/generate_browser_freesans_font.py` | Reproducibly generates `src/ui/fonts/BrowserFreeSans.h` from redistributable GNU FreeSans. Preserve `LICENSE.FreeFont`. |
 | `tools/generate_assistant_noto_sans_sc_font.py` | Reproducibly generates the assistant-only GB2312-level 18 px `AssistantNotoSansSC18.h` from OFL-licensed Noto Sans CJK SC. Preserve `LICENSE.NotoSansCJKSC`. |
-| `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates H.263/3GP and MPEG-4 Part 2/MP4 176×144, 10fps fixtures in `tests/video/fixtures/`. |
+| `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates 320×480, 30fps H.263/3GP, MPEG-4 Part 2/MP4, and H.264/AAC MP4 streaming fixtures in `tests/video/fixtures/`. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |

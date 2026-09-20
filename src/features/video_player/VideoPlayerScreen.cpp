@@ -11,28 +11,64 @@ extern "C" {
 
 #include "VideoPlayerScreen.h"
 
-#include "../../media/AnimationCache.h"
 #include "../../app/Navigator.h"
 #include "../../core/SpiBusLock.h"
-#include "../../ui/UiKit.h"
+#include "../../media/VideoH264.h"
+#include "../../media/VideoLegacy.h"
 
-#include <SD.h>
 #include <esp32-hal-psram.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <stdlib.h>
 #include <string.h>
 
 namespace {
-// ISO/IEC 14496-3 sampling-frequency-index table.  Keep the exact Hz values:
-// 44.1 kHz and 22.05 kHz are common in phone-shot MP4/3GP clips.
+constexpr uint16_t MaxVideoWidth = 320;
+constexpr uint16_t MaxVideoHeight = 480;
+constexpr uint8_t FrameSlots = 2;
+constexpr uint16_t IoChunkBytes = 8192;
+constexpr uint16_t PcmFrames = 512;
+constexpr uint32_t AudioRingFrames = 16384;
+constexpr uint32_t AudioStartMs = 80;
+constexpr uint32_t AudioLowMs = 80;
+constexpr uint32_t AudioTargetMs = 160;
+constexpr uint16_t MaxI2sFramesPerPass = 256;
+constexpr uint32_t WorkQuantumUs = 8000;
+constexpr uint32_t LateFrameMs = 250;
+constexpr uint32_t ForcedFrameMs = 250;
+constexpr uint32_t SnapshotIntervalMs = 100;
+constexpr uint32_t VideoWorkerStackBytes = 24576;
+constexpr uint8_t MaxAudioPacketsPerQuantum = 4;
+
+// Video workers are screen-scoped, but the state gate is process-lifetime.
+// A decoder stack fault must never turn a corrupted per-worker semaphore
+// pointer into a Core 1 LoadProhibited panic during UI polling.
+SemaphoreHandle_t VideoStreamStateMutex = nullptr;
+
+SemaphoreHandle_t videoStreamStateMutex() {
+  return VideoStreamStateMutex;
+}
+
 const uint32_t AacSampleRates[] = {
   96000, 88200, 64000, 48000, 44100, 32000, 24000,
   22050, 16000, 12000, 11025, 8000, 7350
 };
 
+class StateLock {
+public:
+  explicit StateLock(SemaphoreHandle_t mutex)
+      : _mutex(mutex), _locked(mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {}
+  ~StateLock() { if (_locked) xSemaphoreGive(_mutex); }
+  bool locked() const { return _locked; }
+private:
+  SemaphoreHandle_t _mutex;
+  bool _locked;
+};
+
 int readMp4(int64_t offset, void *buffer, size_t bytes, void *token) {
   StorageFile *file = static_cast<StorageFile *>(token);
-  if (!file || offset < 0 || offset > 0xffffffffLL || !SpiBusLock::lock(pdMS_TO_TICKS(100))) return 1;
-  bool ok = file->seek((uint32_t)offset) && file->read((uint8_t *)buffer, bytes) == bytes;
+  if (!file || offset < 0 || offset > 0xffffffffLL || !SpiBusLock::lock(pdMS_TO_TICKS(20))) return 1;
+  const bool ok = file->seek((uint32_t)offset) && file->read(buffer, bytes) == (int)bytes;
   SpiBusLock::unlock();
   return ok ? 0 : 1;
 }
@@ -45,11 +81,7 @@ const __FlashStringHelper *avcProfileName(unsigned profile) {
   switch (profile) {
     case 66: return F("Baseline");
     case 77: return F("Main");
-    case 88: return F("Extended");
     case 100: return F("High");
-    case 110: return F("High 10");
-    case 122: return F("High 4:2:2");
-    case 244: return F("High 4:4:4");
     default: return F("profile");
   }
 }
@@ -60,1209 +92,1319 @@ String objectTypeLabel(unsigned objectType) {
   if (objectType == MP4_OBJECT_TYPE_AMR_NB) return F("AMR-NB");
   if (objectType == MP4_OBJECT_TYPE_HEVC) return F("HEVC/H.265");
   if (objectType == 0x20) return F("MPEG-4 Part 2");
-  if (objectType == 0x6a) return F("MPEG-1 video");
   return String(F("object 0x")) + String(objectType, HEX);
 }
 
-String sampleEntryLabel(unsigned sampleEntry) {
-  if (!sampleEntry) return F("unknown entry");
-  String label;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    char value = (char)((sampleEntry >> shift) & 0xff);
-    label += value >= 0x20 && value <= 0x7e ? value : '?';
-  }
-  return label;
-}
-
 int comparePresentationPoints(const void *left, const void *right) {
-  const VideoPresentationPoint &a = *static_cast<const VideoPresentationPoint *>(left);
-  const VideoPresentationPoint &b = *static_cast<const VideoPresentationPoint *>(right);
-  return a.timestamp < b.timestamp ? -1 : (a.timestamp > b.timestamp ? 1 : 0);
+  const int64_t a = *static_cast<const int64_t *>(left);
+  const int64_t b = *static_cast<const int64_t *>(right);
+  return a < b ? -1 : (a > b ? 1 : 0);
 }
+}  // namespace
 
-const __FlashStringHelper *cacheResultLabel(MediaCache::Result result) {
-  switch (result) {
-    case MediaCache::Result::Complete: return F("complete");
-    case MediaCache::Result::More: return F("more");
-    case MediaCache::Result::Busy: return F("busy");
-    case MediaCache::Result::Missing: return F("missing");
-    case MediaCache::Result::Failed: return F("failed");
+class VideoStreamWorker {
+public:
+  enum class Phase : uint8_t { Idle, Opening, Buffered, Playing, Paused, Finished, Error, Stopping };
+  struct Snapshot {
+    Phase phase = Phase::Idle;
+    String status;
+    String error;
+    uint32_t durationMs = 0;
+    uint32_t elapsedMs = 0;
+    uint32_t droppedFrames = 0;
+    uint16_t sourceWidth = 0;
+    uint16_t sourceHeight = 0;
+    bool hasAudio = false;
+  };
+  struct Frame {
+    uint8_t slot = 0xff;
+    const uint16_t *pixels = nullptr;
+    uint32_t timestampMs = 0;
+    uint16_t x = 0;
+    uint16_t y = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+  };
+
+  VideoStreamWorker(SpeakerController &speaker, SecretStorage &storage,
+                    uint16_t viewportWidth, uint16_t viewportHeight)
+      : _speaker(speaker), _storage(storage), _viewportWidth(viewportWidth), _viewportHeight(viewportHeight),
+        _task(nullptr), _command(Command::None), _generation(0), _commandGeneration(0),
+        _stopGeneration(0), _stopAcknowledgedGeneration(0), _secretAccess(false),
+        _sourceSize(0), _demux(nullptr), _videoCodec(VideoCodec::None), _audioCodec(AudioCodec::None),
+        _videoTrack(0), _audioTrack(0), _videoSamples(0), _audioSamples(0), _videoSample(0), _audioSample(0),
+        _videoTimeScale(0), _audioTimeScale(0), _presentation(nullptr), _presentationCount(0),
+        _presentationIndex(0), _videoFlushed(false), _videoFinished(false), _firstVideoTimestamp(0),
+        _firstVideoTimestampSet(false), _sampleBuffer(nullptr), _sampleBufferBytes(0), _annexBuffer(nullptr),
+        _annexBufferBytes(0), _audioBuffer(nullptr), _audioBufferBytes(0), _readWindow(nullptr),
+        _readWindowStart(0), _readWindowBytes(0), _aac(nullptr), _mp3(nullptr), _amr(nullptr), _audioScratch(nullptr),
+        _audioSampleRate(0), _audioChannels(0), _audioFramesSubmitted(0), _startedAt(0), _pausedElapsedMs(0),
+        _playbackStarted(false), _pcmRing(nullptr), _pcmRead(0), _pcmWrite(0), _pcmCount(0),
+        _sourceWidth(0), _sourceHeight(0), _drawX(0), _drawY(0), _drawWidth(0), _drawHeight(0),
+        _phase(Phase::Idle), _durationMs(0), _droppedFrames(0), _presentationClockMs(0), _lastSnapshotMs(0),
+        _lastProgressLogMs(0), _lastPresentedAtMs(0), _decodedSinceLog(0), _presentedSinceLog(0),
+        _droppedSinceLog(0), _i2sZeroWrites(0), _sdReadCount(0), _sdReadBytes(0),
+        _videoDecodeUs(0), _videoDecodeCount(0), _scaleUs(0), _scaleCount(0), _audioUnderrun(false),
+        _ended(false), _slots{}, _snapshot{} {
+    for (uint8_t index = 0; index < FrameSlots; ++index) _slots[index] = {};
   }
-  return F("unknown");
-}
-}
 
-VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touch,
-                                     DisplayController &display, SdCardController &sdCard,
-                                     SpeakerController &speaker, SecretStorage &secretStorage,
-                                     MediaCache &mediaCache)
-  : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
-    _mediaCache(mediaCache),
-    _secretAccess(false), _demux(nullptr),
-    _state(State::Ready), _audioCodec(AudioCodec::None), _videoCodec(VideoCodec::None), _sdMounted(false),
-    _lastTouchDown(false), _sourceSize(0), _sourceWriteTime(0), _sourceWidth(0),
-    _sourceHeight(0), _drawWidth(0), _drawHeight(0), _drawLeft(0), _drawTop(0),
-    _videoTrack(0), _audioTrack(0), _videoSamples(0), _audioSamples(0), _videoSample(0),
-    _audioSample(0), _videoTimeScale(0), _audioTimeScale(0), _buildFrames(0),
-    _buildLastTimestamp(0), _buildLastDelay(0), _presentationTimeline(nullptr), _presentationCount(0),
-    _presentationIndex(0), _buildFlushed(false), _playFrame(0),
-    _playFrames(0), _playDelay(0), _playStartedAt(0), _nextFrameAt(0), _pauseElapsedMs(0),
-    _pauseFrameRemainingMs(0), _durationMs(0),
-    _lastDrawMs(0), _audioSampleRate(0), _audioFramesWritten(0), _audioTailStartedAt(0),
-    _audioChannels(0), _sampleBuffer(nullptr),
-    _sampleBufferBytes(0), _annexBuffer(nullptr), _annexBufferBytes(0), _pendingFrame(nullptr),
-    _hasPendingFrame(false), _playFrameBuffer(nullptr), _audioScratch(nullptr), _aac(nullptr), _mp3(nullptr),
-    _amr(nullptr) {
-}
+  ~VideoStreamWorker() { requestStop(); }
+
+  bool begin() {
+    if (_ended) return false;
+    if (_task) return true;
+    if (!VideoStreamStateMutex) VideoStreamStateMutex = xSemaphoreCreateMutex();
+    if (!VideoStreamStateMutex) return false;
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+    const BaseType_t workerCore = 0;
+#else
+    const BaseType_t workerCore = ARDUINO_RUNNING_CORE == 0 ? 1 : 0;
+#endif
+    if (xTaskCreatePinnedToCore(taskMain, "video-stream", VideoWorkerStackBytes, this, tskIDLE_PRIORITY + 1,
+                                &_task, workerCore) != pdPASS) {
+      return false;
+    }
+    return true;
+  }
+
+  bool end() {
+    if (_ended) return true;
+    SemaphoreHandle_t mutex = videoStreamStateMutex();
+    if (!mutex) return true;
+    {
+      StateLock lock(mutex);
+      if (!lock.locked()) return false;
+      if (!_stopGeneration) queueCommandLocked(Command::Stop);
+      // A task state is not an acknowledgement: a notified task can still
+      // report eBlocked until the scheduler runs it. The worker publishes this
+      // exact command generation only after cleanup, immediately before it
+      // deletes itself.
+      if (!_stopGeneration || _stopAcknowledgedGeneration != _stopGeneration) return false;
+      _ended = true;
+      _task = nullptr;
+    }
+    return true;
+  }
+
+  bool prepare(const String &path, bool secretAccess) {
+    if (_ended) return false;
+    if (!begin()) return false;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return false;
+    ++_generation;
+    if (_generation == 0) ++_generation;
+    _requestedPath = path;
+    _secretAccess = secretAccess;
+    _command = Command::Prepare;
+    _snapshot = {};
+    _snapshot.phase = Phase::Opening;
+    xTaskNotifyGive(_task);
+    return true;
+  }
+
+  void play() { command(Command::Play); }
+  void pause() { command(Command::Pause); }
+  void replay() { command(Command::Replay); }
+  void requestStop() { command(Command::Stop); }
+
+  Snapshot snapshot() const {
+    Snapshot copy;
+    if (_ended) return copy;
+    StateLock lock(videoStreamStateMutex());
+    if (lock.locked()) copy = _snapshot;
+    return copy;
+  }
+
+  bool stopped() const {
+    if (_ended || !_task) return true;
+    StateLock lock(videoStreamStateMutex());
+    return lock.locked() && _stopGeneration && _stopAcknowledgedGeneration == _stopGeneration;
+  }
+
+  bool takeFrame(Frame &frame) {
+    if (_ended) return false;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return false;
+    const uint32_t presentationClockMs = __atomic_load_n(&_presentationClockMs, __ATOMIC_ACQUIRE);
+    uint8_t selected = 0xff;
+    for (uint8_t index = 0; index < FrameSlots; ++index) {
+      if (_slots[index].state != SlotState::Ready || _slots[index].timestampMs > presentationClockMs) continue;
+      if (selected == 0xff || _slots[index].timestampMs < _slots[selected].timestampMs) selected = index;
+    }
+    if (selected == 0xff) return false;
+    _slots[selected].state = SlotState::Presenting;
+    frame = {selected, _slots[selected].pixels, _slots[selected].timestampMs,
+             _drawX, _drawY, _drawWidth, _drawHeight};
+    return true;
+  }
+
+  void releaseFrame(uint8_t slot, bool dropped) {
+    if (_ended) return;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked() || slot >= FrameSlots || _slots[slot].state != SlotState::Presenting) return;
+    _slots[slot].state = SlotState::Free;
+    if (dropped) {
+      __atomic_add_fetch(&_droppedFrames, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&_droppedSinceLog, 1, __ATOMIC_RELAXED);
+    } else {
+      __atomic_store_n(&_lastPresentedAtMs, millis(), __ATOMIC_RELEASE);
+      __atomic_add_fetch(&_presentedSinceLog, 1, __ATOMIC_RELAXED);
+    }
+  }
+
+private:
+  enum class Command : uint8_t { None, Prepare, Play, Pause, Replay, Stop };
+  enum class VideoCodec : uint8_t { None, H264, H263, Mpeg4Part2 };
+  enum class AudioCodec : uint8_t { None, Aac, Mp3, AmrNb, Unsupported };
+  enum class SlotState : uint8_t { Free, Ready, Presenting };
+  struct Slot { uint16_t *pixels = nullptr; uint32_t timestampMs = 0; SlotState state = SlotState::Free; };
+
+  SpeakerController &_speaker;
+  SecretStorage &_storage;
+  uint16_t _viewportWidth;
+  uint16_t _viewportHeight;
+  TaskHandle_t _task;
+  Command _command;
+  uint32_t _generation;
+  uint32_t _commandGeneration;
+  uint32_t _stopGeneration;
+  uint32_t _stopAcknowledgedGeneration;
+  String _requestedPath;
+  String _path;
+  bool _secretAccess;
+  uint32_t _sourceSize;
+  StorageFile _source;
+  MP4D_demux_t *_demux;
+  VideoH264 _h264;
+  VideoLegacy _legacy;
+  VideoCodec _videoCodec;
+  AudioCodec _audioCodec;
+  uint32_t _videoTrack, _audioTrack, _videoSamples, _audioSamples, _videoSample, _audioSample;
+  uint32_t _videoTimeScale, _audioTimeScale;
+  int64_t *_presentation;
+  uint32_t _presentationCount, _presentationIndex;
+  bool _videoFlushed, _videoFinished, _firstVideoTimestampSet;
+  uint32_t _firstVideoTimestamp;
+  uint8_t *_sampleBuffer, *_annexBuffer;
+  uint32_t _sampleBufferBytes, _annexBufferBytes;
+  uint8_t *_audioBuffer;
+  uint32_t _audioBufferBytes;
+  uint8_t *_readWindow;
+  uint32_t _readWindowStart, _readWindowBytes;
+  void *_aac, *_mp3, *_amr;
+  int16_t *_audioScratch;
+  uint32_t _audioSampleRate, _audioChannels, _audioFramesSubmitted, _startedAt, _pausedElapsedMs;
+  bool _playbackStarted;
+  int16_t *_pcmRing;
+  uint32_t _pcmRead, _pcmWrite, _pcmCount;
+  uint16_t _sourceWidth, _sourceHeight, _drawX, _drawY, _drawWidth, _drawHeight;
+  Phase _phase;
+  uint32_t _durationMs, _droppedFrames, _presentationClockMs, _lastSnapshotMs, _lastProgressLogMs,
+           _lastPresentedAtMs;
+  uint32_t _decodedSinceLog, _presentedSinceLog, _droppedSinceLog, _i2sZeroWrites;
+  uint32_t _sdReadCount, _sdReadBytes;
+  uint64_t _videoDecodeUs, _scaleUs;
+  uint32_t _videoDecodeCount, _scaleCount;
+  bool _audioUnderrun;
+  volatile bool _ended;
+  Slot _slots[FrameSlots];
+  Snapshot _snapshot;
+
+  const char *videoCodecName() const {
+    switch (_videoCodec) {
+      case VideoCodec::H264: return "H.264";
+      case VideoCodec::H263: return "H.263";
+      case VideoCodec::Mpeg4Part2: return "MPEG-4 Part 2";
+      default: return "none";
+    }
+  }
+
+  const char *audioCodecName() const {
+    switch (_audioCodec) {
+      case AudioCodec::Aac: return "AAC-LC";
+      case AudioCodec::Mp3: return "MP3";
+      case AudioCodec::AmrNb: return "AMR-NB";
+      default: return "none";
+    }
+  }
+
+  static void taskMain(void *context) {
+    static_cast<VideoStreamWorker *>(context)->run();
+  }
+
+  void command(Command commandValue) {
+    if (_ended || !_task) return;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return;
+    queueCommandLocked(commandValue);
+  }
+
+  void queueCommandLocked(Command commandValue) {
+    if (_command == Command::Stop && commandValue != Command::Stop) return;
+    if (commandValue == Command::Stop && _stopGeneration) return;
+    _command = commandValue;
+    ++_commandGeneration;
+    if (_commandGeneration == 0) ++_commandGeneration;
+    if (commandValue == Command::Stop) _stopGeneration = _commandGeneration;
+    Serial.printf("[Video] command=%u generation=%lu\n", static_cast<unsigned>(commandValue),
+                  static_cast<unsigned long>(_commandGeneration));
+    if (_task) xTaskNotifyGive(_task);
+  }
+
+  Command takeCommand(uint32_t &generation) {
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) { generation = 0; return Command::None; }
+    const Command result = _command;
+    generation = _commandGeneration;
+    _command = Command::None;
+    return result;
+  }
+
+  bool stopPending() const {
+    StateLock lock(videoStreamStateMutex());
+    return lock.locked() && _command == Command::Stop;
+  }
+
+  void setPhase(Phase phase, const String &status = "") {
+    if (_phase != phase) {
+      Serial.printf("[Video] phase=%u status=%s\n", static_cast<unsigned>(phase), status.c_str());
+    }
+    _phase = phase;
+    publishSnapshot(true, status);
+  }
+
+  void setError(const String &error) {
+    Serial.print(F("Video stream failure: "));
+    Serial.println(error);
+    _speaker.stop();
+    _phase = Phase::Error;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return;
+    _snapshot.phase = Phase::Error;
+    _snapshot.error = error;
+    _snapshot.status = F("Playback stopped");
+  }
+
+  void publishSnapshot(bool force = false, const String &status = "") {
+    const uint32_t now = millis();
+    if (!force && now - _lastSnapshotMs < SnapshotIntervalMs) return;
+    _lastSnapshotMs = now;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return;
+    _snapshot.phase = _phase;
+    _snapshot.durationMs = _durationMs;
+    _snapshot.elapsedMs = _phase == Phase::Paused ? _pausedElapsedMs : playbackElapsedMs(false);
+    _snapshot.droppedFrames = __atomic_load_n(&_droppedFrames, __ATOMIC_RELAXED);
+    _snapshot.sourceWidth = _sourceWidth;
+    _snapshot.sourceHeight = _sourceHeight;
+    _snapshot.hasAudio = _audioCodec != AudioCodec::None && _audioSamples != 0;
+    if (status.length()) _snapshot.status = status;
+  }
+
+  void run() {
+    for (;;) {
+      uint32_t generation = 0;
+      const Command pending = takeCommand(generation);
+      if (pending == Command::Stop) {
+        stopAndExit(generation);
+        return;
+      }
+      if (pending != Command::None) handleCommand(pending);
+      if (_phase == Phase::Playing) {
+        pump();
+      } else {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+      }
+    }
+  }
+
+  void handleCommand(Command commandValue) {
+    switch (commandValue) {
+      case Command::Prepare:
+      case Command::Replay:
+        cleanup();
+        prepareSource();
+        break;
+      case Command::Play:
+        if (_phase == Phase::Buffered || _phase == Phase::Paused) beginPlayback();
+        break;
+      case Command::Pause:
+        if (_phase == Phase::Playing) {
+          _pausedElapsedMs = playbackElapsedMs(false);
+          if (_audioCodec != AudioCodec::None && !_speaker.pauseOutput()) {
+            Serial.printf("[Video] audio pause failed: %s\n", _speaker.lastError().c_str());
+            disableAudio(F("Audio unavailable"));
+          }
+          Serial.printf("[Video] paused at=%lu\n", static_cast<unsigned long>(_pausedElapsedMs));
+          setPhase(Phase::Paused, F("Paused"));
+        }
+        break;
+      case Command::Stop:
+        // Stop is handled in run() so the task can acknowledge it and exit.
+        break;
+      case Command::None:
+        break;
+    }
+  }
+
+  void stopAndExit(uint32_t generation) {
+    setPhase(Phase::Stopping, F("Closing"));
+    cleanup();
+    {
+      StateLock lock(videoStreamStateMutex());
+      if (lock.locked()) {
+        _snapshot.phase = Phase::Idle;
+        _stopAcknowledgedGeneration = generation;
+      }
+    }
+    // Do not access worker state after the acknowledgement: the UI may now
+    // release the worker and its mutex. This task owns no further resources.
+    vTaskDelete(nullptr);
+  }
+
+  bool prepareSource() {
+    setPhase(Phase::Opening, F("Opening video"));
+    if (!psramFound()) { setError(F("Video needs PSRAM")); return false; }
+    bool havePath = false;
+    {
+      StateLock lock(videoStreamStateMutex());
+      if (lock.locked() && _requestedPath.length()) {
+        _path = _requestedPath;
+        havePath = true;
+      }
+    }
+    if (!havePath) { setError(F("No video selected")); return false; }
+    _source = _storage.open(_path, FILE_READ, _secretAccess);
+    _sourceSize = _source ? (uint32_t)_source.size() : 0;
+    if (!_source || _sourceSize < 12) { setError(F("Unable to open video")); return false; }
+    _demux = new MP4D_demux_t();
+    if (!_demux || !MP4D_open(_demux, readMp4, &_source, _sourceSize)) {
+      setError(F("Invalid MP4/3GP container")); return false;
+    }
+    if (!inspectTracks() || !preparePresentationTimeline() || !allocateSlots() || !beginVideoDecoder() ||
+        !initAudioDecoder() || !primeAudio()) return false;
+    // Decode until both slots are ready before exposing the play action. This
+    // is deliberately source-direct: no cache is read or written.
+    while (readySlots() < FrameSlots && !_videoFinished) {
+      if (!decodeOneVideo()) return false;
+    }
+    if (!readySlots()) { setError(F("Video contains no displayable frames")); return false; }
+    Serial.printf("[Video] buffered frames=%u audioPrebuffer=%lu\n", readySlots(),
+                  static_cast<unsigned long>(_pcmCount));
+    setPhase(Phase::Buffered, _audioCodec == AudioCodec::None ? F("Ready") : F("Buffered"));
+    return true;
+  }
+
+  bool inspectTracks() {
+    bool videoFound = false;
+    String unsupported;
+    for (unsigned index = 0; index < _demux->track_count; ++index) {
+      const MP4D_track_t &track = _demux->track[index];
+      if (!videoFound && track.handler_type == MP4D_HANDLER_TYPE_VIDE) {
+        VideoCodec codec = VideoCodec::None;
+        if (track.object_type_indication == MP4_OBJECT_TYPE_AVC) codec = VideoCodec::H264;
+        else if (track.object_type_indication == MP4_OBJECT_TYPE_H263) codec = VideoCodec::H263;
+        else if (track.object_type_indication == 0x20) codec = VideoCodec::Mpeg4Part2;
+        else { unsupported = objectTypeLabel(track.object_type_indication); continue; }
+        if (codec == VideoCodec::H264 &&
+            (!track.dsi_bytes || track.avc_nal_length_size < 1 || track.avc_nal_length_size > 4 ||
+             (track.avc_profile != 66 && track.avc_profile != 77 && track.avc_profile != 100))) {
+          setError(track.avc_profile ? String(F("H.264 ")) + avcProfileName(track.avc_profile) +
+                                      F(" unsupported") : String(F("Invalid H.264 config")));
+          return false;
+        }
+        if (codec == VideoCodec::H263 && (!track.dsi || track.dsi_bytes < 7)) {
+          setError(F("Malformed H.263 config")); return false;
+        }
+        const uint16_t width = (uint16_t)track.SampleDescription.video.width;
+        const uint16_t height = (uint16_t)track.SampleDescription.video.height;
+        if (!width || !height || width > MaxVideoWidth || height > MaxVideoHeight) {
+          setError(String(F("Video ")) + width + 'x' + height + F(" exceeds\n320x480 maximum"));
+          return false;
+        }
+        _videoCodec = codec;
+        _videoTrack = index;
+        _videoSamples = track.sample_count;
+        _videoTimeScale = track.timescale;
+        videoFound = _videoSamples && _videoTimeScale;
+        _sourceWidth = width;
+        _sourceHeight = height;
+        _durationMs = track.duration_lo ? timestampMs(track.duration_lo, _videoTimeScale) : 0;
+      } else if (_audioCodec == AudioCodec::None && track.handler_type == MP4D_HANDLER_TYPE_SOUN) {
+        _audioTrack = index;
+        _audioSamples = track.sample_count;
+        _audioTimeScale = track.timescale;
+        _audioChannels = track.SampleDescription.audio.channelcount;
+        if (track.object_type_indication == MP4_OBJECT_TYPE_AUDIO_ISO_IEC_14496_3 && parseAacConfig()) {
+          _audioCodec = AudioCodec::Aac;
+        } else if (track.object_type_indication == 0x6b) {
+          _audioCodec = AudioCodec::Mp3;
+        } else if (track.object_type_indication == MP4_OBJECT_TYPE_AMR_NB) {
+          _audioCodec = AudioCodec::AmrNb;
+          _audioSampleRate = 8000;
+          _audioChannels = 1;
+        } else {
+          _audioCodec = AudioCodec::Unsupported;
+        }
+      }
+    }
+    if (!videoFound) { setError(unsupported.length() ? String(F("Unsupported video\n")) + unsupported
+                                                       : String(F("No video track found"))); return false; }
+    if (_audioCodec == AudioCodec::Unsupported) _audioCodec = AudioCodec::None;
+    Serial.printf("[Video] metadata video=%s %ux%u samples=%lu timescale=%lu audio=%s samples=%lu timescale=%lu rate=%lu channels=%lu duration=%lu\n",
+                  videoCodecName(), _sourceWidth, _sourceHeight,
+                  static_cast<unsigned long>(_videoSamples), static_cast<unsigned long>(_videoTimeScale),
+                  audioCodecName(), static_cast<unsigned long>(_audioSamples), static_cast<unsigned long>(_audioTimeScale),
+                  static_cast<unsigned long>(_audioSampleRate), static_cast<unsigned long>(_audioChannels),
+                  static_cast<unsigned long>(_durationMs));
+    publishSnapshot(true);
+    return true;
+  }
+
+  bool parseAacConfig() {
+    if (!_demux || _audioTrack >= _demux->track_count) return false;
+    const MP4D_track_t &track = _demux->track[_audioTrack];
+    if (!track.dsi || track.dsi_bytes < 2) return false;
+    const uint8_t objectType = track.dsi[0] >> 3;
+    const uint8_t rateIndex = (uint8_t)(((track.dsi[0] & 0x07) << 1) | (track.dsi[1] >> 7));
+    const uint8_t channels = (track.dsi[1] >> 3) & 0x0f;
+    if (objectType != 2 || rateIndex >= sizeof(AacSampleRates) / sizeof(AacSampleRates[0]) ||
+        channels < 1 || channels > 2) return false;
+    _audioSampleRate = AacSampleRates[rateIndex];
+    _audioChannels = channels;
+    return true;
+  }
+
+  bool preparePresentationTimeline() {
+    if (!_demux || !_videoSamples || !_videoTimeScale) return false;
+    const size_t bytes = (size_t)_videoSamples * sizeof(int64_t);
+    if (bytes / sizeof(int64_t) != _videoSamples) { setError(F("Video timeline too large")); return false; }
+    _presentation = static_cast<int64_t *>(ps_malloc(bytes));
+    if (!_presentation) { setError(F("Video needs more PSRAM")); return false; }
+    for (uint32_t sample = 0; sample < _videoSamples; ++sample)
+      _presentation[sample] = MP4D_frame_presentation_timestamp(_demux, _videoTrack, sample);
+    qsort(_presentation, _videoSamples, sizeof(int64_t), comparePresentationPoints);
+    _presentationCount = _videoSamples;
+    _presentationIndex = 0;
+    return true;
+  }
+
+  bool allocateSlots() {
+    _drawWidth = _viewportWidth;
+    _drawHeight = _viewportHeight;
+    _drawX = _drawY = 0;
+    if ((uint32_t)_sourceWidth * _viewportHeight > (uint32_t)_sourceHeight * _viewportWidth) {
+      _drawHeight = max<uint32_t>(1, ((uint32_t)_sourceHeight * _viewportWidth) / _sourceWidth);
+      _drawY = (_viewportHeight - _drawHeight) / 2;
+    } else {
+      _drawWidth = max<uint32_t>(1, ((uint32_t)_sourceWidth * _viewportHeight) / _sourceHeight);
+      _drawX = (_viewportWidth - _drawWidth) / 2;
+    }
+    const size_t bytes = (size_t)_drawWidth * _drawHeight * sizeof(uint16_t);
+    for (uint8_t index = 0; index < FrameSlots; ++index) {
+      _slots[index].pixels = static_cast<uint16_t *>(ps_malloc(bytes));
+      if (!_slots[index].pixels) { setError(F("Video frame buffers need more PSRAM")); return false; }
+      _slots[index].state = SlotState::Free;
+    }
+    Serial.printf("[Video] presentation rect=%u,%u %ux%u slotBytes=%lu\n", _drawX, _drawY,
+                  _drawWidth, _drawHeight, static_cast<unsigned long>(bytes));
+    return true;
+  }
+
+  bool beginVideoDecoder() {
+    if (_videoCodec == VideoCodec::H264) {
+      if (!_h264.begin(MaxVideoWidth, MaxVideoHeight)) { setError(_h264.lastError()); return false; }
+    } else {
+      const MP4D_track_t &track = _demux->track[_videoTrack];
+      const VideoLegacy::Codec codec = _videoCodec == VideoCodec::H263 ? VideoLegacy::Codec::H263
+                                                                          : VideoLegacy::Codec::Mpeg4Part2;
+      const uint8_t *configuration = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi : nullptr;
+      const uint32_t configurationBytes = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi_bytes : 0;
+      if (!_legacy.begin(codec, MaxVideoWidth, MaxVideoHeight, configuration, configurationBytes)) {
+        setError(_legacy.lastError()); return false;
+      }
+    }
+    return true;
+  }
+
+  bool beginPlayback() {
+    const bool resuming = _playbackStarted;
+    if (_audioCodec != AudioCodec::None) {
+      const bool audioReady = resuming ? _speaker.resumeOutput() : _speaker.start(_audioSampleRate);
+      if (!audioReady) {
+        Serial.printf("[Video] audio %s failed: %s\n", resuming ? "resume" : "start",
+                      _speaker.lastError().c_str());
+        disableAudio(F("Audio unavailable"));
+      }
+    }
+    if (resuming) {
+      _startedAt = millis() - _pausedElapsedMs;
+    } else {
+      _startedAt = millis();
+      _audioFramesSubmitted = 0;
+      _playbackStarted = true;
+    }
+    Serial.printf("[Video] play resume=%s audio=%s rate=%lu prebuffer=%lu\n", resuming ? "yes" : "no", audioCodecName(),
+                  static_cast<unsigned long>(_audioSampleRate), static_cast<unsigned long>(_pcmCount));
+    setPhase(Phase::Playing, F("Playing"));
+    return true;
+  }
+
+  bool initAudioDecoder() {
+    releaseAudioDecoder();
+    if (_audioCodec == AudioCodec::None) return true;
+    if (_audioCodec == AudioCodec::Aac) {
+      _aac = AACInitDecoder();
+      if (_aac) {
+        AACFrameInfo info{};
+        info.nChans = _audioChannels;
+        info.sampRateCore = _audioSampleRate;
+        info.profile = AAC_PROFILE_LC;
+        if (AACSetRawBlockParams((HAACDecoder)_aac, 0, &info) != ERR_AAC_NONE) _aac = nullptr;
+      }
+    } else if (_audioCodec == AudioCodec::Mp3) {
+      _mp3 = malloc(sizeof(mp3dec_t));
+      if (_mp3) mp3dec_init(static_cast<mp3dec_t *>(_mp3));
+    } else if (_audioCodec == AudioCodec::AmrNb) {
+      _amr = Decoder_Interface_init();
+    }
+    if ((_audioCodec == AudioCodec::Aac && !_aac) || (_audioCodec == AudioCodec::Mp3 && !_mp3) ||
+        (_audioCodec == AudioCodec::AmrNb && !_amr)) {
+      setError(F("Audio decoder unavailable"));
+      return false;
+    }
+    return true;
+  }
+
+  bool primeAudio() {
+    if (_audioCodec == AudioCodec::None || !_audioSamples) return true;
+    _pcmRing = static_cast<int16_t *>(ps_malloc(AudioRingFrames * sizeof(int16_t)));
+    if (!_pcmRing) {
+      setError(F("Audio buffer needs more PSRAM"));
+      return false;
+    }
+    _pcmRead = _pcmWrite = _pcmCount = 0;
+    while (_audioSample < _audioSamples && (!_audioSampleRate ||
+           ringFillMs() < AudioStartMs)) {
+      const uint32_t before = _audioSample;
+      if (!decodeNextAudioPacket() || _audioSample == before) break;
+    }
+    if (!_pcmCount) disableAudio(F("Audio unavailable"));
+    return true;
+  }
+
+  void pump() {
+    const uint32_t quantumStartedUs = micros();
+    uint32_t generation = 0;
+    const Command pending = takeCommand(generation);
+    if (pending == Command::Stop) { stopAndExit(generation); return; }
+    if (pending != Command::None) { handleCommand(pending); return; }
+    const uint32_t elapsed = playbackElapsedMs(false);
+    __atomic_store_n(&_presentationClockMs, elapsed, __ATOMIC_RELEASE);
+    if (_audioCodec != AudioCodec::None) {
+      drainPcmToI2s();
+      refillAudio(elapsed);
+    }
+    if (!_videoFinished && freeSlots()) {
+      const uint32_t decodeStartedUs = micros();
+      if (!decodeOneVideo()) return;
+      _videoDecodeUs += micros() - decodeStartedUs;
+      ++_videoDecodeCount;
+      ++_decodedSinceLog;
+    }
+    if (_audioCodec != AudioCodec::None && (uint32_t)(micros() - quantumStartedUs) < WorkQuantumUs) {
+      drainPcmToI2s();
+    }
+    updateUnderrunStatus();
+    publishSnapshot();
+    logPerformance(elapsed);
+    const bool audioFinished = _audioCodec == AudioCodec::None ||
+                               (_audioSample >= _audioSamples && _pcmCount == 0 &&
+                                playbackElapsedMs(false) >= submittedAudioMs());
+    if (_videoFinished && audioFinished) {
+      _speaker.stop();
+      setPhase(Phase::Finished, F("Finished"));
+      return;
+    }
+    // A one-tick block also protects IDLE0 when the TFT has both slots and I2S
+    // is applying backpressure; taskYIELD alone cannot run a lower-priority
+    // idle task and previously allowed the watchdog to fire.
+    vTaskDelay(1);
+  }
+
+  bool decodeOneVideo() {
+    if (_videoSample >= _videoSamples) {
+      if (!_videoFlushed) {
+        _videoFlushed = true;
+        const bool flushed = _videoCodec == VideoCodec::H264 ? _h264.flush(decodedFrame, this)
+                                                              : _legacy.flush(decodedFrame, this);
+        if (!flushed) { setError(_videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError()); return false; }
+      }
+      _videoFinished = true;
+      return true;
+    }
+    uint32_t bytes = 0, timestamp = 0, duration = 0;
+    if (!readSample(_videoTrack, _videoSample, bytes, timestamp, duration)) {
+      setError(F("Video sample read failed")); return false;
+    }
+    bool decoded = false;
+    if (_videoCodec == VideoCodec::H264) {
+      uint32_t annexBytes = 0;
+      decoded = buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes) &&
+                _h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this);
+    } else {
+      decoded = _legacy.decode(_sampleBuffer, bytes, _videoSample, decodedFrame, this);
+    }
+    if (!decoded) { setError(_videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError()); return false; }
+    ++_videoSample;
+    return true;
+  }
+
+  static bool decodedFrame(const VideoH264::Frame &frame, void *context) {
+    return context && static_cast<VideoStreamWorker *>(context)->captureFrame(frame);
+  }
+
+  bool captureFrame(const VideoH264::Frame &frame) {
+    if (!_presentation || _presentationIndex >= _presentationCount || !frame.y || !frame.u || !frame.v ||
+        frame.width != _sourceWidth || frame.height != _sourceHeight ||
+        frame.yStride < frame.width || frame.uStride < (frame.width + 1) / 2 || frame.vStride < (frame.width + 1) / 2) {
+      return false;
+    }
+    const int64_t rawTimestamp = _presentation[_presentationIndex++];
+    const uint32_t timestamp = presentationTimestampMs(rawTimestamp, _videoTimeScale);
+    if (!_firstVideoTimestampSet) { _firstVideoTimestampSet = true; _firstVideoTimestamp = timestamp; }
+    const uint32_t relativeTimestamp = timestamp - _firstVideoTimestamp;
+    // Decode reference frames to keep the codec healthy, but skip their
+    // expensive RGB conversion when they are already behind the audio clock.
+    // This lets a slow software decoder catch up instead of converting frames
+    // that the UI would immediately discard.
+    const uint32_t now = millis();
+    const bool overdueForPresentation =
+      now - __atomic_load_n(&_lastPresentedAtMs, __ATOMIC_ACQUIRE) >= ForcedFrameMs;
+    if (_phase == Phase::Playing && !overdueForPresentation &&
+        (int32_t)(playbackElapsedMs(false) - relativeTimestamp) > (int32_t)LateFrameMs) {
+      __atomic_add_fetch(&_droppedFrames, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&_droppedSinceLog, 1, __ATOMIC_RELAXED);
+      return true;
+    }
+    uint8_t slot = 0xff;
+    for (;;) {
+      {
+        StateLock lock(videoStreamStateMutex());
+        if (lock.locked()) {
+          for (uint8_t index = 0; index < FrameSlots; ++index) {
+            if (_slots[index].state == SlotState::Free) { slot = index; _slots[index].state = SlotState::Presenting; break; }
+          }
+        }
+      }
+      if (slot != 0xff) break;
+      if (stopPending()) return false;
+      vTaskDelay(1);
+    }
+    const uint32_t scaleStartedUs = micros();
+    scaleFrame(frame, _slots[slot].pixels);
+    _scaleUs += micros() - scaleStartedUs;
+    ++_scaleCount;
+    {
+      StateLock lock(videoStreamStateMutex());
+      if (!lock.locked()) return false;
+      _slots[slot].timestampMs = relativeTimestamp;
+      _slots[slot].state = SlotState::Ready;
+    }
+    return true;
+  }
+
+  void scaleFrame(const VideoH264::Frame &frame, uint16_t *destination) {
+    const uint32_t sourceW = frame.width, sourceH = frame.height;
+    const uint32_t xStep = (sourceW << 16) / _drawWidth;
+    const uint32_t yStep = (sourceH << 16) / _drawHeight;
+    uint32_t sourceYFixed = 0;
+    for (uint32_t y = 0; y < _drawHeight; ++y) {
+      // 16.16 nearest-neighbour mapping keeps aspect ratio without division
+      // in the pixel loop. This is materially faster on ESP32-S3.
+      const uint32_t sourceY = min<uint32_t>(sourceH - 1, sourceYFixed >> 16);
+      uint32_t sourceXFixed = 0;
+      for (uint32_t x = 0; x < _drawWidth; ++x) {
+        const uint32_t sourceX = min<uint32_t>(sourceW - 1, sourceXFixed >> 16);
+        const int c = frame.y[sourceY * frame.yStride + sourceX] - 16;
+        const int d = frame.u[(sourceY / 2) * frame.uStride + sourceX / 2] - 128;
+        const int e = frame.v[(sourceY / 2) * frame.vStride + sourceX / 2] - 128;
+        const uint8_t r = clampChannel((298 * c + 409 * e + 128) >> 8);
+        const uint8_t g = clampChannel((298 * c - 100 * d - 208 * e + 128) >> 8);
+        const uint8_t b = clampChannel((298 * c + 516 * d + 128) >> 8);
+        destination[y * _drawWidth + x] = ((uint16_t)(r & 0xf8) << 8) |
+                                          ((uint16_t)(g & 0xfc) << 3) | (b >> 3);
+        sourceXFixed += xStep;
+      }
+      sourceYFixed += yStep;
+    }
+  }
+
+  bool decodeNextAudioPacket() {
+    if (_audioSample >= _audioSamples || !_demux) return true;
+    uint32_t bytes = 0, timestamp = 0, duration = 0;
+    if (!readAudioSample(bytes, timestamp, duration)) {
+      Serial.printf("[Video] audio read failed sample=%lu codec=%s error=%s\n",
+                    static_cast<unsigned long>(_audioSample), audioCodecName(), _speaker.lastError().c_str());
+      disableAudio(F("Audio unavailable"));
+      return false;
+    }
+    if (!decodeAudio(_audioBuffer, bytes)) {
+      // Compressed samples are independently framed. A malformed packet is
+      // skipped, while I2S backpressure never reaches this decoder path.
+      Serial.printf("[Video] audio decode skipped sample=%lu codec=%s bytes=%lu toc=0x%02x error=%s\n",
+                    static_cast<unsigned long>(_audioSample), audioCodecName(), static_cast<unsigned long>(bytes),
+                    bytes ? _audioBuffer[0] : 0, _speaker.lastError().c_str());
+      ++_audioSample;
+      return true;
+    }
+    ++_audioSample;
+    return true;
+  }
+
+  void refillAudio(uint32_t elapsedMs) {
+    if (!_pcmRing || !_audioSampleRate || ringFillMs() >= AudioLowMs) return;
+    for (uint8_t packet = 0; packet < MaxAudioPacketsPerQuantum &&
+                              _audioCodec != AudioCodec::None && _audioSample < _audioSamples; ++packet) {
+      const uint32_t bufferedEndMs = submittedAudioMs() + ringFillMs();
+      if (ringFillMs() >= AudioTargetMs && bufferedEndMs >= elapsedMs + AudioTargetMs) break;
+      const uint32_t before = _audioSample;
+      if (!decodeNextAudioPacket() || _audioSample == before) break;
+    }
+  }
+
+  void drainPcmToI2s() {
+    if (!_pcmRing || !_pcmCount || !_speaker.isReady()) return;
+    uint32_t count = min<uint32_t>(_pcmCount, AudioRingFrames - _pcmRead);
+    count = min<uint32_t>(count, MaxI2sFramesPerPass);
+    const size_t written = _speaker.tryWritePcm16(_pcmRing + _pcmRead, count);
+    if (!written) {
+      ++_i2sZeroWrites;
+      return;
+    }
+    _pcmRead = (_pcmRead + written) % AudioRingFrames;
+    _pcmCount -= written;
+    _audioFramesSubmitted += written;
+  }
+
+  bool decodeAudio(const uint8_t *bytes, uint32_t length) {
+    if (_audioCodec == AudioCodec::Aac) return decodeAac(bytes, length);
+    if (_audioCodec == AudioCodec::Mp3) return decodeMp3(bytes, length);
+    return _audioCodec == AudioCodec::AmrNb && decodeAmr(bytes, length);
+  }
+
+  bool writeMono(const int16_t *samples, uint32_t frames, uint8_t channels) {
+    if (!samples || !frames || channels < 1 || channels > 2 || !_pcmRing ||
+        frames > AudioRingFrames - _pcmCount) return false;
+    int16_t pcm[PcmFrames];
+    for (uint32_t start = 0; start < frames; ) {
+      const uint16_t count = frames - start > PcmFrames ? PcmFrames : (uint16_t)(frames - start);
+      for (uint16_t i = 0; i < count; ++i) {
+        int32_t value = samples[(start + i) * channels];
+        if (channels == 2) value = (value + samples[(start + i) * 2 + 1]) / 2;
+        pcm[i] = (int16_t)value;
+      }
+      const uint32_t first = min<uint32_t>(count, AudioRingFrames - _pcmWrite);
+      memcpy(_pcmRing + _pcmWrite, pcm, first * sizeof(int16_t));
+      if (first < count) memcpy(_pcmRing, pcm + first, (count - first) * sizeof(int16_t));
+      _pcmWrite = (_pcmWrite + count) % AudioRingFrames;
+      _pcmCount += count;
+      start += count;
+    }
+    return true;
+  }
+
+  bool decodeAac(const uint8_t *bytes, uint32_t length) {
+    if (!_aac || !bytes || !length) return false;
+    if (!_audioScratch) _audioScratch = static_cast<int16_t *>(ps_malloc(2048 * sizeof(int16_t)));
+    if (!_audioScratch) return false;
+    unsigned char *input = const_cast<unsigned char *>(bytes);
+    int remaining = (int)length;
+    if (AACDecode((HAACDecoder)_aac, &input, &remaining, _audioScratch) != ERR_AAC_NONE) return false;
+    AACFrameInfo info{};
+    AACGetLastFrameInfo((HAACDecoder)_aac, &info);
+    if (info.nChans < 1 || info.nChans > 2 || info.outputSamps < info.nChans) return false;
+    if (_audioSampleRate != (uint32_t)info.sampRateOut) {
+      _audioSampleRate = info.sampRateOut;
+      if (_playbackStarted && !_speaker.setSampleRate(_audioSampleRate)) return false;
+    }
+    return writeMono(_audioScratch, info.outputSamps / info.nChans, info.nChans);
+  }
+
+  bool decodeMp3(const uint8_t *bytes, uint32_t length) {
+    if (!_mp3 || !bytes || !length) return false;
+    if (!_audioScratch) _audioScratch = static_cast<int16_t *>(ps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t)));
+    if (!_audioScratch) return false;
+    mp3dec_frame_info_t info{};
+    const int frames = mp3dec_decode_frame(static_cast<mp3dec_t *>(_mp3), bytes, (int)length, _audioScratch, &info);
+    if (frames <= 0 || info.channels < 1 || info.channels > 2 || !info.hz) return false;
+    if (_audioSampleRate != (uint32_t)info.hz) {
+      _audioSampleRate = info.hz;
+      if (_playbackStarted && !_speaker.setSampleRate(_audioSampleRate)) return false;
+    }
+    return writeMono(_audioScratch, frames, info.channels);
+  }
+
+  bool decodeAmr(const uint8_t *bytes, uint32_t length) {
+    static const uint8_t FrameBytes[] = {13, 14, 16, 18, 20, 21, 27, 32, 6};
+    if (!_amr || !bytes || !length) return false;
+    if (!_audioScratch) _audioScratch = static_cast<int16_t *>(ps_malloc(160 * sizeof(int16_t)));
+    if (!_audioScratch) return false;
+    uint32_t offset = 0;
+    while (offset < length) {
+      const uint8_t type = (bytes[offset] >> 3) & 0x0f;
+      if (type <= 8) {
+        const uint8_t frameBytes = FrameBytes[type];
+        if (frameBytes > length - offset) {
+          Serial.printf("[Video] AMR truncation sample=%lu type=%u bytes=%lu offset=%lu\n",
+                        static_cast<unsigned long>(_audioSample), type, static_cast<unsigned long>(length),
+                        static_cast<unsigned long>(offset));
+          return false;
+        }
+        Decoder_Interface_Decode(_amr, bytes + offset, _audioScratch, 0);
+        if (!writeMono(_audioScratch, 160, 1)) return false;
+        offset += frameBytes;
+        continue;
+      }
+      // RFC 3267 no-data and reserved modes carry no usable speech for the
+      // narrowband decoder. Preserve the audio timeline with one silence
+      // frame rather than disabling the complete track.
+      if (type >= 9 && type <= 15) {
+        memset(_audioScratch, 0, 160 * sizeof(*_audioScratch));
+        if (!writeMono(_audioScratch, 160, 1)) return false;
+        ++offset;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool readSample(uint32_t track, uint32_t sample, uint32_t &bytes, uint32_t &timestamp, uint32_t &duration) {
+    bytes = timestamp = duration = 0;
+    if (!_demux || track >= _demux->track_count) return false;
+    if (sample >= _demux->track[track].sample_count) return false;
+    unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
+    const MP4D_file_offset_t offset = MP4D_frame_offset(_demux, track, sample, &sampleBytes,
+                                                         &sampleTimestamp, &sampleDuration);
+    if (!sampleBytes || offset > 0xffffffffULL || !ensureSampleBuffer(sampleBytes)) return false;
+    const bool ok = readSource((uint32_t)offset, _sampleBuffer, sampleBytes);
+    bytes = sampleBytes;
+    timestamp = sampleTimestamp;
+    duration = sampleDuration;
+    return ok;
+  }
+
+  bool ensureSampleBuffer(uint32_t bytes) {
+    if (bytes <= _sampleBufferBytes) return true;
+    uint8_t *replacement = static_cast<uint8_t *>(ps_malloc(bytes));
+    if (!replacement) return false;
+    free(_sampleBuffer);
+    _sampleBuffer = replacement;
+    _sampleBufferBytes = bytes;
+    return true;
+  }
+
+  bool ensureAnnexBuffer(uint32_t bytes) {
+    if (bytes <= _annexBufferBytes) return true;
+    uint8_t *replacement = static_cast<uint8_t *>(ps_malloc(bytes));
+    if (!replacement) return false;
+    free(_annexBuffer);
+    _annexBuffer = replacement;
+    _annexBufferBytes = bytes;
+    return true;
+  }
+
+  bool readAudioSample(uint32_t &bytes, uint32_t &timestamp, uint32_t &duration) {
+    bytes = timestamp = duration = 0;
+    if (!_demux || _audioTrack >= _demux->track_count || _audioSample >= _demux->track[_audioTrack].sample_count) return false;
+    unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
+    const MP4D_file_offset_t offset = MP4D_frame_offset(_demux, _audioTrack, _audioSample, &sampleBytes,
+                                                         &sampleTimestamp, &sampleDuration);
+    if (!sampleBytes || offset > 0xffffffffULL || !ensureAudioBuffer(sampleBytes)) return false;
+    const bool ok = readSource((uint32_t)offset, _audioBuffer, sampleBytes);
+    bytes = sampleBytes;
+    timestamp = sampleTimestamp;
+    duration = sampleDuration;
+    return ok;
+  }
+
+  bool ensureAudioBuffer(uint32_t bytes) {
+    if (bytes <= _audioBufferBytes) return true;
+    uint8_t *replacement = static_cast<uint8_t *>(ps_malloc(bytes));
+    if (!replacement) return false;
+    free(_audioBuffer);
+    _audioBuffer = replacement;
+    _audioBufferBytes = bytes;
+    return true;
+  }
+
+  bool readSource(uint32_t offset, uint8_t *destination, uint32_t bytes) {
+    if (!destination || !bytes || offset > _sourceSize || bytes > _sourceSize - offset) return false;
+    if (_readWindow && offset >= _readWindowStart &&
+        offset + bytes <= _readWindowStart + _readWindowBytes) {
+      memcpy(destination, _readWindow + (offset - _readWindowStart), bytes);
+      return true;
+    }
+    if (bytes <= IoChunkBytes) {
+      if (!_readWindow) _readWindow = static_cast<uint8_t *>(ps_malloc(IoChunkBytes));
+      if (!_readWindow) return false;
+      const uint32_t refillBytes = min<uint32_t>(IoChunkBytes, _sourceSize - offset);
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
+      const bool ok = _source.seek(offset) && _source.read(_readWindow, refillBytes) == (int)refillBytes;
+      SpiBusLock::unlock();
+      if (!ok) { _readWindowBytes = 0; return false; }
+      _readWindowStart = offset;
+      _readWindowBytes = refillBytes;
+      ++_sdReadCount;
+      _sdReadBytes += refillBytes;
+      memcpy(destination, _readWindow, bytes);
+      return true;
+    }
+    _readWindowBytes = 0;
+    uint32_t copied = 0;
+    while (copied < bytes) {
+      const uint32_t chunk = min<uint32_t>(IoChunkBytes, bytes - copied);
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
+      const bool ok = _source.seek(offset + copied) &&
+                      _source.read(destination + copied, chunk) == (int)chunk;
+      SpiBusLock::unlock();
+      if (!ok) return false;
+      ++_sdReadCount;
+      _sdReadBytes += chunk;
+      copied += chunk;
+      taskYIELD();
+    }
+    return true;
+  }
+
+  bool buildAnnexB(const uint8_t *sample, uint32_t bytes, bool includeParameters, uint32_t &outputBytes) {
+    outputBytes = 0;
+    if (!_demux || !sample || _videoTrack >= _demux->track_count) return false;
+    const MP4D_track_t &track = _demux->track[_videoTrack];
+    const uint8_t lengthBytes = track.avc_nal_length_size;
+    uint32_t required = 0;
+    if (includeParameters) {
+      for (unsigned index = 0; ; ++index) {
+        int size = 0; const uint8_t *sps = static_cast<const uint8_t *>(MP4D_read_sps(_demux, _videoTrack, index, &size));
+        if (!sps || size <= 0) break; required += 4 + size;
+      }
+      for (unsigned index = 0; ; ++index) {
+        int size = 0; const uint8_t *pps = static_cast<const uint8_t *>(MP4D_read_pps(_demux, _videoTrack, index, &size));
+        if (!pps || size <= 0) break; required += 4 + size;
+      }
+    }
+    for (uint32_t offset = 0; offset + lengthBytes <= bytes; ) {
+      uint32_t size = 0;
+      for (uint8_t index = 0; index < lengthBytes; ++index) size = (size << 8) | sample[offset + index];
+      offset += lengthBytes;
+      if (size > bytes - offset) return false;
+      required += 4 + size;
+      offset += size;
+    }
+    if (!ensureAnnexBuffer(required)) return false;
+    uint32_t output = 0;
+    auto append = [&](const uint8_t *data, uint32_t size) {
+      _annexBuffer[output++] = 0; _annexBuffer[output++] = 0; _annexBuffer[output++] = 0; _annexBuffer[output++] = 1;
+      memcpy(_annexBuffer + output, data, size); output += size;
+    };
+    if (includeParameters) {
+      for (unsigned index = 0; ; ++index) { int size = 0; const uint8_t *sps = static_cast<const uint8_t *>(MP4D_read_sps(_demux, _videoTrack, index, &size)); if (!sps || size <= 0) break; append(sps, size); }
+      for (unsigned index = 0; ; ++index) { int size = 0; const uint8_t *pps = static_cast<const uint8_t *>(MP4D_read_pps(_demux, _videoTrack, index, &size)); if (!pps || size <= 0) break; append(pps, size); }
+    }
+    for (uint32_t offset = 0; offset + lengthBytes <= bytes; ) {
+      uint32_t size = 0; for (uint8_t index = 0; index < lengthBytes; ++index) size = (size << 8) | sample[offset + index];
+      offset += lengthBytes; append(sample + offset, size); offset += size;
+    }
+    outputBytes = output;
+    return true;
+  }
+
+  uint8_t readySlots() const {
+    uint8_t ready = 0;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return 0;
+    for (uint8_t index = 0; index < FrameSlots; ++index) if (_slots[index].state == SlotState::Ready) ++ready;
+    return ready;
+  }
+
+  uint8_t freeSlots() const {
+    uint8_t freeSlots = 0;
+    StateLock lock(videoStreamStateMutex());
+    if (!lock.locked()) return 0;
+    for (uint8_t index = 0; index < FrameSlots; ++index) if (_slots[index].state == SlotState::Free) ++freeSlots;
+    return freeSlots;
+  }
+
+  uint32_t ringFillMs() const {
+    return _audioSampleRate ? (uint32_t)(((uint64_t)_pcmCount * 1000UL) / _audioSampleRate) : 0;
+  }
+
+  uint32_t submittedAudioMs() const {
+    return _audioSampleRate ? (uint32_t)(((uint64_t)_audioFramesSubmitted * 1000UL) / _audioSampleRate) : 0;
+  }
+
+  uint32_t playbackElapsedMs(bool publish = true) {
+    const uint32_t wallElapsed = _phase == Phase::Paused ? _pausedElapsedMs : millis() - _startedAt;
+    uint32_t elapsed = wallElapsed;
+    if (_audioCodec != AudioCodec::None && _audioSampleRate) {
+      const uint32_t submittedMs = submittedAudioMs();
+      const bool audioComplete = _audioSample >= _audioSamples && _pcmCount == 0 && wallElapsed >= submittedMs;
+      if (!audioComplete) elapsed = min<uint32_t>(elapsed, submittedMs);
+    }
+    if (publish) {
+      StateLock lock(videoStreamStateMutex());
+      if (lock.locked()) _snapshot.elapsedMs = elapsed;
+    }
+    return elapsed;
+  }
+
+  void disableAudio(const String &status) {
+    _speaker.stop();
+    _audioCodec = AudioCodec::None;
+    _pcmRead = _pcmWrite = _pcmCount = 0;
+    StateLock lock(videoStreamStateMutex());
+    if (lock.locked()) {
+      _snapshot.hasAudio = false;
+      _snapshot.status = status;
+    }
+  }
+
+  void updateUnderrunStatus() {
+    if (_audioCodec == AudioCodec::None || _audioSample >= _audioSamples) return;
+    const bool underrun = _pcmCount == 0 && submittedAudioMs() <= millis() - _startedAt;
+    if (underrun == _audioUnderrun) return;
+    _audioUnderrun = underrun;
+    publishSnapshot(true, underrun ? F("Buffering") : F("Playing"));
+  }
+
+  void logPerformance(uint32_t elapsed) {
+    const uint32_t now = millis();
+    if (now - _lastProgressLogMs < 1000) return;
+    const uint32_t interval = _lastProgressLogMs ? now - _lastProgressLogMs : 1000;
+    _lastProgressLogMs = now;
+    const uint32_t decodeFps10 = interval ? (_decodedSinceLog * 10000UL) / interval : 0;
+    const uint32_t presentedSinceLog = __atomic_exchange_n(&_presentedSinceLog, 0, __ATOMIC_RELAXED);
+    const uint32_t presentFps10 = interval ? (presentedSinceLog * 10000UL) / interval : 0;
+    const uint32_t droppedSinceLog = __atomic_exchange_n(&_droppedSinceLog, 0, __ATOMIC_RELAXED);
+    const uint32_t dropFps10 = interval ? (droppedSinceLog * 10000UL) / interval : 0;
+    const uint32_t averageDecodeUs = _videoDecodeCount ? (uint32_t)(_videoDecodeUs / _videoDecodeCount) : 0;
+    const uint32_t averageScaleUs = _scaleCount ? (uint32_t)(_scaleUs / _scaleCount) : 0;
+    Serial.printf("[Video] progress=%lu/%lu video=%lu/%lu audio=%lu/%lu fps(d/p/x)=%lu.%lu/%lu.%lu/%lu.%lu pcm=%lums submitted=%lu i2s0=%lu sd=%lu/%lu avgUs(decode/scale)=%lu/%lu drops=%lu\n",
+                  static_cast<unsigned long>(elapsed), static_cast<unsigned long>(_durationMs),
+                  static_cast<unsigned long>(_videoSample), static_cast<unsigned long>(_videoSamples),
+                  static_cast<unsigned long>(_audioSample), static_cast<unsigned long>(_audioSamples),
+                  static_cast<unsigned long>(decodeFps10 / 10), static_cast<unsigned long>(decodeFps10 % 10),
+                  static_cast<unsigned long>(presentFps10 / 10), static_cast<unsigned long>(presentFps10 % 10),
+                  static_cast<unsigned long>(dropFps10 / 10), static_cast<unsigned long>(dropFps10 % 10),
+                  static_cast<unsigned long>(ringFillMs()), static_cast<unsigned long>(_audioFramesSubmitted),
+                  static_cast<unsigned long>(_i2sZeroWrites), static_cast<unsigned long>(_sdReadCount),
+                  static_cast<unsigned long>(_sdReadBytes), static_cast<unsigned long>(averageDecodeUs),
+                  static_cast<unsigned long>(averageScaleUs),
+                  static_cast<unsigned long>(__atomic_load_n(&_droppedFrames, __ATOMIC_RELAXED)));
+    _decodedSinceLog = 0;
+    _videoDecodeUs = _scaleUs = 0;
+    _videoDecodeCount = _scaleCount = 0;
+    updateUnderrunStatus();
+  }
+
+  static uint32_t timestampMs(uint32_t timestamp, uint32_t timeScale) {
+    return timeScale ? (uint32_t)(((uint64_t)timestamp * 1000UL) / timeScale) : 0;
+  }
+
+  static uint32_t presentationTimestampMs(int64_t timestamp, uint32_t timeScale) {
+    if (timestamp < 0 || !timeScale) return 0;
+    const uint64_t milliseconds = ((uint64_t)timestamp * 1000UL) / timeScale;
+    return milliseconds > 0xffffffffULL ? 0xffffffffUL : (uint32_t)milliseconds;
+  }
+
+  void releaseAudioDecoder() {
+    if (_aac) AACFreeDecoder((HAACDecoder)_aac);
+    if (_mp3) free(_mp3);
+    if (_amr) Decoder_Interface_exit(_amr);
+    _aac = _mp3 = _amr = nullptr;
+  }
+
+  void cleanup() {
+    _speaker.stop();
+    _h264.end();
+    _legacy.end();
+    releaseAudioDecoder();
+    if (_source) _source.close();
+    if (_demux) { MP4D_close(_demux); delete _demux; _demux = nullptr; }
+    free(_presentation); _presentation = nullptr;
+    free(_sampleBuffer); _sampleBuffer = nullptr; _sampleBufferBytes = 0;
+    free(_annexBuffer); _annexBuffer = nullptr; _annexBufferBytes = 0;
+    free(_audioBuffer); _audioBuffer = nullptr; _audioBufferBytes = 0;
+    free(_readWindow); _readWindow = nullptr; _readWindowStart = _readWindowBytes = 0;
+    free(_audioScratch); _audioScratch = nullptr;
+    free(_pcmRing); _pcmRing = nullptr; _pcmRead = _pcmWrite = _pcmCount = 0;
+    for (uint8_t index = 0; index < FrameSlots; ++index) { free(_slots[index].pixels); _slots[index] = {}; }
+    _videoCodec = VideoCodec::None;
+    _audioCodec = AudioCodec::None;
+    _videoSamples = _audioSamples = _videoSample = _audioSample = 0;
+    _presentationCount = _presentationIndex = 0;
+    _videoFlushed = _videoFinished = _firstVideoTimestampSet = false;
+    _audioFramesSubmitted = _startedAt = _pausedElapsedMs = _audioSampleRate = _audioChannels = 0;
+    _playbackStarted = false;
+    _sourceWidth = _sourceHeight = _drawX = _drawY = _drawWidth = _drawHeight = 0;
+    _durationMs = _droppedFrames = _presentationClockMs = _lastSnapshotMs = _lastProgressLogMs =
+      _lastPresentedAtMs = 0;
+    _decodedSinceLog = _presentedSinceLog = _droppedSinceLog = _i2sZeroWrites = 0;
+    _sdReadCount = _sdReadBytes = 0;
+    _videoDecodeUs = _scaleUs = 0;
+    _videoDecodeCount = _scaleCount = 0;
+    _audioUnderrun = false;
+  }
+};
+
+VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touch, DisplayController &display,
+                                     SdCardController &sdCard, SpeakerController &speaker,
+                                     SecretStorage &secretStorage)
+    : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
+      _stream(nullptr), _state(State::Opening), _secretAccess(false), _sdMounted(false), _lastTouchDown(false),
+      _closeRequested(false), _autoPlay(false), _durationMs(0), _elapsedMs(0), _lastDrawMs(0),
+      _viewportWidth(0), _viewportHeight(0) {}
 
 VideoPlayerScreen::~VideoPlayerScreen() {
-  reset();
+  delete _stream;
 }
 
 void VideoPlayerScreen::onEnter(const ScreenData &data) {
-  reset();
-  _lastTouchDown = false;
+  resetView();
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _sdMounted = _sdCard.isMounted();
   _path = data.kind == ScreenDataKind::VideoPath ? data.text : "";
   _fileName = displayName(_path);
-
-  // The MP4 inspection/cache probe can touch a slow card.  Render a disabled
-  // player first so the transition never leaves the Files screen frozen.
-  _state = State::Building;
+  _viewportWidth = _display.width();
+  _viewportHeight = _display.height() > ViewportTop + ViewportBottomReserve
+                      ? _display.height() - ViewportTop - ViewportBottomReserve : 0;
+  Serial.printf("[Video] screen enter path=%s viewport=%ux%u\n", _path.c_str(), _viewportWidth, _viewportHeight);
   draw();
-  yield();
-  _state = State::Ready;
-  if (data.kind != ScreenDataKind::VideoPath || data.text.length() == 0) {
-    fail(F("No video selected"));
-  } else if (!_sdMounted) {
-    fail(F("SD card unavailable"));
-  } else {
-    if (openSource() && inspectSource()) {
-      CachePaths paths;
-      if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
-        fail(F("Invalid cache path"));
-        draw();
-        return;
-      }
-      _cachePath = paths.finalPath;
-      _cacheTempPath = paths.temporaryPath;
-      if (loadCache()) {
-        draw();
-        startPlayback();
-        return;
-      }
-      else if (!beginBuild()) draw();
-    }
+  if (!_path.length()) { _state = State::Error; _error = F("No video selected"); draw(); return; }
+  if (!_sdMounted) { _state = State::Error; _error = F("SD card unavailable"); draw(); return; }
+  delete _stream;
+  _stream = new VideoStreamWorker(_speaker, _secretStorage, _viewportWidth, _viewportHeight);
+  if (!_stream || !_stream->prepare(_path, _secretAccess)) {
+    _state = State::Error;
+    _error = F("Video worker unavailable");
   }
   draw();
 }
 
 void VideoPlayerScreen::onExit() {
-  reset();
+  if (_stream && !_closeRequested) _stream->pause();
+}
+
+bool VideoPlayerScreen::releaseResources() {
+  if (!_stream) return true;
+  if (!_stream->end()) return false;
+  delete _stream;
+  _stream = nullptr;
+  return true;
+}
+
+void VideoPlayerScreen::onResume() {
+  _lastTouchDown = false;
+  if (_stream) _stream->play();
+  draw();
 }
 
 void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
-  if (!point.touched) {
-    _lastTouchDown = false;
-    return;
-  }
+  if (!point.touched) { _lastTouchDown = false; return; }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
-  if (UiKit::navigationIconContains(point.x, point.y)) {
-    _navigator.pop();
-    return;
-  }
-  if (!controlContains(point.x, point.y) || _state == State::Building || _state == State::Error) return;
-  if (_state == State::Playing) pausePlayback();
-  else if (_state == State::Ready || _state == State::Paused || _state == State::Finished) startPlayback();
+  if (UiKit::navigationIconContains(point.x, point.y)) { requestClose(); return; }
+  if (!controlContains(point.x, point.y) || !_stream || _state == State::Closing || _state == State::Error) return;
+  if (_state == State::Playing) { Serial.println(F("[Video] UI pause")); _stream->pause(); }
+  else if (_state == State::Paused || _state == State::Buffering) { Serial.println(F("[Video] UI play")); _stream->play(); }
+  else if (_state == State::Finished) { Serial.println(F("[Video] UI replay")); _autoPlay = true; _stream->replay(); }
 }
 
 void VideoPlayerScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
-  if (_state == State::Building) {
-    if (!buildStep()) {
-      if (_state != State::Error) {
-        const String &decoderError = _videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError();
-        logBuildFailure(F("build step"));
-        fail(decoderError.length() ? decoderError : String(F("Video conversion failed")));
-      }
-      draw();
-    }
-    return;
-  }
-  if (_state == State::Playing) tickPlayback(nowMs);
+  updateStream(nowMs);
+  if (_closeRequested && (!_stream || _stream->stopped())) _navigator.pop();
 }
 
-void VideoPlayerScreen::reset() {
-  stopSpeaker();
-  _h264.end();
-  _legacy.end();
-  releasePresentationTimeline();
-  releaseAudioDecoder();
-  releaseDemux();
-  if (_source) _source.close();
-  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
-  if (_cacheRead) _mediaCache.close(_cacheRead);
-  if (_sampleBuffer) free(_sampleBuffer);
-  if (_annexBuffer) free(_annexBuffer);
-  if (_pendingFrame) free(_pendingFrame);
-  if (_playFrameBuffer) free(_playFrameBuffer);
-  if (_audioScratch) free(_audioScratch);
-  _sampleBuffer = _annexBuffer = nullptr;
-  _pendingFrame = _playFrameBuffer = nullptr;
-  _audioScratch = nullptr;
-  _sampleBufferBytes = _annexBufferBytes = 0;
-  _path = _fileName = _cachePath = _cacheTempPath = _error = _audioStatus = _audioDiagnostic = "";
-  _state = State::Ready;
-  _audioCodec = AudioCodec::None;
-  _videoCodec = VideoCodec::None;
-  _sourceSize = _sourceWriteTime = 0;
-  _sourceWidth = _sourceHeight = _drawWidth = _drawHeight = 0;
-  _drawLeft = _drawTop = 0;
-  _videoTrack = _audioTrack = _videoSamples = _audioSamples = 0;
-  _videoSample = _audioSample = _videoTimeScale = _audioTimeScale = 0;
-  _buildFrames = _buildLastTimestamp = _buildLastDelay = 0;
-  _presentationCount = _presentationIndex = 0;
-  _buildFlushed = false;
-  _playFrame = _playFrames = _playDelay = _playStartedAt = _nextFrameAt = _pauseElapsedMs =
-    _pauseFrameRemainingMs = _durationMs = _lastDrawMs = 0;
-  _audioSampleRate = _audioFramesWritten = _audioTailStartedAt = _audioChannels = 0;
-  _hasPendingFrame = false;
+void VideoPlayerScreen::resetView() {
+  _path = _fileName = _error = _status = "";
+  _state = State::Opening;
+  _lastTouchDown = _closeRequested = false;
+  _autoPlay = true;
+  _durationMs = _elapsedMs = _lastDrawMs = 0;
 }
 
-void VideoPlayerScreen::releaseDemux() {
-  if (_demux) {
-    MP4D_close(_demux);
-    delete _demux;
-    _demux = nullptr;
-  }
+void VideoPlayerScreen::requestClose() {
+  if (_closeRequested) return;
+  _closeRequested = true;
+  _state = State::Closing;
+  _status = F("Closing");
+  Serial.println(F("[Video] UI close"));
+  if (_stream) _stream->requestStop();
+  draw();
 }
 
-void VideoPlayerScreen::releaseAudioDecoder() {
-  if (_aac) AACFreeDecoder((HAACDecoder)_aac);
-  if (_mp3) free(_mp3);
-  if (_amr) Decoder_Interface_exit(_amr);
-  _aac = _mp3 = _amr = nullptr;
-}
-
-bool VideoPlayerScreen::openSource() {
-  _source = _secretStorage.open(_path, FILE_READ, _secretAccess);
-  if (!_source) return fail(F("Unable to open video"));
-  SourceFingerprint fingerprint{};
-  if (_mediaCache.captureFingerprint(_source, fingerprint) != MediaCache::Result::Complete) {
-    return fail(F("Unable to inspect video"));
+void VideoPlayerScreen::updateStream(uint32_t nowMs) {
+  if (!_stream) return;
+  const VideoStreamWorker::Snapshot snapshot = _stream->snapshot();
+  _durationMs = snapshot.durationMs;
+  _elapsedMs = snapshot.elapsedMs;
+  _status = snapshot.status;
+  switch (snapshot.phase) {
+    case VideoStreamWorker::Phase::Opening: _state = State::Opening; break;
+    case VideoStreamWorker::Phase::Buffered:
+      _state = State::Buffering;
+      if (_autoPlay && !_closeRequested) { _autoPlay = false; _stream->play(); }
+      break;
+    case VideoStreamWorker::Phase::Playing: _state = State::Playing; presentFrames(); break;
+    case VideoStreamWorker::Phase::Paused: _state = State::Paused; break;
+    case VideoStreamWorker::Phase::Finished: _state = State::Finished; presentFrames(); break;
+    case VideoStreamWorker::Phase::Error: _state = State::Error; _error = snapshot.error; break;
+    case VideoStreamWorker::Phase::Stopping: _state = State::Closing; break;
+    case VideoStreamWorker::Phase::Idle: break;
   }
-  _sourceSize = fingerprint.size;
-  _sourceWriteTime = fingerprint.modified;
-  if (_sourceSize < 12) return fail(F("Invalid MP4/3GP file"));
-  Serial.print(F("Video source: path="));
-  Serial.print(_path);
-  Serial.print(F(" size="));
-  Serial.print(_sourceSize);
-  Serial.print(F(" modified="));
-  Serial.println(_sourceWriteTime);
-  return true;
-}
-
-bool VideoPlayerScreen::inspectSource() {
-  releaseDemux();
-  _demux = new MP4D_demux_t();
-  if (!_demux || !MP4D_open(_demux, readMp4, &_source, _sourceSize)) return fail(F("Invalid MP4/3GP container"));
-  bool videoFound = false;
-  String unsupportedVideo;
-  for (unsigned index = 0; index < _demux->track_count; index++) {
-    const MP4D_track_t &track = _demux->track[index];
-    if (!videoFound && track.handler_type == MP4D_HANDLER_TYPE_VIDE) {
-      VideoCodec codec = VideoCodec::None;
-      if (track.object_type_indication == MP4_OBJECT_TYPE_AVC) {
-        codec = VideoCodec::H264;
-      } else if (track.object_type_indication == MP4_OBJECT_TYPE_H263) {
-        codec = VideoCodec::H263;
-      } else if (track.object_type_indication == 0x20) {
-        codec = VideoCodec::Mpeg4Part2;
-      } else {
-        unsupportedVideo = objectTypeLabel(track.object_type_indication);
-        continue;
-      }
-      if (codec == VideoCodec::H264) {
-        if (!track.dsi_bytes || track.avc_nal_length_size < 1 || track.avc_nal_length_size > 4) {
-          return fail(F("Invalid H.264 config\nMissing AVC parameters"));
-        }
-        if (track.avc_profile != 66 && track.avc_profile != 77 && track.avc_profile != 100) {
-          return fail(String(F("H.264 ")) + avcProfileName(track.avc_profile) + F(" (") +
-                      String(track.avc_profile) + F(")\nNeed Baseline, Main, or High"));
-        }
-      } else if (codec == VideoCodec::H263 && (!track.dsi || track.dsi_bytes < 7)) {
-        return fail(F("Malformed H.263 config"));
-      }
-      _videoCodec = codec;
-      _videoTrack = index;
-      _videoSamples = track.sample_count;
-      _videoTimeScale = track.timescale;
-      _sourceWidth = (uint16_t)track.SampleDescription.video.width;
-      _sourceHeight = (uint16_t)track.SampleDescription.video.height;
-      videoFound = _videoSamples > 0 && _videoTimeScale > 0;
-      if (track.duration_lo) _durationMs = timestampMs(track.duration_lo, _videoTimeScale);
-      logVideoTrack();
-      logVideoSampleTable();
-    } else if (_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 && _audioCodec != AudioCodec::AmrNb &&
-               track.handler_type == MP4D_HANDLER_TYPE_SOUN) {
-      _audioTrack = index;
-      _audioSamples = track.sample_count;
-      _audioTimeScale = track.timescale;
-      _audioChannels = (uint16_t)track.SampleDescription.audio.channelcount;
-      if (track.object_type_indication == MP4_OBJECT_TYPE_AUDIO_ISO_IEC_14496_3 && parseAacConfig()) {
-        _audioCodec = AudioCodec::Aac;
-        _audioDiagnostic = F("AAC-LC supported");
-      } else if (track.object_type_indication == 0x6b) {
-        _audioCodec = AudioCodec::Mp3;
-        _audioDiagnostic = F("MPEG Layer III supported");
-      } else if (track.object_type_indication == MP4_OBJECT_TYPE_AMR_NB) {
-        _audioCodec = AudioCodec::AmrNb;
-        _audioSampleRate = 8000;
-        _audioChannels = 1;
-        _audioDiagnostic = F("AMR-NB supported (8 kHz mono)");
-      } else {
-        _audioCodec = AudioCodec::Unsupported;
-        String header = String(F("Unsupported ")) + sampleEntryLabel(track.sample_entry) +
-                        F(" / ") + objectTypeLabel(track.object_type_indication);
-        _audioDiagnostic = _audioDiagnostic.length() ? header + F(": ") + _audioDiagnostic : header;
-      }
-      logAudioTrack();
-    }
-  }
-  if (!videoFound || !_sourceWidth || !_sourceHeight) {
-    return fail(unsupportedVideo.length() ? String(F("Unsupported video\n")) + unsupportedVideo
-                                          : String(F("No video track found")));
-  }
-  if (_sourceWidth > MaxVideoWidth || _sourceHeight > MaxVideoHeight) {
-    return fail(String(F("Video ")) + String(_sourceWidth) + F("x") + String(_sourceHeight) +
-                F(" exceeds\n320x240 maximum"));
-  }
-  _drawWidth = _sourceWidth;
-  _drawHeight = _sourceHeight;
-  _drawLeft = (_display.width() - _drawWidth) / 2;
-  _drawTop = UiKit::AppBarHeight + 4 + (MaxVideoHeight - _drawHeight) / 2;
-  if (_audioCodec == AudioCodec::Unsupported && _demux && _audioTrack < _demux->track_count) {
-    const MP4D_track_t &track = _demux->track[_audioTrack];
-    _audioStatus = String(F("Audio ")) + sampleEntryLabel(track.sample_entry) + F(" 0x") +
-                   String(track.object_type_indication, HEX) + F(" unsupported");
-  }
-  return true;
-}
-
-bool VideoPlayerScreen::parseAacConfig() {
-  if (!_demux || _audioTrack >= _demux->track_count) {
-    _audioDiagnostic = F("AAC track is unavailable");
-    return false;
-  }
-  const MP4D_track_t &track = _demux->track[_audioTrack];
-  if (!track.dsi || track.dsi_bytes < 2) {
-    _audioDiagnostic = F("AAC AudioSpecificConfig is missing");
-    return false;
-  }
-  uint8_t objectType = track.dsi[0] >> 3;
-  uint8_t rateIndex = (uint8_t)(((track.dsi[0] & 0x07) << 1) | (track.dsi[1] >> 7));
-  uint8_t channels = (track.dsi[1] >> 3) & 0x0f;
-  if (objectType != 2) {
-    _audioDiagnostic = String(F("AAC object type ")) + String(objectType) + F(" (need LC 2)");
-    return false;
-  }
-  if (rateIndex >= sizeof(AacSampleRates)) {
-    _audioDiagnostic = String(F("AAC sample-rate index ")) + String(rateIndex) + F(" unsupported");
-    return false;
-  }
-  if (channels == 0 || channels > 2) {
-    _audioDiagnostic = String(F("AAC channel config ")) + String(channels) + F(" unsupported");
-    return false;
-  }
-  _audioSampleRate = AacSampleRates[rateIndex];
-  _audioChannels = channels;
-  return true;
-}
-
-const __FlashStringHelper *VideoPlayerScreen::videoCodecLabel() const {
-  switch (_videoCodec) {
-    case VideoCodec::H264: return F("H.264");
-    case VideoCodec::H263: return F("H.263");
-    case VideoCodec::Mpeg4Part2: return F("MPEG-4 Part 2");
-    default: return F("unknown");
-  }
-}
-
-void VideoPlayerScreen::logVideoTrack() const {
-  if (!_demux || _videoTrack >= _demux->track_count) return;
-  const MP4D_track_t &track = _demux->track[_videoTrack];
-  Serial.print(F("Video video track: index="));
-  Serial.print(_videoTrack);
-  Serial.print(F(" codec="));
-  Serial.print(videoCodecLabel());
-  Serial.print(F(" entry="));
-  Serial.print(sampleEntryLabel(track.sample_entry));
-  Serial.print(F(" object=0x"));
-  Serial.print(track.object_type_indication, HEX);
-  Serial.print(F(" config="));
-  Serial.print(track.dsi_bytes);
-  Serial.print(F("B geometry="));
-  Serial.print(_sourceWidth);
-  Serial.print('x');
-  Serial.print(_sourceHeight);
-  Serial.print(F(" samples="));
-  Serial.print(_videoSamples);
-  Serial.print(F(" timescale="));
-  Serial.print(_videoTimeScale);
-  Serial.print(F(" duration="));
-  Serial.print(_durationMs);
-  Serial.println(F("ms"));
-}
-
-void VideoPlayerScreen::logVideoSampleTable() const {
-  if (!_demux || _videoTrack >= _demux->track_count) return;
-  const MP4D_track_t &track = _demux->track[_videoTrack];
-  Serial.print(F("Video sample table: chunks="));
-  Serial.print(track.chunk_count);
-  Serial.print(F(" stsc="));
-  Serial.print(track.sample_to_chunk_count);
-  Serial.print(F(" entrySizes="));
-  Serial.print(track.entry_size ? F("present") : F("missing"));
-  Serial.print(F(" firstSize="));
-  Serial.print(track.entry_size && track.sample_count ? track.entry_size[0] : 0);
-  Serial.print(F(" firstChunkOffset="));
-  Serial.print(track.chunk_offset && track.chunk_count ? (uint32_t)track.chunk_offset[0] : 0);
-  Serial.print(F(" firstChunkSamples="));
-  Serial.println(track.sample_to_chunk && track.sample_to_chunk_count
-                   ? track.sample_to_chunk[0].samples_per_chunk : 0);
-}
-
-void VideoPlayerScreen::logAudioTrack() const {
-  if (!_demux || _audioTrack >= _demux->track_count) return;
-  const MP4D_track_t &track = _demux->track[_audioTrack];
-  Serial.print(F("Video audio track: index="));
-  Serial.print(_audioTrack);
-  Serial.print(F(" entry="));
-  Serial.print(sampleEntryLabel(track.sample_entry));
-  Serial.print(F(" object=0x"));
-  Serial.print(track.object_type_indication, HEX);
-  Serial.print(F(" config="));
-  Serial.print(track.dsi_bytes);
-  Serial.print(F("B channels="));
-  Serial.print(_audioChannels);
-  Serial.print(F(" rate="));
-  Serial.print(_audioSampleRate ? _audioSampleRate : track.SampleDescription.audio.samplerate_hz);
-  Serial.print(F("Hz samples="));
-  Serial.print(_audioSamples);
-  Serial.print(F(" timescale="));
-  Serial.print(_audioTimeScale);
-  Serial.print(F(" result="));
-  Serial.println(_audioDiagnostic);
-  if (track.dsi && track.dsi_bytes) {
-    Serial.print(F("Video audio config:"));
-    unsigned bytes = track.dsi_bytes > 16 ? 16 : track.dsi_bytes;
-    for (unsigned index = 0; index < bytes; index++) {
-      Serial.print(' ');
-      if (track.dsi[index] < 16) Serial.print('0');
-      Serial.print(track.dsi[index], HEX);
-    }
-    if (bytes < track.dsi_bytes) Serial.print(F(" ..."));
-    Serial.println();
-  }
-}
-
-bool VideoPlayerScreen::readCacheHeader(uint32_t &frames, uint32_t &duration) {
-  frames = duration = 0;
-  uint32_t cacheSize = 0;
-  if (!_cacheRead || _mediaCache.fileSize(_cacheRead, cacheSize) != MediaCache::Result::Complete ||
-      cacheSize < AnimationCache::HeaderBytes) return false;
-  uint8_t header[AnimationCache::HeaderBytes] = {};
-  AnimationCache::Header parsed{};
-  if (_mediaCache.seek(_cacheRead, 0) != MediaCache::Result::Complete ||
-      _mediaCache.read(_cacheRead, header, sizeof(header)) != MediaCache::Result::Complete ||
-      !AnimationCache::parseHeader(header, sizeof(header), parsed) ||
-      !MediaCache::matches(parsed.source, {_sourceSize, _sourceWriteTime}) ||
-      parsed.sourceWidth != _sourceWidth || parsed.sourceHeight != _sourceHeight ||
-      parsed.drawWidth != _drawWidth || parsed.drawHeight != _drawHeight) return false;
-  frames = parsed.frameCount;
-  if (!frames) return false;
-  uint64_t expected = AnimationCache::HeaderBytes + (uint64_t)frames * AnimationCache::frameBytes(_drawWidth, _drawHeight);
-  if (expected != cacheSize) return false;
-  for (uint32_t index = 0; index < frames; index++) {
-    uint64_t offset = AnimationCache::HeaderBytes + (uint64_t)index * AnimationCache::frameBytes(_drawWidth, _drawHeight);
-    uint8_t delay[4];
-    if (_mediaCache.seek(_cacheRead, (uint32_t)offset) != MediaCache::Result::Complete ||
-        _mediaCache.read(_cacheRead, delay, sizeof(delay)) != MediaCache::Result::Complete) return false;
-    duration += AnimationCache::readLe32(delay);
-  }
-  return duration > 0;
-}
-
-bool VideoPlayerScreen::loadCache() {
-  if (!psramFound()) return false;
-  CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
-      _mediaCache.openRead(paths, _secretAccess, _cacheRead) != MediaCache::Result::Complete) return false;
-  uint32_t frames = 0, duration = 0;
-  if (!_cacheRead || !readCacheHeader(frames, duration)) {
-    _mediaCache.close(_cacheRead);
-    return false;
-  }
-  const size_t pixels = (size_t)_drawWidth * _drawHeight;
-  _playFrameBuffer = (uint16_t *)ps_malloc(pixels * sizeof(uint16_t));
-  if (!_playFrameBuffer) {
-    _mediaCache.close(_cacheRead);
-    return false;
-  }
-  _playFrames = frames;
-  _durationMs = duration;
-  return true;
-}
-
-bool VideoPlayerScreen::beginBuild() {
-  if (!psramFound()) return fail(F("Video needs PSRAM"));
-  if (!preparePresentationTimeline()) return fail(F("Cannot build video timeline"));
-  CachePaths paths;
-  uint8_t header[AnimationCache::HeaderBytes];
-  AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth,
-                               _sourceHeight, 0, -1, _drawWidth, _drawHeight);
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
-    Serial.println(F("Video cache build: unable to derive cache paths"));
-    return fail(F("Cannot start video cache"));
-  }
-  Serial.print(F("Video cache build: path="));
-  Serial.print(paths.finalPath);
-  Serial.print(F(" temp="));
-  Serial.print(paths.temporaryPath);
-  Serial.print(F(" timeline="));
-  Serial.print(_presentationCount);
-  Serial.println(F(" frames"));
-  MediaCache::Result cacheResult = _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter);
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: begin write result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    _mediaCache.abort(_cacheWriter);
-    return fail(F("Cannot start video cache"));
-  }
-  cacheResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: header write result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    _mediaCache.abort(_cacheWriter);
-    return fail(F("Cannot start video cache"));
-  }
-  _pendingFrame = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
-  if (!_pendingFrame) return fail(F("Video needs too much memory"));
-  if (_videoCodec == VideoCodec::H264) {
-    if (!_h264.begin(_sourceWidth, _sourceHeight)) return fail(_h264.lastError());
-  } else {
-    if (!_demux || _videoTrack >= _demux->track_count) return fail(F("Video track unavailable"));
-    const MP4D_track_t &track = _demux->track[_videoTrack];
-    VideoLegacy::Codec codec = _videoCodec == VideoCodec::H263 ? VideoLegacy::Codec::H263
-                                                                 : VideoLegacy::Codec::Mpeg4Part2;
-    // The MPEG-4 Part 2 decoder requires the esds configuration record. H.263
-    // samples carry their picture headers directly; d263 is descriptive only.
-    const uint8_t *configuration = _videoCodec == VideoCodec::Mpeg4Part2 ? track.dsi : nullptr;
-    uint32_t configurationBytes = configuration ? track.dsi_bytes : 0;
-    if (!_legacy.begin(codec, _sourceWidth, _sourceHeight, configuration, configurationBytes)) {
-      return fail(_legacy.lastError());
-    }
-  }
-  _state = State::Building;
-  _videoSample = _buildFrames = _buildLastTimestamp = _buildLastDelay = 0;
-  _presentationIndex = 0;
-  _buildFlushed = false;
-  _hasPendingFrame = false;
-  return true;
-}
-
-bool VideoPlayerScreen::preparePresentationTimeline() {
-  releasePresentationTimeline();
-  if (!_demux || _videoTrack >= _demux->track_count || !_videoSamples || !_videoTimeScale) return false;
-  size_t bytes = (size_t)_videoSamples * sizeof(VideoPresentationPoint);
-  if (bytes / sizeof(VideoPresentationPoint) != _videoSamples) return false;
-  _presentationTimeline = static_cast<VideoPresentationPoint *>(ps_malloc(bytes));
-  if (!_presentationTimeline) return false;
-  for (uint32_t sample = 0; sample < _videoSamples; sample++) {
-    int64_t timestamp = MP4D_frame_presentation_timestamp(_demux, _videoTrack, sample);
-    if (timestamp == INT64_MIN) {
-      releasePresentationTimeline();
-      return false;
-    }
-    _presentationTimeline[sample].timestamp = timestamp;
-  }
-  qsort(_presentationTimeline, _videoSamples, sizeof(VideoPresentationPoint), comparePresentationPoints);
-  // MP4 edit lists commonly shift the first decode timestamp below zero.
-  // Cache time is relative, so normalize the earliest presentation picture to
-  // zero while retaining all ctts-derived spacing and B-frame ordering.
-  int64_t origin = _presentationTimeline[0].timestamp;
-  for (uint32_t sample = 0; sample < _videoSamples; sample++)
-    _presentationTimeline[sample].timestamp -= origin;
-  _presentationCount = _videoSamples;
-  return true;
-}
-
-void VideoPlayerScreen::releasePresentationTimeline() {
-  if (_presentationTimeline) free(_presentationTimeline);
-  _presentationTimeline = nullptr;
-  _presentationCount = _presentationIndex = 0;
-}
-
-bool VideoPlayerScreen::ensureSampleBuffer(uint32_t bytes) {
-  if (bytes <= _sampleBufferBytes) return true;
-  uint8_t *replacement = (uint8_t *)(psramFound() ? ps_malloc(bytes) : malloc(bytes));
-  if (!replacement) return false;
-  if (_sampleBuffer) free(_sampleBuffer);
-  _sampleBuffer = replacement;
-  _sampleBufferBytes = bytes;
-  return true;
-}
-
-bool VideoPlayerScreen::ensureAnnexBuffer(uint32_t bytes) {
-  if (bytes <= _annexBufferBytes) return true;
-  uint8_t *replacement = (uint8_t *)(psramFound() ? ps_malloc(bytes) : malloc(bytes));
-  if (!replacement) return false;
-  if (_annexBuffer) free(_annexBuffer);
-  _annexBuffer = replacement;
-  _annexBufferBytes = bytes;
-  return true;
-}
-
-bool VideoPlayerScreen::readSample(uint32_t track, uint32_t sample, uint32_t &bytes,
-                                    uint32_t &timestamp, uint32_t &duration) {
-  bytes = timestamp = duration = 0;
-  if (!_demux || track >= _demux->track_count || sample >= _demux->track[track].sample_count) {
-    Serial.print(F("Video sample read: invalid request track="));
-    Serial.print(track);
-    Serial.print(F(" sample="));
-    Serial.println(sample);
-    return false;
-  }
-  unsigned sampleBytes = 0, sampleTimestamp = 0, sampleDuration = 0;
-  MP4D_file_offset_t offset = MP4D_frame_offset(_demux, track, sample, &sampleBytes, &sampleTimestamp, &sampleDuration);
-  if (!sampleBytes || offset > 0xffffffffULL || !ensureSampleBuffer(sampleBytes)) {
-    Serial.print(F("Video sample read: metadata/buffer failed track="));
-    Serial.print(track);
-    Serial.print(F(" sample="));
-    Serial.print(sample);
-    Serial.print(F(" offset="));
-    Serial.print((uint32_t)offset);
-    Serial.print(F(" bytes="));
-    Serial.println(sampleBytes);
-    return false;
-  }
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) {
-    Serial.print(F("Video sample read: SPI lock timeout track="));
-    Serial.print(track);
-    Serial.print(F(" sample="));
-    Serial.println(sample);
-    return false;
-  }
-  bool ok = _source.seek((uint32_t)offset) && _source.read(_sampleBuffer, sampleBytes) == sampleBytes;
-  SpiBusLock::unlock();
-  if (!ok) {
-    Serial.print(F("Video sample read: SD read failed track="));
-    Serial.print(track);
-    Serial.print(F(" sample="));
-    Serial.print(sample);
-    Serial.print(F(" offset="));
-    Serial.print((uint32_t)offset);
-    Serial.print(F(" bytes="));
-    Serial.println(sampleBytes);
-    return false;
-  }
-  bytes = sampleBytes;
-  timestamp = sampleTimestamp;
-  duration = sampleDuration;
-  return true;
-}
-
-bool VideoPlayerScreen::buildAnnexB(const uint8_t *sample, uint32_t bytes, bool includeParameters,
-                                    uint32_t &outputBytes) {
-  outputBytes = 0;
-  if (!_demux || !sample || _videoTrack >= _demux->track_count) return false;
-  const MP4D_track_t &track = _demux->track[_videoTrack];
-  uint8_t lengthBytes = (uint8_t)track.avc_nal_length_size;
-  if (lengthBytes < 1 || lengthBytes > 4 || !ensureAnnexBuffer(bytes + 8192)) return false;
-  auto appendNal = [&](const uint8_t *nal, uint32_t nalBytes) -> bool {
-    if (!nal || nalBytes == 0 || outputBytes > _annexBufferBytes - nalBytes - 4) return false;
-    _annexBuffer[outputBytes++] = 0;
-    _annexBuffer[outputBytes++] = 0;
-    _annexBuffer[outputBytes++] = 0;
-    _annexBuffer[outputBytes++] = 1;
-    memcpy(_annexBuffer + outputBytes, nal, nalBytes);
-    outputBytes += nalBytes;
-    return true;
-  };
-  if (includeParameters) {
-    for (int index = 0; ; index++) {
-      int size = 0;
-      const uint8_t *sps = (const uint8_t *)MP4D_read_sps(_demux, _videoTrack, index, &size);
-      if (!sps) break;
-      if (!appendNal(sps, (uint32_t)size)) return false;
-    }
-    for (int index = 0; ; index++) {
-      int size = 0;
-      const uint8_t *pps = (const uint8_t *)MP4D_read_pps(_demux, _videoTrack, index, &size);
-      if (!pps) break;
-      if (!appendNal(pps, (uint32_t)size)) return false;
-    }
-  }
-  uint32_t offset = 0;
-  while (offset + lengthBytes <= bytes) {
-    uint32_t nalBytes = 0;
-    for (uint8_t i = 0; i < lengthBytes; i++) nalBytes = (nalBytes << 8) | sample[offset + i];
-    offset += lengthBytes;
-    if (nalBytes == 0 || nalBytes > bytes - offset || !appendNal(sample + offset, nalBytes)) return false;
-    offset += nalBytes;
-  }
-  return offset == bytes && outputBytes > 0;
-}
-
-bool VideoPlayerScreen::decodedFrame(const VideoH264::Frame &frame, void *context) {
-  return context && static_cast<VideoPlayerScreen *>(context)->captureDecodedFrame(frame);
-}
-
-bool VideoPlayerScreen::captureDecodedFrame(const VideoH264::Frame &frame) {
-  if (!_presentationTimeline || _presentationIndex >= _presentationCount || !_pendingFrame ||
-      !frame.y || !frame.u || !frame.v || frame.width != _sourceWidth || frame.height != _sourceHeight ||
-      frame.yStride < frame.width || frame.uStride < frame.width / 2 || frame.vStride < frame.width / 2) {
-    Serial.print(F("Video frame capture rejected: input="));
-    Serial.print(_videoSample);
-    Serial.print(F(" output="));
-    Serial.print(_presentationIndex);
-    Serial.print('/');
-    Serial.print(_presentationCount);
-    Serial.print(F(" geometry="));
-    Serial.print(frame.width);
-    Serial.print('x');
-    Serial.print(frame.height);
-    Serial.print(F(" strides="));
-    Serial.print(frame.yStride);
-    Serial.print('/');
-    Serial.print(frame.uStride);
-    Serial.print('/');
-    Serial.println(frame.vStride);
-    return false;
-  }
-  uint32_t timestamp = presentationTimestampMs(_presentationTimeline[_presentationIndex++].timestamp, _videoTimeScale);
-  bool keep = !_hasPendingFrame || timestamp - _buildLastTimestamp >= MinFrameDelayMs;
-  if (keep && _hasPendingFrame && !appendPendingFrame(timestamp - _buildLastTimestamp)) {
-    Serial.print(F("Video frame capture: cache append failed at output="));
-    Serial.println(_presentationIndex - 1);
-    return false;
-  }
-  if (!keep) return true;
-  for (uint16_t y = 0; y < _drawHeight; y++) {
-    uint16_t sourceY = _drawHeight > 1 ? (uint32_t)y * (frame.height - 1) / (_drawHeight - 1) : 0;
-    for (uint16_t x = 0; x < _drawWidth; x++) {
-      uint16_t sourceX = _drawWidth > 1 ? (uint32_t)x * (frame.width - 1) / (_drawWidth - 1) : 0;
-      int c = frame.y[(uint32_t)sourceY * frame.yStride + sourceX] - 16;
-      int d = frame.u[(uint32_t)(sourceY / 2) * frame.uStride + sourceX / 2] - 128;
-      int e = frame.v[(uint32_t)(sourceY / 2) * frame.vStride + sourceX / 2] - 128;
-      uint8_t r = clampChannel((298 * c + 409 * e + 128) >> 8);
-      uint8_t g = clampChannel((298 * c - 100 * d - 208 * e + 128) >> 8);
-      uint8_t b = clampChannel((298 * c + 516 * d + 128) >> 8);
-      _pendingFrame[(uint32_t)y * _drawWidth + x] = ((uint16_t)(r & 0xf8) << 8) |
-                                                   ((uint16_t)(g & 0xfc) << 3) | (b >> 3);
-    }
-  }
-  _hasPendingFrame = true;
-  _buildLastTimestamp = timestamp;
-  return true;
-}
-
-bool VideoPlayerScreen::writeFrameRgb444(const uint16_t *pixels, uint32_t delayMs) {
-  if (!_cacheWriter.active || !pixels) {
-    Serial.println(F("Video cache frame write: inactive writer or missing pixels"));
-    return false;
-  }
-  uint8_t delay[4];
-  AnimationCache::writeLe32(delay, delayMs);
-  MediaCache::Result result = _mediaCache.write(_cacheWriter, delay, sizeof(delay));
-  if (result != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache frame write: delay result="));
-    Serial.println(cacheResultLabel(result));
-    return false;
-  }
-  const uint32_t total = AnimationCache::rgb444Bytes(_drawWidth, _drawHeight);
-  for (uint32_t base = 0; base < total; ) {
-    uint16_t count = total - base > IoChunkBytes ? IoChunkBytes : (uint16_t)(total - base);
-    for (uint16_t i = 0; i < count; i++) {
-      uint32_t position = base + i;
-      uint32_t pair = position / 3;
-      uint32_t firstIndex = pair * 2;
-      uint16_t first = pixels[firstIndex];
-      uint16_t second = firstIndex + 1 < (uint32_t)_drawWidth * _drawHeight ? pixels[firstIndex + 1] : 0;
-      uint16_t a = (uint16_t)((first & 0xf000) >> 4) | (uint16_t)((first & 0x0780) >> 3) | (uint16_t)((first & 0x001e) >> 1);
-      uint16_t b = (uint16_t)((second & 0xf000) >> 4) | (uint16_t)((second & 0x0780) >> 3) | (uint16_t)((second & 0x001e) >> 1);
-      _cacheChunk[i] = position % 3 == 0 ? (uint8_t)(a >> 4) :
-                       (position % 3 == 1 ? (uint8_t)((a << 4) | (b >> 8)) : (uint8_t)b);
-    }
-    result = _mediaCache.write(_cacheWriter, _cacheChunk, count);
-    if (result != MediaCache::Result::Complete) {
-      Serial.print(F("Video cache frame write: payload result="));
-      Serial.print(cacheResultLabel(result));
-      Serial.print(F(" frame="));
-      Serial.print(_buildFrames);
-      Serial.print(F(" offset="));
-      Serial.print(base);
-      Serial.print('/');
-      Serial.println(total);
-      return false;
-    }
-    base += count;
-    taskYIELD();
-  }
-  return true;
-}
-
-bool VideoPlayerScreen::appendPendingFrame(uint32_t delayMs) {
-  if (!_hasPendingFrame) return true;
-  if (delayMs < MinFrameDelayMs) delayMs = MinFrameDelayMs;
-  if (!writeFrameRgb444(_pendingFrame, delayMs)) return false;
-  _buildFrames++;
-  _buildLastDelay = delayMs;
-  _hasPendingFrame = false;
-  return true;
-}
-
-bool VideoPlayerScreen::buildStep() {
-  if (_videoSample >= _videoSamples) {
-    if (!_buildFlushed) {
-      _buildFlushed = true;
-      Serial.print(F("Video cache build: input complete; flushing "));
-      Serial.print(videoCodecLabel());
-      Serial.print(F(" decoded="));
-      Serial.print(_presentationIndex);
-      Serial.print('/');
-      Serial.println(_presentationCount);
-      if (_videoCodec == VideoCodec::H264 ? !_h264.flush(decodedFrame, this)
-                                          : !_legacy.flush(decodedFrame, this)) return false;
-    }
-    if (_presentationIndex != _presentationCount) {
-      Serial.print(F("Video cache build: incomplete decoder output="));
-      Serial.print(_presentationIndex);
-      Serial.print('/');
-      Serial.println(_presentationCount);
-      return fail(F("Video output is incomplete"));
-    }
-    return finishBuild();
-  }
-  uint32_t bytes, timestamp, duration;
-  if (!readSample(_videoTrack, _videoSample, bytes, timestamp, duration)) return false;
-  if (_videoCodec == VideoCodec::H264) {
-    uint32_t annexBytes = 0;
-    if (!buildAnnexB(_sampleBuffer, bytes, _videoSample == 0, annexBytes) ||
-        !_h264.decode(_annexBuffer, annexBytes, _videoSample, decodedFrame, this)) return false;
-  } else if (!_legacy.decode(_sampleBuffer, bytes, _videoSample, decodedFrame, this)) {
-    return false;
-  }
-  _videoSample++;
-  if (_videoSamples) {
-    _lastDrawMs = millis();
+  if (nowMs - _lastDrawMs >= 150 || _state == State::Error) {
+    _lastDrawMs = nowMs;
     draw(false);
   }
-  return true;
 }
 
-bool VideoPlayerScreen::finishBuild() {
-  uint32_t finalDelay = _durationMs > _buildLastTimestamp ? _durationMs - _buildLastTimestamp : _buildLastDelay;
-  Serial.print(F("Video cache build: finalizing decoded="));
-  Serial.print(_presentationIndex);
-  Serial.print(F(" cached="));
-  Serial.print(_buildFrames);
-  Serial.print(F(" pending="));
-  Serial.print(_hasPendingFrame ? F("yes") : F("no"));
-  Serial.print(F(" finalDelay="));
-  Serial.println(finalDelay);
-  if (!appendPendingFrame(finalDelay) || !_buildFrames) {
-    Serial.println(F("Video cache build: final frame append failed or no frames were cached"));
-    return false;
+void VideoPlayerScreen::presentFrames() {
+  if (!_stream || _state != State::Playing && _state != State::Finished) return;
+  VideoStreamWorker::Frame newest;
+  bool haveFrame = false;
+  VideoStreamWorker::Frame frame;
+  // Free stale ready slots first, but always display the newest one. Dropping
+  // every late frame makes a slow clip freeze permanently as its timestamps
+  // move farther from the audio clock.
+  while (_stream->takeFrame(frame)) {
+    if (haveFrame) _stream->releaseFrame(newest.slot, true);
+    newest = frame;
+    haveFrame = true;
   }
-  // The final decoded picture remains pending until its duration is known.
-  // Encode the persistent count only after appending it, otherwise the cache
-  // header describes one fewer frame than the payload and fails validation.
-  const uint32_t headerFrames = _buildFrames;
-  uint8_t header[AnimationCache::HeaderBytes];
-  AnimationCache::encodeHeader(header, _sourceSize, _sourceWriteTime, _sourceWidth, _sourceHeight,
-                               headerFrames, -1, _drawWidth, _drawHeight);
-  MediaCache::Result cacheResult = _mediaCache.seek(_cacheWriter, 0);
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: header seek result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    return false;
+  if (!haveFrame) return;
+  if (newest.pixels && newest.width && newest.height) {
+    _display.tft().pushImage(newest.x, ViewportTop + newest.y, newest.width, newest.height,
+                             const_cast<uint16_t *>(newest.pixels));
   }
-  cacheResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: final header write result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    return false;
-  }
-  cacheResult = _mediaCache.commit(_cacheWriter);
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: commit result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    return false;
-  }
-  Serial.print(F("Video cache build: committed headerFrames="));
-  Serial.print(headerFrames);
-  Serial.print(F(" writtenFrames="));
-  Serial.println(_buildFrames);
-  _h264.end();
-  _legacy.end();
-  if (_source) _source.close();
-  releaseDemux();
-  CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths)) {
-    Serial.println(F("Video cache build: cannot derive reopen path"));
-    return false;
-  }
-  cacheResult = _mediaCache.openRead(paths, _secretAccess, _cacheRead);
-  if (cacheResult != MediaCache::Result::Complete) {
-    Serial.print(F("Video cache build: reopen result="));
-    Serial.println(cacheResultLabel(cacheResult));
-    return false;
-  }
-  uint32_t frames = 0, duration = 0;
-  if (!_cacheRead || !readCacheHeader(frames, duration)) {
-    Serial.print(F("Video cache build: post-commit validation failed headerFrames="));
-    Serial.print(headerFrames);
-    Serial.print(F(" writtenFrames="));
-    Serial.println(_buildFrames);
-    return false;
-  }
-  _playFrameBuffer = (uint16_t *)ps_malloc((size_t)_drawWidth * _drawHeight * sizeof(uint16_t));
-  if (!_playFrameBuffer) return false;
-  _playFrames = frames;
-  _durationMs = duration;
-  if (!openSource() || !inspectSource()) return false;
-  _state = State::Ready;
-  draw();
-  return startPlayback();
-}
-
-bool VideoPlayerScreen::loadPlaybackFrame(uint32_t frame) {
-  if (!_cacheRead || !_playFrameBuffer || frame >= _playFrames) return false;
-  uint64_t offset = AnimationCache::HeaderBytes + (uint64_t)frame * AnimationCache::frameBytes(_drawWidth, _drawHeight);
-  if (offset > 0xffffffffULL ||
-      _mediaCache.seek(_cacheRead, (uint32_t)offset) != MediaCache::Result::Complete) return false;
-  uint8_t delay[4];
-  if (_mediaCache.read(_cacheRead, delay, sizeof(delay)) != MediaCache::Result::Complete) return false;
-  _playDelay = AnimationCache::readLe32(delay);
-  uint32_t total = AnimationCache::rgb444Bytes(_drawWidth, _drawHeight);
-  uint8_t packed[3];
-  uint8_t packedCount = 0;
-  uint32_t pixel = 0;
-  for (uint32_t base = 0; base < total; ) {
-    uint16_t count = total - base > IoChunkBytes ? IoChunkBytes : (uint16_t)(total - base);
-    if (_mediaCache.read(_cacheRead, _cacheChunk, count) != MediaCache::Result::Complete) return false;
-    for (uint16_t i = 0; i < count; i++) {
-      packed[packedCount++] = _cacheChunk[i];
-      if (packedCount != 3) continue;
-      uint16_t colors[] = { (uint16_t)((packed[0] << 4) | (packed[1] >> 4)),
-                            (uint16_t)(((packed[1] & 0x0f) << 8) | packed[2]) };
-      for (uint8_t color = 0; color < 2 && pixel < (uint32_t)_drawWidth * _drawHeight; color++, pixel++) {
-        uint16_t rgb = colors[color];
-        _playFrameBuffer[pixel] = (uint16_t)(((rgb & 0x0f00) << 4) | ((rgb & 0x00f0) << 3) | ((rgb & 0x000f) << 1));
-      }
-      packedCount = 0;
-    }
-    base += count;
-    taskYIELD();
-  }
-  if (packedCount == 2 && pixel < (uint32_t)_drawWidth * _drawHeight) {
-    uint16_t rgb = (uint16_t)((packed[0] << 4) | (packed[1] >> 4));
-    _playFrameBuffer[pixel] = (uint16_t)(((rgb & 0x0f00) << 4) | ((rgb & 0x00f0) << 3) | ((rgb & 0x000f) << 1));
-  }
-  _display.tft().pushImage(_drawLeft, _drawTop, _drawWidth, _drawHeight, _playFrameBuffer);
-  return true;
-}
-
-bool VideoPlayerScreen::startPlayback() {
-  if (!_cacheRead || _state == State::Error || !_sdMounted) return false;
-  if (_state == State::Paused) {
-    if (_aac || _mp3 || _amr) {
-      if (!_speaker.start(_audioSampleRate)) {
-        _audioStatus = F("Speaker unavailable");
-      }
-    }
-    _playStartedAt = millis() - _pauseElapsedMs;
-    _nextFrameAt = _pauseElapsedMs + _pauseFrameRemainingMs;
-    if (_audioTailStartedAt) _audioTailStartedAt = millis();
-    _state = State::Playing;
-    drawPlayButton();
-    return true;
-  }
-  if (_state == State::Finished) {
-    _playFrame = _audioSample = 0;
-    _audioFramesWritten = 0;
-    releaseAudioDecoder();
-  }
-  if (_playFrame >= _playFrames) _playFrame = 0;
-  if (!loadPlaybackFrame(_playFrame)) return fail(F("Video cache read failed"));
-  if (_audioCodec == AudioCodec::Aac) {
-    _aac = AACInitDecoder();
-    if (_aac) {
-      AACFrameInfo info{};
-      info.nChans = _audioChannels;
-      info.sampRateCore = _audioSampleRate;
-      info.profile = AAC_PROFILE_LC;
-      if (AACSetRawBlockParams((HAACDecoder)_aac, 0, &info) != ERR_AAC_NONE) {
-        releaseAudioDecoder();
-        _audioStatus = F("Audio unavailable");
-      }
-    }
-  } else if (_audioCodec == AudioCodec::Mp3) {
-    _mp3 = malloc(sizeof(mp3dec_t));
-    if (_mp3) mp3dec_init((mp3dec_t *)_mp3);
-  } else if (_audioCodec == AudioCodec::AmrNb) {
-    _amr = Decoder_Interface_init();
-    if (!_amr) _audioStatus = F("AMR-NB decoder unavailable");
-  }
-  if ((_audioCodec == AudioCodec::Aac && _aac) || (_audioCodec == AudioCodec::Mp3 && _mp3) ||
-      (_audioCodec == AudioCodec::AmrNb && _amr)) {
-    if (!_speaker.start(_audioSampleRate)) _audioStatus = F("Speaker unavailable");
-  }
-  _playStartedAt = millis();
-  _nextFrameAt = _playDelay;
-  _pauseElapsedMs = 0;
-  _pauseFrameRemainingMs = _playDelay;
-  _state = State::Playing;
-  drawPlayButton();
-  drawProgress();
-  return true;
-}
-
-void VideoPlayerScreen::pausePlayback() {
-  const uint32_t now = millis();
-  _pauseElapsedMs = playbackElapsedMs(now);
-  _pauseFrameRemainingMs = (int32_t)(_nextFrameAt - _pauseElapsedMs) > 0
-    ? _nextFrameAt - _pauseElapsedMs : 0;
-  stopSpeaker();
-  _state = State::Paused;
-  drawPlayButton();
-}
-
-void VideoPlayerScreen::finishPlayback() {
-  stopSpeaker();
-  _playFrame = _playFrames;
-  _state = State::Finished;
-  drawPlayButton();
-  drawProgress();
-}
-
-void VideoPlayerScreen::tickPlayback(uint32_t nowMs) {
-  uint32_t elapsed = playbackElapsedMs(nowMs);
-  pumpAudio(elapsed);
-  elapsed = playbackElapsedMs(nowMs);
-  if ((int32_t)(elapsed - _nextFrameAt) >= 0) {
-    _playFrame++;
-    if (_playFrame >= _playFrames) {
-      finishPlayback();
-      return;
-    }
-    if (!loadPlaybackFrame(_playFrame)) {
-      fail(F("Video cache read failed"));
-      draw();
-      return;
-    }
-    _nextFrameAt += _playDelay;
-  }
-  if (nowMs - _lastDrawMs >= 200) {
-    _lastDrawMs = nowMs;
-    drawProgress();
-    drawStatus();
-  }
-}
-
-void VideoPlayerScreen::pumpAudio(uint32_t elapsedMs) {
-  if ((_audioCodec != AudioCodec::Aac && _audioCodec != AudioCodec::Mp3 && _audioCodec != AudioCodec::AmrNb) ||
-      (!_aac && !_mp3 && !_amr) || _audioSample >= _audioSamples || !_speaker.isReady()) return;
-  if (!_demux || _audioTrack >= _demux->track_count) {
-    _audioStatus = F("Audio unavailable");
-    releaseAudioDecoder();
-    return;
-  }
-  unsigned bytes = 0, timestamp = 0, duration = 0;
-  MP4D_frame_offset(_demux, _audioTrack, _audioSample, &bytes, &timestamp, &duration);
-  if (!bytes) {
-    _audioStatus = F("Audio unavailable");
-    releaseAudioDecoder();
-    return;
-  }
-  if (timestampMs(timestamp, _audioTimeScale) > elapsedMs + 80) return;
-  if (!decodeAudioSample()) {
-    _audioStatus = _audioCodec == AudioCodec::AmrNb ? F("AMR-NB decode failed") : F("Audio unavailable");
-    releaseAudioDecoder();
-  }
-  _audioSample++;
-  if (_audioSample >= _audioSamples) _audioTailStartedAt = millis();
-}
-
-bool VideoPlayerScreen::decodeAudioSample() {
-  uint32_t bytes, timestamp, duration;
-  if (!readSample(_audioTrack, _audioSample, bytes, timestamp, duration)) return false;
-  if (_audioCodec == AudioCodec::Aac) return decodeAacSample(_sampleBuffer, bytes);
-  if (_audioCodec == AudioCodec::Mp3) return decodeMp3Sample(_sampleBuffer, bytes);
-  return _audioCodec == AudioCodec::AmrNb && decodeAmrNbSample(_sampleBuffer, bytes);
-}
-
-bool VideoPlayerScreen::decodeAacSample(const uint8_t *bytes, uint32_t length) {
-  if (!_aac || !bytes || !length) return false;
-  if (!_audioScratch) _audioScratch = (int16_t *)ps_malloc(2048 * sizeof(int16_t));
-  if (!_audioScratch) return false;
-  unsigned char *input = const_cast<unsigned char *>(bytes);
-  int remaining = (int)length;
-  if (AACDecode((HAACDecoder)_aac, &input, &remaining, _audioScratch) != ERR_AAC_NONE) return false;
-  AACFrameInfo info{};
-  AACGetLastFrameInfo((HAACDecoder)_aac, &info);
-  if (info.nChans < 1 || info.nChans > 2 || info.outputSamps < info.nChans) return false;
-  if (!_audioSampleRate) _audioSampleRate = info.sampRateOut;
-  if (info.sampRateOut && _speaker.sampleRate() != (uint32_t)info.sampRateOut &&
-      !_speaker.setSampleRate((uint32_t)info.sampRateOut)) return false;
-  uint32_t frames = info.outputSamps / info.nChans;
-  for (uint32_t start = 0; start < frames; ) {
-    uint16_t count = frames - start > PcmFrames ? PcmFrames : (uint16_t)(frames - start);
-    for (uint16_t i = 0; i < count; i++) {
-      int32_t value = _audioScratch[(start + i) * info.nChans];
-      if (info.nChans == 2) value = (value + _audioScratch[(start + i) * 2 + 1]) / 2;
-      _pcm[i] = (int16_t)value;
-    }
-    if (_speaker.writePcm16(_pcm, count, 100) != count) return false;
-    _audioFramesWritten += count;
-    start += count;
-  }
-  return true;
-}
-
-bool VideoPlayerScreen::decodeMp3Sample(const uint8_t *bytes, uint32_t length) {
-  if (!_mp3 || !bytes || !length) return false;
-  if (!_audioScratch) _audioScratch = (int16_t *)ps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t));
-  if (!_audioScratch) return false;
-  mp3dec_frame_info_t info{};
-  int frames = mp3dec_decode_frame((mp3dec_t *)_mp3, bytes, (int)length, _audioScratch, &info);
-  if (frames <= 0 || info.channels < 1 || info.channels > 2 || !info.hz) return false;
-  if (!_audioSampleRate) _audioSampleRate = info.hz;
-  if (_speaker.sampleRate() != (uint32_t)info.hz && !_speaker.setSampleRate((uint32_t)info.hz)) return false;
-  for (int start = 0; start < frames; ) {
-    uint16_t count = frames - start > PcmFrames ? PcmFrames : (uint16_t)(frames - start);
-    for (uint16_t i = 0; i < count; i++) {
-      int32_t value = _audioScratch[(start + i) * info.channels];
-      if (info.channels == 2) value = (value + _audioScratch[(start + i) * 2 + 1]) / 2;
-      _pcm[i] = (int16_t)value;
-    }
-    if (_speaker.writePcm16(_pcm, count, 100) != count) return false;
-    _audioFramesWritten += count;
-    start += count;
-  }
-  return true;
-}
-
-bool VideoPlayerScreen::decodeAmrNbSample(const uint8_t *bytes, uint32_t length) {
-  // RFC 3267 octet-aligned AMR-NB: one ToC byte plus the packed payload.
-  // 3GP `samr` samples contain exactly one such frame.
-  static const uint8_t FrameBytes[] = { 13, 14, 16, 18, 20, 21, 27, 32, 6 };
-  if (!_amr || !bytes || !length) return false;
-  uint8_t frameType = (bytes[0] >> 3) & 0x0f;
-  if (frameType <= 8) {
-    if (length != FrameBytes[frameType]) return false;
-  } else if (frameType == 15) {
-    if (length != 1) return false; // no-data frame
-  } else {
-    return false; // AMR-WB and reserved AMR-NB frame types are unsupported
-  }
-  if (!_audioScratch) _audioScratch = (int16_t *)ps_malloc(160 * sizeof(int16_t));
-  if (!_audioScratch) return false;
-  Decoder_Interface_Decode(_amr, bytes, _audioScratch, 0);
-  if (_speaker.writePcm16(_audioScratch, 160, 100) != 160) return false;
-  _audioFramesWritten += 160;
-  return true;
-}
-
-uint32_t VideoPlayerScreen::timestampMs(uint32_t timestamp, uint32_t timeScale) const {
-  return timeScale ? (uint32_t)(((uint64_t)timestamp * 1000UL) / timeScale) : 0;
-}
-
-uint32_t VideoPlayerScreen::presentationTimestampMs(int64_t timestamp, uint32_t timeScale) const {
-  if (timestamp < 0 || !timeScale) return 0;
-  uint64_t milliseconds = ((uint64_t)timestamp * 1000UL) / timeScale;
-  return milliseconds > 0xffffffffULL ? 0xffffffffUL : (uint32_t)milliseconds;
-}
-
-uint32_t VideoPlayerScreen::playbackElapsedMs(uint32_t nowMs) const {
-  if ((_aac || _mp3 || _amr) && _audioSampleRate && _audioFramesWritten) {
-    uint32_t elapsed = (uint32_t)(((uint64_t)_audioFramesWritten * 1000UL) / _audioSampleRate);
-    // Once all source packets are queued, let the final DMA tail advance so
-    // a slightly-shorter audio track cannot hold the last video frame forever.
-    return _audioTailStartedAt ? elapsed + (nowMs - _audioTailStartedAt) : elapsed;
-  }
-  return nowMs - _playStartedAt;
-}
-
-bool VideoPlayerScreen::fail(const String &message) {
-  Serial.print(F("Video player failure: message="));
-  Serial.print(message);
-  Serial.print(F(" codec="));
-  Serial.print(videoCodecLabel());
-  Serial.print(F(" sample="));
-  Serial.print(_videoSample);
-  Serial.print('/');
-  Serial.print(_videoSamples);
-  Serial.print(F(" decoded="));
-  Serial.print(_presentationIndex);
-  Serial.print('/');
-  Serial.print(_presentationCount);
-  Serial.print(F(" cached="));
-  Serial.println(_buildFrames);
-  stopSpeaker();
-  if (_cacheWriter.active) _mediaCache.abort(_cacheWriter);
-  _error = message;
-  _state = State::Error;
-  return false;
-}
-
-void VideoPlayerScreen::logBuildFailure(const __FlashStringHelper *stage) const {
-  const String &decoderError = _videoCodec == VideoCodec::H264 ? _h264.lastError() : _legacy.lastError();
-  Serial.print(F("Video cache build failure: stage="));
-  Serial.print(stage);
-  Serial.print(F(" codec="));
-  Serial.print(videoCodecLabel());
-  Serial.print(F(" input="));
-  Serial.print(_videoSample);
-  Serial.print('/');
-  Serial.print(_videoSamples);
-  Serial.print(F(" decoded="));
-  Serial.print(_presentationIndex);
-  Serial.print('/');
-  Serial.print(_presentationCount);
-  Serial.print(F(" cached="));
-  Serial.print(_buildFrames);
-  Serial.print(F(" pending="));
-  Serial.print(_hasPendingFrame ? F("yes") : F("no"));
-  Serial.print(F(" decoderError="));
-  Serial.println(decoderError.length() ? decoderError : String(F("none")));
-}
-
-bool VideoPlayerScreen::fail(const __FlashStringHelper *message) {
-  return fail(String(message));
+  _stream->releaseFrame(newest.slot, false);
 }
 
 void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::None) return;
-  if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
-    _sdMounted = false;
-    fail(event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable"));
-    draw();
-  } else if (event == SdCardEvent::Mounted) {
-    _sdMounted = true;
-  }
-}
-
-void VideoPlayerScreen::stopSpeaker() {
-  _speaker.stop();
+  if (event == SdCardEvent::Mounted) { _sdMounted = true; return; }
+  _sdMounted = false;
+  Serial.printf("[Video] SD event=%u\n", static_cast<unsigned>(event));
+  if (_stream) _stream->requestStop();
+  _state = State::Error;
+  _error = event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable");
+  draw();
 }
 
 String VideoPlayerScreen::displayName(const String &path) const {
-  int slash = path.lastIndexOf('/');
+  const int slash = path.lastIndexOf('/');
   return slash < 0 ? path : path.substring(slash + 1);
 }
 
@@ -1272,6 +1414,8 @@ void VideoPlayerScreen::draw(bool full) {
   if (full) {
     tft.fillScreen(TFT_BLACK);
     drawTopBar();
+    tft.fillRect(0, UiKit::AppBarHeight, _display.width(), 32, TFT_BLACK);
+    tft.fillRect(0, _display.height() - ViewportBottomReserve, _display.width(), ViewportBottomReserve, TFT_BLACK);
   }
   drawPlayButton();
   drawProgress();
@@ -1279,71 +1423,46 @@ void VideoPlayerScreen::draw(bool full) {
   if (_state == State::Error) drawError();
 }
 
-void VideoPlayerScreen::drawTopBar() {
-  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Video"));
-}
+void VideoPlayerScreen::drawTopBar() { UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Video")); }
 
 void VideoPlayerScreen::drawPlayButton() {
   TFT_eSPI &tft = _display.tft();
-  const int16_t cx = _display.width() - 30;
-  const int16_t cy = UiKit::AppBarHeight + 18;
-  const bool enabled = _state != State::Building && _state != State::Error && _sdMounted;
-  tft.fillCircle(cx, cy, 15, enabled ? TFT_DARKGREY : TFT_BLACK);
-  tft.drawCircle(cx, cy, 15, enabled ? TFT_WHITE : TFT_DARKGREY);
+  const int16_t cx = _display.width() - 24;
+  const int16_t cy = UiKit::AppBarHeight + 16;
+  const bool enabled = _state != State::Opening && _state != State::Closing && _state != State::Error && _sdMounted;
+  tft.fillSmoothCircle(cx, cy, 14, enabled ? TFT_DARKGREY : TFT_BLACK, enabled ? TFT_DARKGREY : TFT_BLACK);
   if (!enabled) return;
-  if (_state == State::Playing) {
-    tft.fillRect(cx - 6, cy - 7, 4, 14, TFT_WHITE);
-    tft.fillRect(cx + 2, cy - 7, 4, 14, TFT_WHITE);
-  } else {
-    tft.fillTriangle(cx - 4, cy - 8, cx - 4, cy + 8, cx + 8, cy, TFT_WHITE);
-  }
+  UiKit::drawPlaybackIcon(tft, cx, cy, _state == State::Playing, TFT_WHITE, TFT_DARKGREY);
 }
 
 void VideoPlayerScreen::drawProgress() {
-  TFT_eSPI &tft = _display.tft();
-  const int16_t x = 16, width = _display.width() - 32, y = _display.height() - 16;
-  uint32_t elapsed = _state == State::Building && _videoSamples
-    ? (uint32_t)(((uint64_t)_durationMs * _videoSample) / _videoSamples)
-    : (_state == State::Playing ? playbackElapsedMs(millis())
-       : (_state == State::Paused ? _pauseElapsedMs
-          : (_state == State::Finished ? _durationMs : 0)));
-  if (elapsed > _durationMs) elapsed = _durationMs;
-  uint32_t filled = _durationMs ? (uint32_t)(((uint64_t)width * elapsed) / _durationMs) : 0;
-  tft.fillRect(x, y, width, 6, TFT_DARKGREY);
-  if (filled) tft.fillRect(x, y, filled, 6, TFT_CYAN);
+  const int16_t x = 16, width = _display.width() - 32, y = _display.height() - 18;
+  const uint8_t percent = _durationMs ? (uint8_t)min<uint32_t>(100, ((uint64_t)_elapsedMs * 100) / _durationMs) : 0;
+  UiKit::drawProgressBar(_display.tft(), x, y, width, 10, percent, false, TFT_CYAN, TFT_DARKGREY, TFT_BLACK, true);
 }
 
 void VideoPlayerScreen::drawStatus() {
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(48, UiKit::AppBarHeight + 3, _display.width() - 96, 24, TFT_BLACK);
-  String text;
-  if (_state == State::Building) text = "Caching video " + String(_videoSample) + "/" + String(_videoSamples);
-  else if (_audioStatus.length()) text = _audioStatus;
-  else text = _fileName;
-  UiText::draw(tft, UiKit::ellipsize(text, _display.width() - 96, UiText::Size::Compact),
-               _display.width() / 2, UiKit::AppBarHeight + 14, TFT_LIGHTGREY, TFT_BLACK,
-               UiText::Size::Compact, MC_DATUM);
+  tft.fillRect(48, UiKit::AppBarHeight + 2, _display.width() - 96, 28, TFT_BLACK);
+  String text = _status.length() ? _status : _fileName;
+  UiText::draw(tft, UiKit::ellipsize(text, _display.width() - 104, UiText::Size::Compact),
+               50, UiKit::AppBarHeight + 16, TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, ML_DATUM);
 }
 
 void VideoPlayerScreen::drawError() {
   TFT_eSPI &tft = _display.tft();
-  int newline = _error.indexOf('\n');
-  String first = newline < 0 ? _error : _error.substring(0, newline);
-  String second = newline < 0 ? String() : _error.substring(newline + 1);
-  const int16_t centerX = _display.width() / 2;
-  const int16_t centerY = _display.height() / 2;
-  UiText::draw(tft, UiKit::ellipsize(first, _display.width() - 32, UiText::Size::Compact), centerX,
-               second.length() ? centerY - 12 : centerY, TFT_RED, TFT_BLACK,
-               UiText::Size::Compact, MC_DATUM);
-  if (second.length()) {
-    UiText::draw(tft, UiKit::ellipsize(second, _display.width() - 32, UiText::Size::Compact),
-                 centerX, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
-                 UiText::Size::Compact, MC_DATUM);
-  }
+  const int newline = _error.indexOf('\n');
+  const String first = newline < 0 ? _error : _error.substring(0, newline);
+  const String second = newline < 0 ? String() : _error.substring(newline + 1);
+  const int16_t centerY = ViewportTop + _viewportHeight / 2;
+  UiText::draw(tft, UiKit::ellipsize(first, _display.width() - 32, UiText::Size::Compact), _display.width() / 2,
+               second.length() ? centerY - 12 : centerY, TFT_RED, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
+  if (second.length()) UiText::draw(tft, UiKit::ellipsize(second, _display.width() - 32, UiText::Size::Compact),
+                                    _display.width() / 2, centerY + 12, TFT_LIGHTGREY, TFT_BLACK,
+                                    UiText::Size::Compact, MC_DATUM);
 }
 
 bool VideoPlayerScreen::controlContains(int16_t x, int16_t y) const {
-  int16_t cx = _display.width() - 30;
-  int16_t cy = UiKit::AppBarHeight + 18;
-  return x >= cx - 18 && x <= cx + 18 && y >= cy - 18 && y <= cy + 18;
+  return x >= _display.width() - 48 && x < _display.width() && y >= UiKit::AppBarHeight &&
+         y < UiKit::AppBarHeight + 32;
 }

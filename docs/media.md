@@ -26,9 +26,11 @@ MP3 playback uses a sidecar cache at `<source-directory>/.cache/<file>.empa`. It
 
 ## Video
 
-The Video Player opens MP4/3GP ISO-BMFF files up to 320 × 240. It accepts H.264 Baseline/Main/High, H.263, and MPEG-4 Part 2 video. Compatible AAC-LC, MP3, or AMR-NB (`samr`, 8 kHz mono) audio is sent to the I2S speaker.
+The Video Player opens MP4/3GP ISO-BMFF files up to 320 × 480. It accepts H.264 Baseline/Main/High, H.263, and MPEG-4 Part 2 video and honors source presentation timestamps through 30fps. Compatible AAC-LC, MP3, or AMR-NB (`samr`, 8 kHz mono) audio remains the playback clock. Decoders enqueue mono PCM into a 16,384-frame PSRAM ring; startup requires at least 80 ms, normal refill begins below 80 ms and targets 160 ms, and non-blocking I2S submissions are capped at 256 frames per scheduler pass. A full I2S queue is backpressure, not a codec failure. The clock is active wall time clamped by submitted PCM duration, so an audio underrun also stops video progress.
 
-The first open converts frames to an SD-backed animation cache before playback. `VideoH264` wraps pinned lib264; `VideoLegacy` exposes H.263 and MPEG-4 Part 2 through the same planar I420 callback contract, keeping the cache builder independent from source codecs. Both decoder paths need PSRAM. Use `tools/generate_legacy_video_fixtures.sh` and FFmpeg 9.0.1 to generate reproducible 176 × 144, 10fps legacy fixtures under `tests/video/fixtures/`.
+Video streams directly from its source and never reads, writes, or removes an `.emga` sidecar. Existing video sidecars remain harmless orphaned cache files until normal Files cleanup; `.emga` remains the animation cache for GIF/WebP. `VideoH264` wraps pinned lib264; `VideoLegacy` exposes H.263 and MPEG-4 Part 2 through the same planar I420 callback contract. Both decoder paths need PSRAM. The second-core worker owns the source, demuxer, decoders, frame buffers, PCM ring, and I2S operations. Audio drain, up to four compressed audio decodes, and one available video sample are interleaved in bounded scheduling quanta. Source samples share an 8 KiB PSRAM read window; each refill or larger-file chunk holds the shared SD/touch SPI lock only for one bounded transaction.
+
+The screen reserves its 48px app bar, 32px status/control strip, and 32px progress strip. Frames are aspect-preserving and centered in the remaining 320 × 368 viewport; unused space is black, so a 320 × 480 portrait source is pillarboxed rather than cropped or stretched. The aspect-fit rectangle is computed once, each of the two RGB565 slots stores only that packed active rectangle, and the UI clears the letterbox area once before pushing only active pixels. Playback starts after two decoded video frames and the audio minimum are buffered. Predictive frames are still decoded when late; conversion may be skipped beyond 250 ms lateness, but the newest decoded frame is forced out after 250 ms without a presentation so dropping cannot permanently freeze the image. Use `tools/generate_legacy_video_fixtures.sh` and FFmpeg 9.0.1 to generate reproducible 320 × 480, 30fps H.263, MPEG-4 Part 2, and H.264/AAC fixtures under `tests/video/fixtures/`.
 
 ## SD cache rules
 
@@ -52,9 +54,9 @@ BMP, PNG, JPEG, and static WebP images use an `EM16` version-2 file: a 32-byte l
 
 Eligible crop-zoom renders use a separate `.em16z` sidecar with the same validated version-2 header and RGB565 canvas. The fit and crop sidecars are independently cached, so switching either view can display without decoding or showing a loading indicator.
 
-### `.emga`: animation and video frames
+### `.emga`: animated-image frames
 
-Animated GIF/WebP and converted video use `EMGA` version 4. Its 40-byte little-endian header declares packed RGB444 encoding (`2`), fixed 480 × 320 display geometry, source size/time, source geometry, frame count, loop count, and cached draw geometry.
+Animated GIF/WebP use `EMGA` version 4. Its 40-byte little-endian header declares packed RGB444 encoding (`2`), fixed 480 × 320 display geometry, source size/time, source geometry, frame count, loop count, and cached draw geometry.
 
 Each frame has a 32-bit little-endian delay in milliseconds followed by two 12-bit RGB444 pixels packed into three bytes (two bytes for an odd final pixel). This keeps 4,096 colors while using 25% less SD storage/read bandwidth than RGB565. The worker expands frames into an RGB565 PSRAM ring before TFT transfer. Source animation delays are clamped to at least 100 ms (10fps), and GIF/WebP frame transfers are batched so touch and close interaction remain responsive.
 

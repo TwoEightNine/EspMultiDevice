@@ -25,6 +25,7 @@ SpeakerController::SpeakerController(int bclkPin,
     _sampleRate(sampleRate),
     _volume(10),
     _ready(false),
+    _paused(false),
     _controlStarted(false),
     _lastError(F("Not initialized")) {
 }
@@ -68,8 +69,14 @@ bool SpeakerController::start(uint32_t sampleRate) {
     stop();
     return false;
   }
+  if (_paused && i2s_start(_port) != ESP_OK) {
+    setError(F("Speaker I2S restart failed"));
+    stop();
+    return false;
+  }
 
   i2s_zero_dma_buffer(_port);
+  _paused = false;
   delay(StartupSilenceMs);
   unmute();
   return true;
@@ -128,7 +135,7 @@ const String &SpeakerController::lastError() const {
 }
 
 size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs) {
-  if (!_ready || !samples || sampleCount == 0) {
+  if (!_ready || _paused || !samples || sampleCount == 0) {
     return 0;
   }
 
@@ -142,6 +149,7 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
       timeoutMs / portTICK_PERIOD_MS
     );
     if (result != ESP_OK) {
+      if (timeoutMs == 0 && result == ESP_ERR_TIMEOUT) return bytesWritten / sizeof(samples[0]);
       setError(F("Speaker I2S write failed"));
       return 0;
     }
@@ -168,6 +176,7 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
     size_t chunkSamples = bytesWritten / sizeof(_volumeBuffer[0]);
     writtenSamples += chunkSamples;
     if (result != ESP_OK) {
+      if (timeoutMs == 0 && result == ESP_ERR_TIMEOUT) break;
       setError(F("Speaker I2S write failed"));
       break;
     }
@@ -175,6 +184,33 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
   }
 
   return writtenSamples;
+}
+
+size_t SpeakerController::tryWritePcm16(const int16_t *samples, size_t sampleCount) {
+  if (sampleCount > VolumeBufferSamples) sampleCount = VolumeBufferSamples;
+  return writePcm16(samples, sampleCount, 0);
+}
+
+bool SpeakerController::pauseOutput() {
+  if (!_ready || _paused) return _ready;
+  mute();
+  if (i2s_stop(_port) != ESP_OK) {
+    setError(F("Speaker I2S pause failed"));
+    return false;
+  }
+  _paused = true;
+  return true;
+}
+
+bool SpeakerController::resumeOutput() {
+  if (!_ready || !_paused) return _ready;
+  if (i2s_start(_port) != ESP_OK) {
+    setError(F("Speaker I2S resume failed"));
+    return false;
+  }
+  _paused = false;
+  unmute();
+  return true;
 }
 
 bool SpeakerController::drain(uint32_t timeoutMs) {
@@ -197,6 +233,7 @@ void SpeakerController::stop() {
 
   i2s_driver_uninstall(_port);
   _ready = false;
+  _paused = false;
   pinMode(_bclkPin, INPUT);
   pinMode(_wsPin, INPUT);
   pinMode(_dataPin, INPUT);

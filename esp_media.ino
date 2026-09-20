@@ -395,7 +395,7 @@ void setup() {
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
-  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage, *mediaCache);
+  videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);

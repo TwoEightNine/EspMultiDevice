@@ -109,7 +109,7 @@ bool VideoLegacy::emitFrame(FrameCallback callback, void *context) {
     return false;
   }
   if (frame->width > _maximumWidth || frame->height > _maximumHeight) {
-    _error = F("Decoded video exceeds 320x240");
+    _error = String(F("Decoded video exceeds ")) + _maximumWidth + 'x' + _maximumHeight;
     return false;
   }
   if (!frame->data[0] || !frame->data[1] || !frame->data[2] || frame->linesize[0] < frame->width ||
