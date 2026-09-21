@@ -23,7 +23,9 @@ public:
   VideoH264();
   ~VideoH264();
 
-  bool begin(uint16_t maximumWidth, uint16_t maximumHeight);
+  bool begin(uint16_t maximumWidth, uint16_t maximumHeight,
+             const uint8_t *sequenceParameterSet = nullptr,
+             uint32_t sequenceParameterSetBytes = 0);
   void end();
   bool decode(const uint8_t *annexB, uint32_t bytes, uint32_t timestamp,
               FrameCallback callback, void *context);

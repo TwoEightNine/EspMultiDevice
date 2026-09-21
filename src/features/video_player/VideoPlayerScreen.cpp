@@ -28,14 +28,19 @@ constexpr uint8_t FrameSlots = 2;
 constexpr uint16_t IoChunkBytes = 8192;
 constexpr uint16_t PcmFrames = 512;
 constexpr uint32_t AudioRingFrames = 16384;
-constexpr uint32_t AudioStartMs = 80;
-constexpr uint32_t AudioLowMs = 80;
-constexpr uint32_t AudioTargetMs = 160;
+// A H.264 access unit plus RGB conversion can occupy this worker for more
+// than 150 ms. Keep enough source PCM behind the I2S DMA queue to refill it
+// before the next long decoder pass.
+constexpr uint32_t AudioStartMs = 280;
+constexpr uint32_t AudioLowMs = 220;
+constexpr uint32_t AudioTargetMs = 300;
 constexpr uint16_t MaxI2sFramesPerPass = 256;
+constexpr uint8_t MaxI2sPrimePasses = 32;
 constexpr uint32_t WorkQuantumUs = 8000;
 constexpr uint32_t SnapshotIntervalMs = 100;
 constexpr uint32_t VideoWorkerStackBytes = 24576;
-constexpr uint8_t MaxAudioPacketsPerQuantum = 4;
+constexpr uint8_t MaxAudioPacketsPerQuantum = 8;
+constexpr uint32_t VideoLateDropMs = 250;
 
 // Video workers are screen-scoped, but the state gate is process-lifetime.
 // A decoder stack fault must never turn a corrupted per-worker semaphore
@@ -980,7 +985,10 @@ private:
 
   bool beginVideoDecoder() {
     if (_videoCodec == VideoCodec::H264) {
-      if (!_h264.begin(_sourceWidth, _sourceHeight)) {
+      const MP4D_track_t &track = _demux->track[_videoTrack];
+      int spsBytes = 0;
+      const uint8_t *sps = static_cast<const uint8_t *>(MP4D_read_sps(_demux, _videoTrack, 0, &spsBytes));
+      if (!_h264.begin(_sourceWidth, _sourceHeight, sps, spsBytes > 0 ? (uint32_t)spsBytes : 0)) {
         setError(hardwareLimitError(_sourceWidth, _sourceHeight, _h264.lastError()));
         return false;
       }
@@ -1074,9 +1082,12 @@ private:
     const uint32_t elapsed = playbackElapsedMs(false);
     __atomic_store_n(&_presentationClockMs, elapsed, __ATOMIC_RELEASE);
     if (_audioCodec != AudioCodec::None) {
-      drainPcmToI2s();
       refillAudio(elapsed);
+      primeI2s();
     }
+    // Do not let a fast decoder run ahead of the audio clock: retaining the
+    // two nearest presentation frames lets the UI release them at their
+    // timestamps. H.264 catch-up still proceeds once those frames are late.
     if (!_videoFinished && freeSlots()) {
       const uint32_t decodeStartedUs = micros();
       if (!decodeOneVideo()) return;
@@ -1150,22 +1161,36 @@ private:
     const uint32_t timestamp = presentationTimestampMs(rawTimestamp, _videoTimeScale);
     if (!_firstVideoTimestampSet) { _firstVideoTimestampSet = true; _firstVideoTimestamp = timestamp; }
     const uint32_t relativeTimestamp = timestamp - _firstVideoTimestamp;
+    // H.264 references can span many access units, so dropping compressed
+    // samples corrupts the decoder's reference chain. Always decode them;
+    // only omit RGB conversion/publication for output that is already stale.
+    const uint32_t clock = __atomic_load_n(&_presentationClockMs, __ATOMIC_ACQUIRE);
+    if (_audioCodec != AudioCodec::None && clock > relativeTimestamp + VideoLateDropMs) {
+      __atomic_add_fetch(&_droppedFrames, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&_droppedSinceLog, 1, __ATOMIC_RELAXED);
+      return true;
+    }
     // Each decoded frame is downscaled and made available immediately. There
     // is no minimum presentation cadence: a resource-constrained clip can
     // legitimately render below 1 fps while the audio clock remains real-time.
     uint8_t slot = 0xff;
-    for (;;) {
-      {
-        StateLock lock(videoStreamStateMutex());
-        if (lock.locked()) {
-          for (uint8_t index = 0; index < FrameSlots; ++index) {
-            if (_slots[index].state == SlotState::Free) { slot = index; _slots[index].state = SlotState::Presenting; break; }
-          }
+    {
+      StateLock lock(videoStreamStateMutex());
+      if (!lock.locked()) return false;
+      for (uint8_t index = 0; index < FrameSlots; ++index) {
+        if (_slots[index].state == SlotState::Free) {
+          slot = index;
+          break;
         }
       }
-      if (slot != 0xff) break;
-      if (stopPending()) return false;
-      vTaskDelay(1);
+      if (slot != 0xff) _slots[slot].state = SlotState::Presenting;
+    }
+    if (slot == 0xff) {
+      // Keep ready slots for the UI to paint. Dropping this incoming frame is
+      // safer than reclaiming a ready frame before the UI gets a turn.
+      __atomic_add_fetch(&_droppedFrames, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&_droppedSinceLog, 1, __ATOMIC_RELAXED);
+      return true;
     }
     const uint32_t scaleStartedUs = micros();
     scaleFrame(frame, _slots[slot].pixels);
@@ -1243,18 +1268,28 @@ private:
     }
   }
 
-  void drainPcmToI2s() {
-    if (!_pcmRing || !_pcmCount || !_speaker.isReady()) return;
+  void primeI2s() {
+    // All writes remain non-blocking and 256 frames at most. Filling the DMA
+    // queue with a short burst is much cheaper than a 150 ms H.264 decode and
+    // prevents that decode from interrupting speaker output.
+    for (uint8_t pass = 0; pass < MaxI2sPrimePasses; ++pass) {
+      if (drainPcmToI2s()) break;
+    }
+  }
+
+  bool drainPcmToI2s() {
+    if (!_pcmRing || !_pcmCount || !_speaker.isReady()) return false;
     uint32_t count = min<uint32_t>(_pcmCount, AudioRingFrames - _pcmRead);
     count = min<uint32_t>(count, MaxI2sFramesPerPass);
     const size_t written = _speaker.tryWritePcm16(_pcmRing + _pcmRead, count);
     if (!written) {
       ++_i2sZeroWrites;
-      return;
+      return true;
     }
     _pcmRead = (_pcmRead + written) % AudioRingFrames;
     _pcmCount -= written;
     _audioFramesSubmitted += written;
+    return false;
   }
 
   bool decodeAudio(const uint8_t *bytes, uint32_t length) {
@@ -1598,10 +1633,16 @@ private:
     const uint32_t dropFps10 = interval ? (droppedSinceLog * 10000UL) / interval : 0;
     const uint32_t averageDecodeUs = _videoDecodeCount ? (uint32_t)(_videoDecodeUs / _videoDecodeCount) : 0;
     const uint32_t averageScaleUs = _scaleCount ? (uint32_t)(_scaleUs / _scaleCount) : 0;
-    Serial.printf("[Video] progress=%lu/%lu video=%lu/%lu audio=%lu/%lu fps(d/p/x)=%lu.%lu/%lu.%lu/%lu.%lu pcm=%lums submitted=%lu i2s0=%lu sd=%lu/%lu avgUs(decode/scale)=%lu/%lu drops=%lu\n",
+    const uint32_t progressPercent10 = _durationMs ? (uint32_t)(((uint64_t)elapsed * 1000UL) / _durationMs) : 0;
+    const uint32_t videoPercent10 = _videoSamples ? (uint32_t)(((uint64_t)_videoSample * 1000UL) / _videoSamples) : 0;
+    const uint32_t audioPercent10 = _audioSamples ? (uint32_t)(((uint64_t)_audioSample * 1000UL) / _audioSamples) : 0;
+    Serial.printf("[Video] progress=%lu/%lu (%lu.%lu%%) video=%lu/%lu (%lu.%lu%%) audio=%lu/%lu (%lu.%lu%%) fps(d/p/x)=%lu.%lu/%lu.%lu/%lu.%lu pcm=%lums submitted=%lu i2s0=%lu sd=%lu/%lu avgUs(decode/scale)=%lu/%lu drops=%lu\n",
                   static_cast<unsigned long>(elapsed), static_cast<unsigned long>(_durationMs),
+                  static_cast<unsigned long>(progressPercent10 / 10), static_cast<unsigned long>(progressPercent10 % 10),
                   static_cast<unsigned long>(_videoSample), static_cast<unsigned long>(_videoSamples),
+                  static_cast<unsigned long>(videoPercent10 / 10), static_cast<unsigned long>(videoPercent10 % 10),
                   static_cast<unsigned long>(_audioSample), static_cast<unsigned long>(_audioSamples),
+                  static_cast<unsigned long>(audioPercent10 / 10), static_cast<unsigned long>(audioPercent10 % 10),
                   static_cast<unsigned long>(decodeFps10 / 10), static_cast<unsigned long>(decodeFps10 % 10),
                   static_cast<unsigned long>(presentFps10 / 10), static_cast<unsigned long>(presentFps10 % 10),
                   static_cast<unsigned long>(dropFps10 / 10), static_cast<unsigned long>(dropFps10 % 10),

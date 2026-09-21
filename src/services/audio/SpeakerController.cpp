@@ -9,6 +9,20 @@ static const i2s_comm_format_t I2S_COMM_FORMAT = I2S_COMM_FORMAT_STAND_I2S;
 #else
 static const i2s_comm_format_t I2S_COMM_FORMAT = I2S_COMM_FORMAT_I2S;
 #endif
+
+constexpr uint16_t I2sDmaDescriptors = 16;
+constexpr uint16_t I2sMinFramesPerDescriptor = 64;
+constexpr uint16_t I2sMaxFramesPerDescriptor = 512;
+constexpr uint16_t I2sTargetQueueMs = 200;
+
+uint16_t dmaFramesForRate(uint32_t sampleRate) {
+  const uint32_t numerator = sampleRate * I2sTargetQueueMs;
+  const uint32_t denominator = (uint32_t)I2sDmaDescriptors * 1000UL;
+  uint32_t frames = (numerator + denominator - 1) / denominator;
+  if (frames < I2sMinFramesPerDescriptor) frames = I2sMinFramesPerDescriptor;
+  if (frames > I2sMaxFramesPerDescriptor) frames = I2sMaxFramesPerDescriptor;
+  return (uint16_t)frames;
+}
 }
 
 SpeakerController::SpeakerController(int bclkPin,
@@ -62,6 +76,10 @@ bool SpeakerController::start(uint32_t sampleRate) {
   // silence. This avoids exposing I2S startup transients at the speaker.
   mute();
 
+  // Configure the DMA queue at the requested rate before installation. A
+  // fixed 512-frame descriptor is about one second at 8 kHz, which makes
+  // video time lead AMR audio even though both streams are otherwise aligned.
+  if (sampleRate && !_ready) _sampleRate = sampleRate;
   if (!begin()) {
     return false;
   }
@@ -216,8 +234,8 @@ bool SpeakerController::resumeOutput() {
 bool SpeakerController::drain(uint32_t timeoutMs) {
   if (!_ready) return true;
   // The legacy Arduino-ESP32 I2S API does not expose a TX-done primitive.
-  // Its eight 512-sample DMA buffers cover at most 256 ms at 16 kHz (less at
-  // 24 kHz), so allow that bounded queue to finish before muting.
+  // The rate-scaled DMA queue is about 200 ms, so allow that bounded queue to
+  // finish before muting.
   const uint32_t drainMs = min<uint32_t>(timeoutMs, 260);
   delay(drainMs);
   return timeoutMs >= drainMs;
@@ -248,11 +266,16 @@ bool SpeakerController::configureI2s() {
   i2sConfig.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
   i2sConfig.communication_format = I2S_COMM_FORMAT;
   i2sConfig.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  // Keep enough queued audio to cover a short burst of display traffic. The
-  // animated image viewer updates the TFT in bounded bands, but the larger
-  // queue also protects playback from SD/cache and filesystem jitter.
-  i2sConfig.dma_buf_count = 8;
-  i2sConfig.dma_buf_len = 512;
+  // Hold roughly 200 ms at every supported rate. A 512-frame descriptor is
+  // appropriate at 44.1 kHz but creates a full second of latency at 8 kHz.
+  const uint16_t dmaFrames = dmaFramesForRate(_sampleRate);
+#if ESP_IDF_VERSION_MAJOR >= 5
+  i2sConfig.dma_desc_num = I2sDmaDescriptors;
+  i2sConfig.dma_frame_num = dmaFrames;
+#else
+  i2sConfig.dma_buf_count = I2sDmaDescriptors;
+  i2sConfig.dma_buf_len = dmaFrames;
+#endif
   i2sConfig.use_apll = false;
   i2sConfig.tx_desc_auto_clear = true;
 
