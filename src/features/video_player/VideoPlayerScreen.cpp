@@ -1721,7 +1721,8 @@ VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touc
                                      SecretStorage &secretStorage)
     : Screen(navigator, touch, display), _sdCard(sdCard), _speaker(speaker), _secretStorage(secretStorage),
       _stream(nullptr), _state(State::Opening), _viewMode(ViewMode::FullScreen),
-      _pendingViewMode(ViewMode::FullScreen), _secretAccess(false), _sdMounted(false), _lastTouchDown(false),
+      _pendingViewMode(ViewMode::FullScreen), _orientation(Orientation::Portrait), _secretAccess(false),
+      _sdMounted(false), _lastTouchDown(false),
       _closeRequested(false), _autoPlay(false), _viewModeChangePending(false),
       _playButtonUnderlayValid(false), _durationMs(0), _elapsedMs(0), _lastDrawMs(0),
       _autoFullScreenAtMs(0), _viewportWidth(0), _viewportHeight(0), _sourceWidth(0),
@@ -1766,6 +1767,7 @@ void VideoPlayerScreen::onEnter(const ScreenData &data) {
 
 void VideoPlayerScreen::onExit() {
   if (_stream && !_closeRequested) _stream->pause();
+  restorePortraitOrientation();
 }
 
 bool VideoPlayerScreen::releaseResources() {
@@ -1773,12 +1775,17 @@ bool VideoPlayerScreen::releaseResources() {
   if (!_stream->end()) return false;
   delete _stream;
   _stream = nullptr;
+  restorePortraitOrientation();
   return true;
 }
 
 void VideoPlayerScreen::onResume() {
   _lastTouchDown = false;
-  if (_stream) _stream->play();
+  if (_stream) {
+    updateViewportForViewMode();
+    _stream->configureViewport(_viewportWidth, _viewportHeight);
+    _stream->play();
+  }
   draw();
 }
 
@@ -1790,7 +1797,11 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
     requestViewMode(ViewMode::Embedded, _state == State::Playing);
     return;
   }
-  if (UiKit::navigationIconContains(point.x, point.y)) { requestClose(); return; }
+  if (orientationControlContains(point.x, point.y)) {
+    setOrientation(landscape() ? Orientation::Portrait : Orientation::Landscape);
+    return;
+  }
+  if (!landscape() && UiKit::navigationIconContains(point.x, point.y)) { requestClose(); return; }
   if (playButtonContains(point.x, point.y) && _stream && _state != State::Closing && _state != State::Error) {
     if (_state == State::Playing) {
       _autoFullScreenAtMs = 0;
@@ -1817,6 +1828,28 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
   }
 }
 
+void VideoPlayerScreen::setOrientation(Orientation orientation, bool configureStream) {
+  if (_orientation == orientation) return;
+  _orientation = orientation;
+  const uint8_t rotation = landscape() ? LandscapeRotation : PortraitRotation;
+  _display.setRotation(rotation);
+  _touch.setScreenSize(_display.width(), _display.height());
+  _touch.setRotation(rotation);
+  _playButtonUnderlayValid = false;
+  _viewModeChangePending = false;
+  _pendingViewMode = _viewMode;
+  updateViewportForViewMode();
+  _display.clear(TFT_BLACK);
+  Serial.printf("[Video] orientation=%s viewport=%ux%u\n",
+                landscape() ? "landscape" : "portrait", _viewportWidth, _viewportHeight);
+  if (configureStream && _stream) _stream->configureViewport(_viewportWidth, _viewportHeight);
+  draw(false);
+}
+
+void VideoPlayerScreen::restorePortraitOrientation() {
+  setOrientation(Orientation::Portrait, false);
+}
+
 void VideoPlayerScreen::requestViewMode(ViewMode mode, bool pauseAfterFrame) {
   const ViewMode target = _viewModeChangePending ? _pendingViewMode : _viewMode;
   if (target == mode) return;
@@ -1831,10 +1864,7 @@ void VideoPlayerScreen::requestViewMode(ViewMode mode, bool pauseAfterFrame) {
   _pendingViewMode = mode;
   _viewModeChangePending = true;
   const uint16_t width = _display.width();
-  const uint16_t height = mode == ViewMode::FullScreen
-                          ? _display.height()
-                          : (_display.height() > EmbeddedViewportTop + EmbeddedProgressReserve
-                             ? _display.height() - EmbeddedViewportTop - EmbeddedProgressReserve : 0);
+  const uint16_t height = viewportHeightFor(mode);
   Serial.printf("[Video] view pending=%s viewport=%ux%u\n",
                 mode == ViewMode::FullScreen ? "full" : "embedded", width, height);
   if (_stream) _stream->configureViewport(width, height, pauseAfterFrame);
@@ -1851,21 +1881,23 @@ void VideoPlayerScreen::applyViewMode(ViewMode mode, bool clearOutgoingChrome) {
   _viewModeChangePending = false;
   updateViewportForViewMode();
   if (mode == ViewMode::Embedded) {
-    drawTopBar();
-    drawProgress();
-    drawPlayButton();
+    drawEmbeddedChrome();
   }
 }
 
 void VideoPlayerScreen::updateViewportForViewMode() {
   _viewportWidth = _display.width();
-  _viewportHeight = _viewMode == ViewMode::FullScreen
-                      ? _display.height()
-                      : (_display.height() > EmbeddedViewportTop + EmbeddedProgressReserve
-                         ? _display.height() - EmbeddedViewportTop - EmbeddedProgressReserve : 0);
+  _viewportHeight = viewportHeightFor(_viewMode);
+}
+
+uint16_t VideoPlayerScreen::viewportHeightFor(ViewMode mode) const {
+  if (mode == ViewMode::FullScreen || landscape()) return _display.height();
+  return _display.height() > EmbeddedViewportTop + EmbeddedProgressReserve
+           ? _display.height() - EmbeddedViewportTop - EmbeddedProgressReserve : 0;
 }
 
 void VideoPlayerScreen::useEmbeddedErrorMode() {
+  restorePortraitOrientation();
   _autoFullScreenAtMs = 0;
   _viewModeChangePending = false;
   _pendingViewMode = ViewMode::Embedded;
@@ -1875,7 +1907,7 @@ void VideoPlayerScreen::useEmbeddedErrorMode() {
 void VideoPlayerScreen::clearEmbeddedChrome() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(0, 0, _display.width(), UiKit::AppBarHeight, TFT_BLACK);
+  if (!landscape()) tft.fillRect(0, 0, _display.width(), UiKit::AppBarHeight, TFT_BLACK);
   tft.fillRect(0, _display.height() - EmbeddedProgressReserve, _display.width(),
                EmbeddedProgressReserve, TFT_BLACK);
 }
@@ -1896,10 +1928,12 @@ void VideoPlayerScreen::tick(uint32_t nowMs) {
 }
 
 void VideoPlayerScreen::resetView() {
+  if (landscape()) restorePortraitOrientation();
   _path = _error = "";
   _state = State::Opening;
   _viewMode = ViewMode::FullScreen;
   _pendingViewMode = ViewMode::FullScreen;
+  _orientation = Orientation::Portrait;
   _lastTouchDown = _closeRequested = false;
   _autoPlay = true;
   _viewModeChangePending = false;
@@ -1971,11 +2005,7 @@ void VideoPlayerScreen::presentFrames() {
                               newest.width, newest.height);
   }
   _stream->releaseFrame(newest.slot, false);
-  if (_viewMode == ViewMode::Embedded) {
-    drawTopBar();
-    drawProgress();
-    drawPlayButton();
-  }
+  if (_viewMode == ViewMode::Embedded) drawEmbeddedChrome();
 }
 
 void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
@@ -1995,13 +2025,19 @@ void VideoPlayerScreen::draw(bool full) {
   TFT_eSPI &tft = _display.tft();
   if (full) {
     tft.fillScreen(TFT_BLACK);
-    if (_viewMode == ViewMode::Embedded) drawTopBar();
   }
-  if (_viewMode == ViewMode::Embedded) {
-    drawPlayButton();
-    drawProgress();
-  }
+  if (_viewMode == ViewMode::Embedded) drawEmbeddedChrome();
   if (_state == State::Error) drawError();
+}
+
+void VideoPlayerScreen::drawEmbeddedChrome() {
+  TFT_eSPI &tft = _display.tft();
+  if (!landscape()) drawTopBar();
+  tft.fillRect(0, _display.height() - EmbeddedProgressReserve, _display.width(),
+               EmbeddedProgressReserve, TFT_BLACK);
+  drawOrientationControl();
+  drawProgress();
+  drawPlayButton();
 }
 
 void VideoPlayerScreen::drawTopBar() {
@@ -2047,6 +2083,16 @@ uint16_t VideoPlayerScreen::viewportTop() const {
   return _display.height() > _viewportHeight ? (_display.height() - _viewportHeight) / 2 : 0;
 }
 
+bool VideoPlayerScreen::landscape() const {
+  return _orientation == Orientation::Landscape;
+}
+
+bool VideoPlayerScreen::orientationControlContains(int16_t x, int16_t y) const {
+  return _viewMode == ViewMode::Embedded && _state != State::Error && _state != State::Closing &&
+         x >= 0 && x < EmbeddedProgressReserve &&
+         y >= _display.height() - EmbeddedProgressReserve && y < _display.height();
+}
+
 void VideoPlayerScreen::videoFrameRect(int16_t &x, int16_t &y, uint16_t &width, uint16_t &height) const {
   width = _viewportWidth;
   height = _viewportHeight;
@@ -2077,9 +2123,18 @@ void VideoPlayerScreen::drawPlayButton() {
 }
 
 void VideoPlayerScreen::drawProgress() {
-  const int16_t x = 16, width = _display.width() - 32, y = _display.height() - 18;
+  const int16_t x = EmbeddedProgressReserve + UiKit::ContentPadding;
+  const int16_t width = _display.width() - x - UiKit::ContentPadding;
+  const int16_t y = _display.height() - (EmbeddedProgressReserve + 10) / 2;
   const uint8_t percent = _durationMs ? (uint8_t)min<uint32_t>(100, ((uint64_t)_elapsedMs * 100) / _durationMs) : 0;
   UiKit::drawProgressBar(_display.tft(), x, y, width, 10, percent, false, TFT_CYAN, TFT_DARKGREY, TFT_BLACK, true);
+}
+
+void VideoPlayerScreen::drawOrientationControl() {
+  if (_state == State::Error || _state == State::Closing) return;
+  const int16_t center = EmbeddedProgressReserve / 2;
+  UiKit::drawFullscreenIcon(_display.tft(), center, _display.height() - center,
+                            landscape(), TFT_WHITE, TFT_BLACK);
 }
 
 void VideoPlayerScreen::drawError() {
@@ -2116,5 +2171,6 @@ bool VideoPlayerScreen::playButtonContains(int16_t x, int16_t y) const {
 }
 
 bool VideoPlayerScreen::videoCanvasContains(int16_t x, int16_t y) const {
-  return x >= 0 && x < _display.width() && y >= viewportTop() && y < viewportTop() + _viewportHeight;
+  if (x < 0 || x >= _display.width() || y < viewportTop() || y >= viewportTop() + _viewportHeight) return false;
+  return _viewMode != ViewMode::Embedded || y < _display.height() - EmbeddedProgressReserve;
 }

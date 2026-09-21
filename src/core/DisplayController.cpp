@@ -21,6 +21,13 @@ TFT_eSPI &DisplayController::tft() {
   return _tft;
 }
 
+void DisplayController::setRotation(uint8_t rotation) {
+  if (!_ready) {
+    return;
+  }
+  _tft.setRotation(rotation % 4);
+}
+
 uint16_t DisplayController::width() {
   return _tft.width();
 }

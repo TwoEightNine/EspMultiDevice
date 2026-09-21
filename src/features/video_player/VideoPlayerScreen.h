@@ -29,12 +29,15 @@ public:
 private:
   enum class State : uint8_t { Opening, Buffering, Playing, Paused, Finished, Closing, Error };
   enum class ViewMode : uint8_t { FullScreen, Embedded };
+  enum class Orientation : uint8_t { Portrait, Landscape };
 
   static constexpr uint16_t EmbeddedViewportTop = UiKit::AppBarHeight;
-  static constexpr uint16_t EmbeddedProgressReserve = 32;
+  static constexpr uint16_t EmbeddedProgressReserve = UiKit::AppBarHeight;
   static constexpr uint16_t PlaybackControlSize = 40;
   static constexpr uint16_t PlaybackControlUnderlaySize = PlaybackControlSize + 4;
   static constexpr uint32_t AutoFullScreenDelayMs = 2000;
+  static constexpr uint8_t PortraitRotation = 0;
+  static constexpr uint8_t LandscapeRotation = 1;
 
   SdCardController &_sdCard;
   SpeakerController &_speaker;
@@ -45,6 +48,7 @@ private:
   State _state;
   ViewMode _viewMode;
   ViewMode _pendingViewMode;
+  Orientation _orientation;
   bool _secretAccess;
   bool _sdMounted;
   bool _lastTouchDown;
@@ -66,9 +70,12 @@ private:
 
   void resetView();
   void requestClose();
+  void setOrientation(Orientation orientation, bool configureStream = true);
+  void restorePortraitOrientation();
   void requestViewMode(ViewMode mode, bool pauseAfterFrame = false);
   void applyViewMode(ViewMode mode, bool clearOutgoingChrome);
   void updateViewportForViewMode();
+  uint16_t viewportHeightFor(ViewMode mode) const;
   void useEmbeddedErrorMode();
   void clearEmbeddedChrome();
   void capturePlayButtonUnderlay(const uint16_t *pixels, int16_t frameX, int16_t frameY,
@@ -79,11 +86,15 @@ private:
   void presentFrames();
   void handleSdCardEvent(SdCardEvent event);
   void draw(bool full = true);
+  void drawEmbeddedChrome();
   void drawTopBar();
   void drawPlayButton();
   void drawProgress();
+  void drawOrientationControl();
   void drawError();
   uint16_t viewportTop() const;
+  bool landscape() const;
+  bool orientationControlContains(int16_t x, int16_t y) const;
   bool playButtonContains(int16_t x, int16_t y) const;
   bool videoCanvasContains(int16_t x, int16_t y) const;
   void videoFrameRect(int16_t &x, int16_t &y, uint16_t &width, uint16_t &height) const;

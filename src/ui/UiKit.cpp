@@ -119,6 +119,48 @@ void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   }
 }
 
+void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                        bool exitFullscreen, uint16_t color, uint16_t backgroundColor) {
+  constexpr float strokeWidth = 2.5f;
+  constexpr int16_t outer = 9;
+  constexpr int16_t inner = 3;
+  if (!exitFullscreen) {
+    tft.drawWideLine(centerX - outer, centerY - inner, centerX - outer, centerY - outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX - outer, centerY - outer, centerX - inner, centerY - outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX + inner, centerY - outer, centerX + outer, centerY - outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX + outer, centerY - outer, centerX + outer, centerY - inner,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX - outer, centerY + inner, centerX - outer, centerY + outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX - outer, centerY + outer, centerX - inner, centerY + outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX + inner, centerY + outer, centerX + outer, centerY + outer,
+                     strokeWidth, color, backgroundColor);
+    tft.drawWideLine(centerX + outer, centerY + outer, centerX + outer, centerY + inner,
+                     strokeWidth, color, backgroundColor);
+    return;
+  }
+  tft.drawWideLine(centerX - outer, centerY - inner, centerX - inner, centerY - inner,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - inner, centerY - inner, centerX - inner, centerY - outer,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + inner, centerY - outer, centerX + inner, centerY - inner,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + inner, centerY - inner, centerX + outer, centerY - inner,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - outer, centerY + inner, centerX - inner, centerY + inner,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX - inner, centerY + inner, centerX - inner, centerY + outer,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + inner, centerY + outer, centerX + inner, centerY + inner,
+                   strokeWidth, color, backgroundColor);
+  tft.drawWideLine(centerX + inner, centerY + inner, centerX + outer, centerY + inner,
+                   strokeWidth, color, backgroundColor);
+}
+
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       bool paused, uint16_t color, uint16_t backgroundColor) {
   if (paused) {

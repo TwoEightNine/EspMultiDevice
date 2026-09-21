@@ -33,7 +33,7 @@ An icon-only list action has a 40×40 hit cell, a 16×16 kit glyph, and 12px pad
 
 Use `UiKit`’s generated 40px footer controls and 16px list/keyboard icons. The keyboard assets include off, one-shot Shift, and Caps Lock states. Every icon function takes its foreground and the immediate background color. Pass the true background color so TFT_eSPI antialiasing blends without display readback.
 
-Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars.
+Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars. Use `UiKit::drawFullscreenIcon()` for a fullscreen/fullscreen-exit affordance; its owner must provide a complete 48×48px hit target, such as the Video Player's bottom-left control cell.
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 

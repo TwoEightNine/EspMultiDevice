@@ -372,8 +372,32 @@ bool TouchController::mapWithMesh(TouchPoint &point, uint16_t &localPressureThre
     return false;
   }
 
-  float screenX = (bestCellX + bestS) * (float)(_screenWidth - 1) / 3.0f;
-  float screenY = (bestCellY + bestT) * (float)(_screenHeight - 1) / 3.0f;
+  // The saved mesh is captured in the rotation-0 portrait coordinate space.
+  // Transform its normalized result exactly like mapToScreen() so a runtime
+  // TFT rotation does not bypass calibration accuracy.
+  const float portraitX = (bestCellX + bestS) / 3.0f;
+  const float portraitY = (bestCellY + bestT) / 3.0f;
+  float normalizedX = portraitX;
+  float normalizedY = portraitY;
+  switch (_rotation) {
+    case 1:
+      normalizedX = 1.0f - portraitY;
+      normalizedY = portraitX;
+      break;
+    case 2:
+      normalizedX = 1.0f - portraitX;
+      normalizedY = 1.0f - portraitY;
+      break;
+    case 3:
+      normalizedX = portraitY;
+      normalizedY = 1.0f - portraitX;
+      break;
+    case 0:
+    default:
+      break;
+  }
+  float screenX = normalizedX * (float)(_screenWidth - 1);
+  float screenY = normalizedY * (float)(_screenHeight - 1);
   point.x = (uint16_t)constrain((long)(screenX + 0.5f), 0L, (long)_screenWidth - 1);
   point.y = (uint16_t)constrain((long)(screenY + 0.5f), 0L, (long)_screenHeight - 1);
 

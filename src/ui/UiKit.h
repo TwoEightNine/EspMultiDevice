@@ -66,6 +66,10 @@ void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
 void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool zoomed, uint16_t color, uint16_t backgroundColor);
+// Fullscreen and fullscreen-exit are 24px controls. Their owner provides a
+// complete 48px hit target and the icon's solid immediate background.
+void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                        bool exitFullscreen, uint16_t color, uint16_t backgroundColor);
 // Compact playback control used by streaming media screens.
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       bool paused, uint16_t color, uint16_t backgroundColor);
