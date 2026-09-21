@@ -2,6 +2,7 @@
 
 #include <SD.h>
 #include <esp32-hal-psram.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../../core/SpiBusLock.h"
@@ -12,7 +13,12 @@ namespace {
 // the display's packed RGB565 value. Keeping this in the screen palette
 // prevents transparent avatar pixels from becoming a green fringe/pane.
 constexpr uint32_t BackgroundColor = 0x00000000;  // black RGB888 compositing
-constexpr const char *AvatarDirectory = "/.system/ai_avatars/default/";
+constexpr const char *AvatarRoot = "/.system/ai_avatars/";
+constexpr const char *AvatarConfigPath = "/.system/ai_avatars/avatars.config";
+constexpr const char *DefaultAvatarName = "Default";
+constexpr const char *DefaultAvatarDirectory = "default";
+constexpr size_t MaxAvatarConfigBytes = 2048;
+constexpr size_t ReadChunkBytes = 128;
 // The first path is the user-facing SD path. The absolute variants keep the
 // loader tolerant of the two path spellings accepted by Arduino FS builds.
 constexpr const char *UnderlayPaths[] = {
@@ -53,6 +59,28 @@ uint8_t pixelAlpha(const PNGDRAW &draw, int x) {
       return 255;
   }
 }
+
+bool isDirectoryCharacter(char value) {
+  return (value >= 'a' && value <= 'z') ||
+         (value >= 'A' && value <= 'Z') ||
+         (value >= '0' && value <= '9') || value == '_' || value == '-';
+}
+
+bool copyTrimmed(const char *begin, const char *end, char *destination,
+                 size_t destinationBytes) {
+  if (!begin || !end || end < begin || !destination || destinationBytes < 2) return false;
+  while (begin < end && (*begin == ' ' || *begin == '\t')) begin++;
+  while (end > begin && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+  const size_t length = static_cast<size_t>(end - begin);
+  if (length == 0 || length >= destinationBytes) return false;
+  for (size_t index = 0; index < length; ++index) {
+    const unsigned char character = static_cast<unsigned char>(begin[index]);
+    if (character < 0x20 || character == 0x7f) return false;
+    destination[index] = begin[index];
+  }
+  destination[length] = 0;
+  return true;
+}
 }
 
 AssistantAvatarLoader *AssistantAvatarLoader::_decoderOwner = nullptr;
@@ -60,11 +88,16 @@ AssistantAvatarLoader *AssistantAvatarLoader::_decoderOwner = nullptr;
 AssistantAvatarLoader::AssistantAvatarLoader(SdCardController &sdCard)
     : _sdCard(sdCard), _task(nullptr), _mutex(nullptr), _stopRequested(false),
       _running(false), _requestedGeneration(1), _revision(0), _frames{},
+      _catalogReloadRequested(true), _catalogRevision(0), _avatarNames{},
+      _avatarDirectories{}, _avatarCount(1), _selectedDirectory{},
       _underlayFrame(nullptr), _underlayAlpha(nullptr), _underlayGeneration(0),
       _png(), _file(),
       _decodeFrame(nullptr), _decodeAlpha(nullptr), _decodingUnderlay(false) {
   memset(_frameAlpha, 0, sizeof(_frameAlpha));
   memset(_frameGeneration, 0, sizeof(_frameGeneration));
+  strncpy(_avatarNames[0], DefaultAvatarName, AvatarNameBytes - 1);
+  strncpy(_avatarDirectories[0], DefaultAvatarDirectory, AvatarDirectoryBytes - 1);
+  strncpy(_selectedDirectory, DefaultAvatarDirectory, AvatarDirectoryBytes - 1);
 }
 
 AssistantAvatarLoader::~AssistantAvatarLoader() {
@@ -94,10 +127,10 @@ bool AssistantAvatarLoader::begin() {
 }
 
 void AssistantAvatarLoader::requestReload() {
-  uint32_t generation = _requestedGeneration + 1;
-  if (generation == 0) generation = 1;
-  _requestedGeneration = generation;
+  _catalogReloadRequested = true;
+  advanceGeneration();
   clearFrames();
+  wake();
 }
 
 void AssistantAvatarLoader::stop() {
@@ -115,6 +148,65 @@ bool AssistantAvatarLoader::running() const {
 
 uint32_t AssistantAvatarLoader::revision() const {
   return _revision;
+}
+
+uint32_t AssistantAvatarLoader::catalogRevision() const {
+  return _catalogRevision;
+}
+
+uint8_t AssistantAvatarLoader::avatarCount() const {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return 1;
+  const uint8_t result = _avatarCount;
+  xSemaphoreGive(_mutex);
+  return result;
+}
+
+String AssistantAvatarLoader::avatarName(uint8_t index) const {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return index == 0 ? String(DefaultAvatarName) : String();
+  const String result = index < _avatarCount ? String(_avatarNames[index]) : String();
+  xSemaphoreGive(_mutex);
+  return result;
+}
+
+bool AssistantAvatarLoader::avatarSelected(uint8_t index) const {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return index == 0;
+  const bool result = index < _avatarCount &&
+      strcmp(_selectedDirectory, _avatarDirectories[index]) == 0;
+  xSemaphoreGive(_mutex);
+  return result;
+}
+
+bool AssistantAvatarLoader::selectAvatar(uint8_t index) {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
+  if (index >= _avatarCount) {
+    xSemaphoreGive(_mutex);
+    return false;
+  }
+  const bool changed = strcmp(_selectedDirectory, _avatarDirectories[index]) != 0;
+  if (changed) {
+    strncpy(_selectedDirectory, _avatarDirectories[index], AvatarDirectoryBytes - 1);
+    _selectedDirectory[AvatarDirectoryBytes - 1] = 0;
+  }
+  xSemaphoreGive(_mutex);
+  if (changed) {
+    advanceGeneration();
+    wake();
+  }
+  return true;
+}
+
+void AssistantAvatarLoader::resetAvatar() {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return;
+  const bool changed = strcmp(_selectedDirectory, DefaultAvatarDirectory) != 0;
+  if (changed) {
+    strncpy(_selectedDirectory, DefaultAvatarDirectory, AvatarDirectoryBytes - 1);
+    _selectedDirectory[AvatarDirectoryBytes - 1] = 0;
+  }
+  xSemaphoreGive(_mutex);
+  if (changed) {
+    advanceGeneration();
+    wake();
+  }
 }
 
 const uint16_t *AssistantAvatarLoader::frame(AssistantAvatar::Asset asset) const {
@@ -145,10 +237,10 @@ bool AssistantAvatarLoader::image(AssistantAvatar::Asset asset,
   const uint8_t index = static_cast<uint8_t>(asset);
   if (index >= AssetCount || !_mutex) return false;
   if (xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
-  if (_frameGeneration[index] == _requestedGeneration) {
-    pixels = _frames[index];
-    alpha = _frameAlpha[index];
-  }
+  // A selection change retains the previous frame until the replacement is
+  // decoded, so changing avatars never blanks the pane or the dialogue above.
+  pixels = _frames[index];
+  alpha = _frameAlpha[index];
   const bool available = pixels != nullptr;
   xSemaphoreGive(_mutex);
   return available;
@@ -173,6 +265,7 @@ void AssistantAvatarLoader::taskEntry(void *context) {
 
 void AssistantAvatarLoader::run() {
   while (!_stopRequested) {
+    if (_catalogReloadRequested) (void)loadCatalog();
     const uint32_t generation = _requestedGeneration;
     bool attempted = false;
     for (uint8_t index = 0; index < AssetCount && !_stopRequested; ++index) {
@@ -190,7 +283,7 @@ void AssistantAvatarLoader::run() {
       (void)decodeUnderlay(generation);
     }
     if (generationCurrent(generation)) {
-      vTaskDelay(pdMS_TO_TICKS(attempted ? 250 : 1000));
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(attempted ? 250 : 1000));
     } else {
       taskYIELD();
     }
@@ -200,6 +293,116 @@ void AssistantAvatarLoader::run() {
   vTaskDelete(nullptr);
 }
 
+bool AssistantAvatarLoader::loadCatalog() {
+  _catalogReloadRequested = false;
+  char config[MaxAvatarConfigBytes + 1] = {};
+  size_t length = 0;
+  bool valid = _sdCard.isMounted();
+  fs::File file;
+  if (valid) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) valid = false;
+    if (valid) {
+      file = SD.open(AvatarConfigPath, FILE_READ);
+      if (!file || file.size() > MaxAvatarConfigBytes) valid = false;
+      SpiBusLock::unlock();
+    }
+  }
+  while (valid && length < MaxAvatarConfigBytes) {
+    const size_t request = min(ReadChunkBytes, MaxAvatarConfigBytes - length);
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { valid = false; break; }
+    const size_t read = file.readBytes(config + length, request);
+    SpiBusLock::unlock();
+    if (read == 0) break;
+    length += read;
+  }
+  if (file) {
+    if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      file.close();
+      SpiBusLock::unlock();
+    } else {
+      valid = false;
+    }
+  }
+  if (valid && length == MaxAvatarConfigBytes) valid = false;
+
+  char names[MaxAvatars][AvatarNameBytes] = {};
+  char directories[MaxAvatars][AvatarDirectoryBytes] = {};
+  uint8_t count = 1;
+  strncpy(names[0], DefaultAvatarName, AvatarNameBytes - 1);
+  strncpy(directories[0], DefaultAvatarDirectory, AvatarDirectoryBytes - 1);
+  if (valid) {
+    size_t lineStart = 0;
+    for (size_t cursor = 0; cursor <= length; ++cursor) {
+      if (cursor != length && config[cursor] != '\n') continue;
+      char *line = config + lineStart;
+      config[cursor] = 0;
+      while (*line == ' ' || *line == '\t' || *line == '\r') line++;
+      if (*line) {
+        char parsedName[AvatarNameBytes] = {};
+        char parsedDirectory[AvatarDirectoryBytes] = {};
+        if (!parseConfigLine(line, parsedName, sizeof(parsedName), parsedDirectory,
+                             sizeof(parsedDirectory))) {
+          valid = false;
+          break;
+        }
+        if (count < MaxAvatars) {
+          strncpy(names[count], parsedName, AvatarNameBytes - 1);
+          strncpy(directories[count], parsedDirectory, AvatarDirectoryBytes - 1);
+          count++;
+        }
+      }
+      lineStart = cursor + 1;
+    }
+  }
+  if (!valid) count = 1;
+  if (!_mutex || xSemaphoreTake(_mutex, portMAX_DELAY) != pdTRUE) return false;
+  memcpy(_avatarNames, names, sizeof(_avatarNames));
+  memcpy(_avatarDirectories, directories, sizeof(_avatarDirectories));
+  _avatarCount = count;
+  bool selectedAvailable = false;
+  for (uint8_t index = 0; index < count; ++index) {
+    if (!strcmp(_selectedDirectory, _avatarDirectories[index])) {
+      selectedAvailable = true;
+      break;
+    }
+  }
+  if (!selectedAvailable) {
+    strncpy(_selectedDirectory, DefaultAvatarDirectory, AvatarDirectoryBytes - 1);
+    _selectedDirectory[AvatarDirectoryBytes - 1] = 0;
+    advanceGeneration();
+  }
+  _catalogRevision = _catalogRevision + 1;
+  xSemaphoreGive(_mutex);
+  return valid;
+}
+
+bool AssistantAvatarLoader::parseConfigLine(const char *line, char *name,
+                                            size_t nameBytes, char *directory,
+                                            size_t directoryBytes) {
+  if (!line || !name || !directory) return false;
+  const char *separator = strchr(line, ':');
+  if (!separator || strchr(separator + 1, ':')) return false;
+  const char *end = line + strlen(line);
+  if (!copyTrimmed(line, separator, name, nameBytes) ||
+      !copyTrimmed(separator + 1, end, directory, directoryBytes)) return false;
+  for (const char *character = directory; *character; ++character) {
+    if (!isDirectoryCharacter(*character)) return false;
+  }
+  return true;
+}
+
+bool AssistantAvatarLoader::buildAvatarPath(const char *directory,
+                                            AssistantAvatar::Asset asset,
+                                            char *path, size_t pathBytes) {
+  if (!directory || !*directory || !path || pathBytes == 0) return false;
+  for (const char *character = directory; *character; ++character) {
+    if (!isDirectoryCharacter(*character)) return false;
+  }
+  const int written = snprintf(path, pathBytes, "%s%s/%s", AvatarRoot, directory,
+                               AssistantAvatar::filename(asset));
+  return written > 0 && static_cast<size_t>(written) < pathBytes;
+}
+
 bool AssistantAvatarLoader::decode(AssistantAvatar::Asset asset,
                                    uint32_t generation) {
   if (!generationCurrent(generation) || !_sdCard.isMounted() || !psramFound()) {
@@ -207,8 +410,11 @@ bool AssistantAvatarLoader::decode(AssistantAvatar::Asset asset,
   }
   _decodingUnderlay = false;
   _decoderOwner = this;
-  String path = String(AvatarDirectory) + AssistantAvatar::filename(asset);
-  if (_png.open(path.c_str(), pngOpen, pngClose, pngRead, pngSeek, pngDraw) != PNG_SUCCESS) {
+  char directory[AvatarDirectoryBytes] = {};
+  char path[AvatarDirectoryBytes + 48] = {};
+  if (!directoryForGeneration(generation, directory, sizeof(directory)) ||
+      !buildAvatarPath(directory, asset, path, sizeof(path)) ||
+      _png.open(path, pngOpen, pngClose, pngRead, pngSeek, pngDraw) != PNG_SUCCESS) {
     _png.close();
     _decoderOwner = nullptr;
     return false;
@@ -356,6 +562,30 @@ bool AssistantAvatarLoader::clearFrames() {
 
 bool AssistantAvatarLoader::generationCurrent(uint32_t generation) const {
   return !_stopRequested && generation == _requestedGeneration;
+}
+
+bool AssistantAvatarLoader::directoryForGeneration(uint32_t generation,
+                                                    char *directory,
+                                                    size_t directoryBytes) const {
+  if (!directory || directoryBytes == 0 || !_mutex ||
+      xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
+  const bool current = generation == _requestedGeneration;
+  if (current) {
+    strncpy(directory, _selectedDirectory, directoryBytes - 1);
+    directory[directoryBytes - 1] = 0;
+  }
+  xSemaphoreGive(_mutex);
+  return current;
+}
+
+void AssistantAvatarLoader::advanceGeneration() {
+  uint32_t generation = _requestedGeneration + 1;
+  if (generation == 0) generation = 1;
+  _requestedGeneration = generation;
+}
+
+void AssistantAvatarLoader::wake() {
+  if (_task) xTaskNotifyGive(_task);
 }
 
 void *AssistantAvatarLoader::pngOpen(const char *name, int32_t *size) {

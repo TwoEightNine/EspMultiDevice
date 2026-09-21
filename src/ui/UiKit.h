@@ -39,10 +39,13 @@ enum class NavigationIcon : uint8_t {
 enum class AppBarAction : uint8_t {
   None,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  More
 };
 
 bool navigationIconContains(int16_t x, int16_t y);
+// All app-bar trailing actions occupy the complete 48px cell.
+bool appBarActionContains(int16_t x, int16_t y, int16_t displayWidth);
 
 String ellipsize(const String &text,
                  int16_t maxWidth,
@@ -83,6 +86,14 @@ void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       uint16_t color, uint16_t backgroundColor);
 void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
+// Shared black popup-menu chrome. Rows use the standard 40px list-cell
+// height and may show their selected state without requiring a separate icon.
+void drawPopupMenuFrame(TFT_eSPI &tft, int16_t x, int16_t y,
+                        int16_t width, int16_t height,
+                        uint16_t backgroundColor = TFT_BLACK);
+void drawPopupMenuRow(TFT_eSPI &tft, int16_t x, int16_t y,
+                      int16_t width, const String &label, bool selected,
+                      uint16_t backgroundColor = TFT_BLACK);
 void drawListCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                        uint16_t color, uint16_t backgroundColor);
 void drawListMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

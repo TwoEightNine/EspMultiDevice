@@ -31,6 +31,13 @@ private:
   static constexpr uint8_t MaxAssistantTextLines = 4;
   static constexpr int16_t BubbleTextPadding = 12;
 
+  struct Rect {
+    int16_t x;
+    int16_t y;
+    int16_t w;
+    int16_t h;
+  };
+
   AssistantController &_controller;
   SdCardController &_sdCard;
   AssistantAvatar _avatar;
@@ -44,13 +51,20 @@ private:
   AssistantAvatar::Asset _avatarAsset;
   bool _avatarAssetValid;
   bool _underlayDrawn;
+  bool _avatarMenuOpen;
+  Rect _avatarMenuBounds;
+  Rect _avatarMenuRows[AssistantAvatarLoader::MaxAvatars];
+  uint32_t _lastAvatarCatalogRevision;
 
-  void enter();
+  void enter(bool resetAvatarSelection);
   void requestClose(bool openWiFi);
   void draw(bool full);
   void drawAvatar();
   void clearAvatarPane();
   void drawText();
+  void layoutAvatarMenu();
+  void drawAvatarMenu();
+  void closeAvatarMenu();
   bool active() const;
   void handleSdCardEvent(SdCardEvent event);
 };

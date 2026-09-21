@@ -22,6 +22,8 @@ constexpr int16_t AssistantBubbleY = 125;
 constexpr int16_t AssistantBubbleWidth = 246;
 constexpr int16_t AssistantBubbleHeight = 103;
 constexpr int16_t AssistantTextTop = 134;
+constexpr int16_t AvatarMenuTop = UiKit::AppBarHeight + 8;
+constexpr int16_t AvatarMenuWidth = 224;
 
 void drawSpeechBubble(TFT_eSPI &tft, int16_t x, int16_t y,
                       int16_t width, int16_t height, bool tailPointsUp) {
@@ -122,24 +124,29 @@ AssistantScreen::AssistantScreen(Navigator &navigator, TouchController &touch,
       _avatarLoader(sdCard), _snapshot{}, _lastTouchDown(false),
       _closePending(false), _openingWiFi(false), _lastCloseRequestMs(0),
       _lastAvatarRevision(0), _avatarAsset(AssistantAvatar::Asset::Neutral),
-      _avatarAssetValid(false), _underlayDrawn(false) {
+      _avatarAssetValid(false), _underlayDrawn(false), _avatarMenuOpen(false),
+      _avatarMenuBounds{0, 0, 0, 0}, _avatarMenuRows{},
+      _lastAvatarCatalogRevision(0) {
   _snapshot.clear();
 }
 
-void AssistantScreen::onEnter() { enter(); }
-void AssistantScreen::onResume() { enter(); }
+void AssistantScreen::onEnter() { enter(true); }
+void AssistantScreen::onResume() { enter(false); }
 
-void AssistantScreen::enter() {
+void AssistantScreen::enter(bool resetAvatarSelection) {
   _lastTouchDown = false;
   _closePending = false;
   _openingWiFi = false;
   _lastCloseRequestMs = 0;
   _avatarLoader.begin();
+  if (resetAvatarSelection) _avatarLoader.resetAvatar();
   _controller.activate();
   _snapshot = _controller.snapshot();
   _avatarAsset = AssistantAvatar::assetFor(_snapshot.phase, _snapshot.emotion);
   _avatarAssetValid = true;
   _underlayDrawn = false;
+  _avatarMenuOpen = false;
+  _lastAvatarCatalogRevision = _avatarLoader.catalogRevision();
   draw(true);
 }
 
@@ -167,8 +174,27 @@ void AssistantScreen::handleTouch(const TouchPoint &point) {
   }
   if (_lastTouchDown || _closePending) return;
   _lastTouchDown = true;
+  if (_avatarMenuOpen) {
+    const uint8_t count = _avatarLoader.avatarCount();
+    for (uint8_t index = 0; index < count; ++index) {
+      const Rect &row = _avatarMenuRows[index];
+      if (point.x >= row.x && point.x < row.x + row.w &&
+          point.y >= row.y && point.y < row.y + row.h) {
+        (void)_avatarLoader.selectAvatar(index);
+        closeAvatarMenu();
+        return;
+      }
+    }
+    closeAvatarMenu();
+    return;
+  }
   if (UiKit::navigationIconContains(point.x, point.y)) {
     requestClose(false);
+    return;
+  }
+  if (UiKit::appBarActionContains(point.x, point.y, _display.width())) {
+    _avatarMenuOpen = true;
+    drawAvatarMenu();
     return;
   }
   const int16_t avatarX = (_display.width() - AvatarWidth) / 2;
@@ -211,6 +237,7 @@ void AssistantScreen::tick(uint32_t nowMs) {
   }
   const bool avatarChanged = !_avatarAssetValid || nextAsset != _avatarAsset ||
                              _avatarLoader.revision() != _lastAvatarRevision;
+  const bool catalogChanged = _avatarLoader.catalogRevision() != _lastAvatarCatalogRevision;
   const bool textChanged = next.phase != _snapshot.phase ||
                            !sameText(next.status, _snapshot.status) ||
                            !sameText(next.activationMessage, _snapshot.activationMessage) ||
@@ -222,6 +249,8 @@ void AssistantScreen::tick(uint32_t nowMs) {
   _avatarAssetValid = true;
   if (avatarChanged) drawAvatar();
   if (textChanged) drawText();
+  if (_avatarMenuOpen && (avatarChanged || textChanged || catalogChanged)) drawAvatarMenu();
+  _lastAvatarCatalogRevision = _avatarLoader.catalogRevision();
 }
 
 void AssistantScreen::requestClose(bool openWiFi) {
@@ -237,11 +266,14 @@ void AssistantScreen::draw(bool full) {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   if (full) {
-    UiKit::drawTopAppBar(tft, _display.width(), F("Assistant"));
+    UiKit::drawTopAppBar(tft, _display.width(), F("Assistant"),
+                         UiKit::NavigationIcon::Close,
+                         UiKit::AppBarAction::More);
     clearAvatarPane();
   }
   drawText();
   drawAvatar();
+  if (_avatarMenuOpen) drawAvatarMenu();
 }
 
 void AssistantScreen::drawAvatar() {
@@ -324,6 +356,46 @@ void AssistantScreen::drawText() {
                                  AssistantTextTop + index * UiText::lineHeight(UiText::Size::Content),
                                  assistantColor, ScreenBackground, TL_DATUM);
   }
+}
+
+void AssistantScreen::layoutAvatarMenu() {
+  const int16_t width = min<int16_t>(AvatarMenuWidth, _display.width() - 16);
+  const int16_t x = _display.width() - width - 8;
+  const uint8_t count = _avatarLoader.avatarCount();
+  _avatarMenuBounds = {x, AvatarMenuTop, width,
+                        static_cast<int16_t>(count * UiKit::ListCellHeight)};
+  for (uint8_t index = 0; index < AssistantAvatarLoader::MaxAvatars; ++index) {
+    _avatarMenuRows[index] = index < count
+        ? Rect{x, static_cast<int16_t>(AvatarMenuTop + index * UiKit::ListCellHeight),
+               width, UiKit::ListCellHeight}
+        : Rect{0, 0, 0, 0};
+  }
+}
+
+void AssistantScreen::drawAvatarMenu() {
+  if (!_display.isReady()) return;
+  layoutAvatarMenu();
+  TFT_eSPI &tft = _display.tft();
+  UiKit::drawPopupMenuFrame(tft, _avatarMenuBounds.x, _avatarMenuBounds.y,
+                            _avatarMenuBounds.w, _avatarMenuBounds.h,
+                            ScreenBackground);
+  const uint8_t count = _avatarLoader.avatarCount();
+  for (uint8_t index = 0; index < count; ++index) {
+    const Rect &row = _avatarMenuRows[index];
+    UiKit::drawPopupMenuRow(tft, row.x, row.y, row.w,
+                            _avatarLoader.avatarName(index),
+                            _avatarLoader.avatarSelected(index),
+                            ScreenBackground);
+  }
+}
+
+void AssistantScreen::closeAvatarMenu() {
+  if (!_avatarMenuOpen) return;
+  _avatarMenuOpen = false;
+  // The popup can cover both caption bubbles and the avatar pane. A full UI
+  // redraw restores them from the current snapshot without touching the
+  // assistant controller or its active dialogue.
+  draw(true);
 }
 
 bool AssistantScreen::active() const {

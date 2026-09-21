@@ -200,6 +200,30 @@ void testAvatarAssets() {
         !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Happy), "h.png") &&
         !strcmp(AssistantAvatar::filename(AssistantAvatar::Asset::Speaking), "t.png"),
         "avatar asset filenames");
+
+  char name[AssistantAvatarLoader::AvatarNameBytes] = {};
+  char directory[AssistantAvatarLoader::AvatarDirectoryBytes] = {};
+  check(AssistantAvatarLoader::parseConfigLine("  Friendly avatar : friendly_01  \r",
+                                              name, sizeof(name), directory,
+                                              sizeof(directory)) &&
+        !strcmp(name, "Friendly avatar") && !strcmp(directory, "friendly_01"),
+        "parse avatar config entry");
+  check(!AssistantAvatarLoader::parseConfigLine("Missing directory:", name, sizeof(name),
+                                                directory, sizeof(directory)) &&
+        !AssistantAvatarLoader::parseConfigLine("Broken:../outside", name, sizeof(name),
+                                                directory, sizeof(directory)) &&
+        !AssistantAvatarLoader::parseConfigLine("Too:many:separators", name, sizeof(name),
+                                                directory, sizeof(directory)),
+        "reject malformed avatar config entry");
+  char path[128] = {};
+  check(AssistantAvatarLoader::buildAvatarPath("friendly_01",
+                                               AssistantAvatar::Asset::Happy,
+                                               path, sizeof(path)) &&
+        !strcmp(path, "/.system/ai_avatars/friendly_01/h.png") &&
+        !AssistantAvatarLoader::buildAvatarPath("../outside",
+                                                AssistantAvatar::Asset::Happy,
+                                                path, sizeof(path)),
+        "build selected avatar path");
 }
 }  // namespace
 

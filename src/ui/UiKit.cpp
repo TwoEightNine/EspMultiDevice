@@ -35,6 +35,11 @@ bool navigationIconContains(int16_t x, int16_t y) {
   return x >= 0 && x < AppBarHeight && y >= 0 && y < AppBarHeight;
 }
 
+bool appBarActionContains(int16_t x, int16_t y, int16_t displayWidth) {
+  return x >= displayWidth - AppBarHeight && x < displayWidth &&
+         y >= 0 && y < AppBarHeight;
+}
+
 String ellipsize(const String &text, int16_t maxWidth, UiText::Size size) {
   return UiText::ellipsize(text, maxWidth, size);
 }
@@ -65,9 +70,15 @@ void drawTopAppBar(TFT_eSPI &tft,
   }
   if (action != AppBarAction::None) {
     const int16_t actionCenterX = width - AppBarHeight / 2;
-    drawZoomIcon(tft, actionCenterX, iconCenterY, action == AppBarAction::ZoomOut,
-                 action == AppBarAction::ZoomOut ? TFT_CYAN : style.foregroundColor,
-                 style.backgroundColor);
+    if (action == AppBarAction::More) {
+      drawMoreIcon(tft, actionCenterX, iconCenterY, style.foregroundColor,
+                   style.backgroundColor);
+    } else {
+      drawZoomIcon(tft, actionCenterX, iconCenterY,
+                   action == AppBarAction::ZoomOut,
+                   action == AppBarAction::ZoomOut ? TFT_CYAN : style.foregroundColor,
+                   style.backgroundColor);
+    }
   }
 }
 
@@ -180,6 +191,40 @@ void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   tft.fillSmoothCircle(centerX, centerY - 7, 2, color, backgroundColor);
   tft.fillSmoothCircle(centerX, centerY, 2, color, backgroundColor);
   tft.fillSmoothCircle(centerX, centerY + 7, 2, color, backgroundColor);
+}
+
+void drawPopupMenuFrame(TFT_eSPI &tft, int16_t x, int16_t y,
+                        int16_t width, int16_t height,
+                        uint16_t backgroundColor) {
+  if (width <= 0 || height <= 0) return;
+  // Establish a solid immediate background before antialiasing the rounded
+  // perimeter; popup content deliberately obscures anything below it.
+  tft.fillRect(x - 1, y - 1, width + 2, height + 2, backgroundColor);
+  tft.fillSmoothRoundRect(x, y, width, height, 6, TFT_BLACK,
+                          backgroundColor);
+  tft.drawSmoothRoundRect(x, y, 6, 6, width, height, TFT_DARKGREY,
+                          TFT_BLACK);
+}
+
+void drawPopupMenuRow(TFT_eSPI &tft, int16_t x, int16_t y,
+                      int16_t width, const String &label, bool selected,
+                      uint16_t backgroundColor) {
+  if (width <= 0) return;
+  const uint16_t rowColor = selected ? 0x18E3 : TFT_BLACK;
+  tft.fillRect(x + 1, y, width - 2, ListCellHeight, rowColor);
+  UiText::draw(tft, UiKit::ellipsize(label, width - ContentPadding * 2 - 56,
+                                     UiText::Size::Content),
+               x + ContentPadding, y + ListCellHeight / 2, TFT_WHITE,
+               rowColor, UiText::Size::Content, ML_DATUM);
+  if (selected) {
+    UiText::draw(tft, F("Current"), x + width - ContentPadding,
+                 y + ListCellHeight / 2, TFT_CYAN, rowColor,
+                 UiText::Size::Compact, MR_DATUM);
+  }
+  if (y > 0) {
+    tft.drawFastHLine(x + ContentPadding, y, width - ContentPadding * 2,
+                      selected ? rowColor : backgroundColor);
+  }
 }
 
 void drawListCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

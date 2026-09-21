@@ -163,8 +163,13 @@ AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
 safe-close handshake. AssistantAvatar owns the lower 320×240 avatar pane,
 including clearing it before a new asset set is available, and paints one
 prepared 320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
-decodes the five exact PNG assets from `/.system/ai_avatars/default/` into
-PSRAM; it never draws or updates assistant state. SD reads remain bounded by
+decodes the five exact PNG assets from the selected `/.system/ai_avatars/<dir>/` into
+PSRAM; it never draws or updates assistant state. `/.system/ai_avatars/avatars.config`
+contains optional `Name:dir` entries. The Assistant overflow menu always offers
+Default (`default`) followed by at most nine valid entries; missing, unreadable, or
+malformed configs expose Default only. Selection is screen-scoped, resets to Default
+on a fresh entry, and preserves the previous artwork until the selected replacement
+frame is decoded, so it does not clear captions or interrupt a dialogue. SD reads remain bounded by
 `SpiBusLock`, and the UI task publishes frames to the TFT. It also decodes the
 alpha-capable `/.system/ai_avatars/blur.png` underlay and composites it over the
 black avatar pane before the selected avatar. Missing, invalid, or temporarily
