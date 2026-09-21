@@ -149,7 +149,7 @@ CA; copy the replacement root into the ignored firmware configuration and
 rebuild before the device can connect again.
 
 The Mac pipeline selects SileroVAD, OpenaiASR, OpenAILLM, EdgeTTS, nointent,
-and nomem. The ASR snapshot is
+and `mem_local_short` with OpenAILLM. The ASR snapshot is
 [gpt-4o-mini-transcribe-2025-12-15](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe);
 the chat snapshot is
 [gpt-5.4-mini-2026-03-17](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
@@ -159,10 +159,18 @@ The API key is repeated only in the ASR and LLM sections of ignored
 .runtime/data/.config.yaml. Never put it in Compose, firmware, tracked
 examples, logs, or command arguments.
 
+The Xiaozhi service is a custom overlay built from the pinned arm64 digest and
+upstream commit already listed above. Checksum guards cover each patched
+handler/registry/memory file; any upstream layout mismatch fails the Docker
+build. The overlay adds authenticated idempotent reset, per-device serialized
+summary load/save/reset, and atomic temporary-file-and-rename YAML updates. It
+retains the upstream MIT notice at
+`tools/xiaozhi_local/server_overlay/XIAOZHI_MIT_LICENSE.txt` and in the image.
+
 Run tools/xiaozhi_local/check_backend.sh before live testing. It validates
 provider selection, exact pinned models, non-placeholder private keys, WSS DNS
 advertisement, disabled MQTT, the Caddy CA, container health, and a signed
-bootstrap response without printing credentials. It fails until the user
+bootstrap response plus an authenticated isolated-device reset without printing credentials. It fails until the user
 supplies a valid API key in ignored runtime configuration; never restart the
 stack with a placeholder.
 
@@ -170,15 +178,17 @@ The compile-time Stage 2 contract is selected with
 ESP_MEDIA_ASSISTANT_CONTRACT and built by
 tools/build_assistant_contract.sh. It covers URL rejection, explicit MCP
 disablement, protocol parsing, v1/v2/v3 envelopes, malformed/oversized input,
-session mismatch, caption truncation, state/timeout categories, bounded queue
-overflow, and generation filtering without network or audio I/O.
+session mismatch, heartbeat/reset JSON, malformed reset acknowledgements,
+UTF-8-safe five-turn transcript eviction/draft cancellation, state/timeout
+categories, bounded queue overflow, and generation/request filtering without
+network or audio I/O.
 
 Current compile gates on Arduino-ESP32 3.3.8:
 
 | Image | Result |
 | --- | ---: |
-| Normal Stage 2 firmware | 3,148,048 / 6,553,600 bytes |
-| Stage 2 assistant contract | 3,153,648 / 6,553,600 bytes |
+| Normal assistant firmware | 5,872,832 / 6,553,600 bytes |
+| Assistant contract | 5,883,680 / 6,553,600 bytes |
 | Migrated Stage 0 dependency probe | 3,150,128 / 6,553,600 bytes |
 | Migrated Stage 1 compatibility probe | 3,149,264 / 4,718,592-byte diagnostic gate |
 
@@ -200,8 +210,8 @@ retain at least 8 KiB.
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
 | `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
-| `tests/assistant_contract/` | Compile-time-only Stage 2 URL, protocol, envelope, state, queue, overflow, and generation contract diagnostic. |
-| `tools/xiaozhi_local/` | Pinned local Xiaozhi/Caddy compatibility deployment; ignored runtime state contains its private config, CA, and model. |
+| `tests/assistant_contract/` | Compile-time-only assistant URL, protocol, heartbeat/reset, transcript, envelope, state, queue, overflow, and generation contract diagnostic. |
+| `tools/xiaozhi_local/` | Pinned local Xiaozhi/Caddy deployment plus checksum-guarded reset overlay and tests; ignored runtime state contains its private config, summary memory, CA, and model. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.
 

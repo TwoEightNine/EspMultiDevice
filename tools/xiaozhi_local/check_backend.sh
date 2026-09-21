@@ -45,7 +45,15 @@ wait_for_service caddy
 echo "PASS pinned containers are running and healthy"
 
 response_file="$(mktemp -t esp-media-bootstrap.XXXXXX)"
-trap 'rm -f "$response_file"' EXIT
+container_bootstrap="/tmp/esp-media-reset-bootstrap.json"
+xiaozhi_container=""
+cleanup() {
+  rm -f "$response_file"
+  if [[ -n "$xiaozhi_container" ]]; then
+    docker exec "$xiaozhi_container" rm -f "$container_bootstrap" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
 curl --silent --show-error --cacert "$ca_file" --output "$response_file" \
   --connect-timeout 15 --max-time 15 \
   -H 'Activation-Version: 1' \
@@ -56,4 +64,9 @@ curl --silent --show-error --cacert "$ca_file" --output "$response_file" \
   --data '{"version":2,"language":"zh-CN"}' \
   "https://$host:8443/xiaozhi/ota/"
 ruby "$tool_dir/check_config.rb" bootstrap "$response_file"
+xiaozhi_container="$(docker-compose --env-file .runtime/endpoint.env ps -q xiaozhi)"
+docker cp "$response_file" "$xiaozhi_container:$container_bootstrap" >/dev/null
+docker exec "$xiaozhi_container" python /opt/xiaozhi-esp32-server/reset_integration.py \
+  "$container_bootstrap" '02:00:00:00:00:01' \
+  '00000000-0000-4000-8000-000000000001'
 echo "BACKEND_READINESS PASS"

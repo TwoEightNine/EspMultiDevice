@@ -175,6 +175,29 @@ void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   tft.drawWideLine(centerX - 3, centerY + 6, centerX + 7, centerY, 3.0f, color, backgroundColor);
 }
 
+void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                              bool listening, bool available,
+                              uint16_t color, uint16_t backgroundColor) {
+  const uint16_t bodyColor = available ? color : TFT_DARKGREY;
+  tft.fillSmoothRoundRect(centerX - 4, centerY - 8, 8, 13, 4,
+                          bodyColor, backgroundColor);
+  tft.drawWideLine(centerX - 7, centerY + 1, centerX - 7, centerY + 3,
+                   2.0f, bodyColor, backgroundColor);
+  tft.drawWideLine(centerX + 7, centerY + 1, centerX + 7, centerY + 3,
+                   2.0f, bodyColor, backgroundColor);
+  tft.drawSmoothArc(centerX, centerY + 1, 8, 6, 0, 180,
+                    bodyColor, backgroundColor, true);
+  tft.drawWideLine(centerX, centerY + 8, centerX, centerY + 11,
+                   2.0f, bodyColor, backgroundColor);
+  tft.drawWideLine(centerX - 4, centerY + 11, centerX + 4, centerY + 11,
+                   2.0f, bodyColor, backgroundColor);
+  if (!available || !listening) {
+    const uint16_t slashColor = available ? color : TFT_LIGHTGREY;
+    tft.drawWideLine(centerX - 9, centerY - 9, centerX + 9, centerY + 10,
+                     2.5f, slashColor, backgroundColor);
+  }
+}
+
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         uint16_t color, uint16_t backgroundColor) {
   drawAlphaIcon(tft, centerX - ic_back_width / 2, centerY - ic_back_height / 2,

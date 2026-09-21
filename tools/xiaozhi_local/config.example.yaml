@@ -1,3 +1,5 @@
+enable_websocket_ping: true
+
 server:
   websocket: wss://192-168-1-10.sslip.io:8443/xiaozhi/v1/
   auth:
@@ -17,7 +19,7 @@ selected_module:
   LLM: OpenAILLM
   TTS: EdgeTTS
   Intent: nointent
-  Memory: nomem
+  Memory: mem_local_short
 
 VAD:
   SileroVAD:
@@ -54,5 +56,6 @@ Intent:
     type: nointent
 
 Memory:
-  nomem:
-    type: nomem
+  mem_local_short:
+    type: mem_local_short
+    llm: OpenAILLM

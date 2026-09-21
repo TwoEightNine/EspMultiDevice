@@ -264,6 +264,20 @@ bool buildAbort(const char *sessionId, char *output, size_t capacity) {
   return root && serialize(root, output, capacity);
 }
 
+bool buildPing(char *output, size_t capacity) {
+  cJSON *root = baseMessage("ping", nullptr);
+  return root && serialize(root, output, capacity);
+}
+
+bool buildConversationReset(uint32_t requestId, char *output, size_t capacity) {
+  if (!requestId) return false;
+  cJSON *root = baseMessage("conversation", nullptr);
+  if (!root) return false;
+  cJSON_AddStringToObject(root, "action", "reset");
+  cJSON_AddNumberToObject(root, "request_id", requestId);
+  return serialize(root, output, capacity);
+}
+
 bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessionId,
                   Message &message) {
   message.clear();
@@ -345,6 +359,25 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
     if (cJSON_IsString(emotion)) message.emotion = parseEmotion(emotion->valuestring);
     if (cJSON_IsString(text)) copyUtf8Bounded(text->valuestring, message.text, sizeof(message.text));
     message.type = MessageType::Emotion;
+  } else if (!strcmp(type->valuestring, "pong")) {
+    message.type = MessageType::Pong;
+  } else if (!strcmp(type->valuestring, "conversation")) {
+    cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
+    cJSON *requestId = cJSON_GetObjectItemCaseSensitive(root, "request_id");
+    cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+    if (!cJSON_IsString(action) || strcmp(action->valuestring, "reset") ||
+        !cJSON_IsNumber(requestId) || requestId->valuedouble < 1 ||
+        requestId->valuedouble > UINT32_MAX ||
+        static_cast<double>(static_cast<uint32_t>(requestId->valuedouble)) !=
+            requestId->valuedouble ||
+        !cJSON_IsString(result) ||
+        (strcmp(result->valuestring, "ok") && strcmp(result->valuestring, "error"))) {
+      cJSON_Delete(root);
+      return false;
+    }
+    message.requestId = static_cast<uint32_t>(requestId->valuedouble);
+    message.resetSucceeded = !strcmp(result->valuestring, "ok");
+    message.type = MessageType::ConversationReset;
   } else if (!strcmp(type->valuestring, "goodbye")) {
     message.type = MessageType::Goodbye;
   } else if (!strcmp(type->valuestring, "error")) {

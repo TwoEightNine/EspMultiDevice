@@ -7,45 +7,14 @@
 #include <string.h>
 
 namespace {
-constexpr uint16_t LightErrorColor = 0xF986;  // soft red on black
-constexpr uint16_t BubbleBorderColor = TFT_WHITE;
-constexpr int16_t BubbleRadius = 8;
-
-constexpr int16_t UserBubbleX = 62;
-constexpr int16_t UserBubbleY = 58;
-constexpr int16_t UserBubbleWidth = 246;
-constexpr int16_t UserBubbleHeight = 55;
-constexpr int16_t UserTextTop = 66;
-
-constexpr int16_t AssistantBubbleX = 12;
-constexpr int16_t AssistantBubbleY = 125;
-constexpr int16_t AssistantBubbleWidth = 246;
-constexpr int16_t AssistantBubbleHeight = 103;
-constexpr int16_t AssistantTextTop = 134;
-constexpr int16_t AvatarMenuTop = UiKit::AppBarHeight + 8;
-constexpr int16_t AvatarMenuWidth = 224;
-
-void drawSpeechBubble(TFT_eSPI &tft, int16_t x, int16_t y,
-                      int16_t width, int16_t height, bool tailPointsUp) {
-  // The V stays within the text viewport: the upper tip is y=50 and the
-  // lower tip is y=237. Draw the frame after the tail so the joins remain
-  // crisp at the bubble edge.
-  if (tailPointsUp) {
-    tft.drawWideLine(x + width - 29, y, x + width - 19, y - 8,
-                     2.0f, BubbleBorderColor, TFT_BLACK);
-    tft.drawWideLine(x + width - 19, y - 8, x + width - 9, y,
-                     2.0f, BubbleBorderColor, TFT_BLACK);
-  } else {
-    tft.drawWideLine(x + 12, y + height - 1, x + 22, y + height + 9,
-                     2.0f, BubbleBorderColor, TFT_BLACK);
-    tft.drawWideLine(x + 22, y + height + 9, x + 32, y + height - 1,
-                     2.0f, BubbleBorderColor, TFT_BLACK);
-  }
-  tft.fillSmoothRoundRect(x, y, width, height, BubbleRadius,
-                          TFT_BLACK, TFT_BLACK);
-  tft.drawSmoothRoundRect(x, y, BubbleRadius, BubbleRadius, width, height,
-                          BubbleBorderColor, TFT_BLACK);
-}
+constexpr uint16_t ListeningColor = 0x07E0;
+constexpr uint16_t UserBubbleColor = 0x18A5;
+constexpr uint16_t AssistantBubbleColor = 0x2945;
+constexpr uint16_t PrimaryButtonColor = 0x249F;
+constexpr uint16_t DisabledButtonColor = 0x4208;
+constexpr int16_t TranscriptLineHeight = 25;
+constexpr int16_t TranscriptTextInset = 8;
+constexpr int16_t PopupWidth = 260;
 
 uint16_t nextUtf8Offset(const String &text, uint16_t offset) {
   if (offset >= text.length()) return offset;
@@ -64,16 +33,13 @@ uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
   uint16_t position = 0;
   uint8_t count = 0;
   while (position < text.length() && count < capacity) {
-    while (position < text.length() && text[position] == ' ') position++;
+    while (position < text.length() && text[position] == ' ') ++position;
     const uint16_t start = position;
     uint16_t end = position;
     int32_t lastSpace = -1;
     bool completed = false;
     while (end < text.length()) {
-      if (text[end] == '\r') {
-        end++;
-        continue;
-      }
+      if (text[end] == '\r') { ++end; continue; }
       if (text[end] == '\n') {
         lines[count] = text.substring(start, end);
         lines[count].trim();
@@ -85,12 +51,12 @@ uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
       const uint16_t next = nextUtf8Offset(text, end);
       if (UiText::measureAssistantCaption(text.substring(start, next)) > maxWidth) {
         uint16_t split = lastSpace >= static_cast<int32_t>(start)
-          ? static_cast<uint16_t>(lastSpace) : end;
+            ? static_cast<uint16_t>(lastSpace) : end;
         if (split == start) split = next;
         lines[count] = text.substring(start, split);
         lines[count].trim();
         position = lastSpace >= static_cast<int32_t>(start)
-          ? static_cast<uint16_t>(lastSpace + 1) : split;
+            ? static_cast<uint16_t>(lastSpace + 1) : split;
         completed = true;
         break;
       }
@@ -101,12 +67,7 @@ uint8_t wrapCaption(const String &text, String *lines, uint8_t capacity,
       lines[count].trim();
       position = text.length();
     }
-    count++;
-  }
-  if (position < text.length() && count > 0) {
-    String remainder = lines[count - 1] + " " + text.substring(position);
-    remainder.trim();
-    lines[count - 1] = UiText::ellipsizeAssistantCaption(remainder, maxWidth);
+    ++count;
   }
   return count;
 }
@@ -120,13 +81,16 @@ AssistantScreen::AssistantScreen(Navigator &navigator, TouchController &touch,
                                  DisplayController &display,
                                  AssistantController &controller,
                                  SdCardController &sdCard)
-    : Screen(navigator, touch, display), _controller(controller), _sdCard(sdCard), _avatar(),
-      _avatarLoader(sdCard), _snapshot{}, _lastTouchDown(false),
+    : Screen(navigator, touch, display), _controller(controller), _sdCard(sdCard),
+      _avatar(), _avatarLoader(sdCard), _snapshot{}, _lastTouchDown(false),
       _closePending(false), _openingWiFi(false), _lastCloseRequestMs(0),
       _lastAvatarRevision(0), _avatarAsset(AssistantAvatar::Asset::Neutral),
-      _avatarAssetValid(false), _underlayDrawn(false), _avatarMenuOpen(false),
-      _avatarMenuBounds{0, 0, 0, 0}, _avatarMenuRows{},
-      _lastAvatarCatalogRevision(0) {
+      _avatarAssetValid(false), _underlayDrawn(false), _menu(Menu::Closed),
+      _confirmNewConversation(false), _avatarMenuBounds{0, 0, 0, 0},
+      _avatarMenuRows{}, _lastAvatarCatalogRevision(0), _scrollLine(0),
+      _totalLines(0), _scrollUpBounds{280, TranscriptTop, 40, 40},
+      _scrollDownBounds{280, TranscriptTop + TranscriptHeight - 40, 40, 40},
+      _primaryActionBounds{16, 424, 288, 40}, _rootMenuRows{} {
   _snapshot.clear();
 }
 
@@ -138,6 +102,10 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
   _closePending = false;
   _openingWiFi = false;
   _lastCloseRequestMs = 0;
+  _scrollLine = 0;
+  _totalLines = 0;
+  _menu = Menu::Closed;
+  _confirmNewConversation = false;
   _avatarLoader.begin();
   if (resetAvatarSelection) _avatarLoader.resetAvatar();
   _controller.activate();
@@ -145,7 +113,6 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
   _avatarAsset = AssistantAvatar::assetFor(_snapshot.phase, _snapshot.emotion);
   _avatarAssetValid = true;
   _underlayDrawn = false;
-  _avatarMenuOpen = false;
   _lastAvatarCatalogRevision = _avatarLoader.catalogRevision();
   draw(true);
 }
@@ -167,25 +134,55 @@ bool AssistantScreen::releaseResources() {
   return _avatarLoader.releaseResources();
 }
 
+bool AssistantScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
+  return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+}
+
 void AssistantScreen::handleTouch(const TouchPoint &point) {
-  if (!point.touched) {
-    _lastTouchDown = false;
-    return;
-  }
+  if (!point.touched) { _lastTouchDown = false; return; }
   if (_lastTouchDown || _closePending) return;
   _lastTouchDown = true;
-  if (_avatarMenuOpen) {
+
+  if (_menu == Menu::Root) {
+    if (contains(_rootMenuRows[0], point.x, point.y)) {
+      if (_confirmNewConversation) {
+        _confirmNewConversation = false;
+        _menu = Menu::Closed;
+        _controller.newConversation();
+        draw(false);
+      } else {
+        _confirmNewConversation = true;
+        drawRootMenu();
+      }
+      return;
+    }
+    if (contains(_rootMenuRows[1], point.x, point.y)) {
+      _confirmNewConversation = false;
+      _controller.setAutoListen(!_snapshot.autoListen);
+      _snapshot = _controller.snapshot();
+      drawRootMenu();
+      drawMicrophoneStrip();
+      return;
+    }
+    if (contains(_rootMenuRows[2], point.x, point.y)) {
+      _confirmNewConversation = false;
+      _menu = Menu::Avatars;
+      drawAvatarMenu();
+      return;
+    }
+    closeMenu();
+    return;
+  }
+  if (_menu == Menu::Avatars) {
     const uint8_t count = _avatarLoader.avatarCount();
     for (uint8_t index = 0; index < count; ++index) {
-      const Rect &row = _avatarMenuRows[index];
-      if (point.x >= row.x && point.x < row.x + row.w &&
-          point.y >= row.y && point.y < row.y + row.h) {
+      if (contains(_avatarMenuRows[index], point.x, point.y)) {
         (void)_avatarLoader.selectAvatar(index);
-        closeAvatarMenu();
+        closeMenu();
         return;
       }
     }
-    closeAvatarMenu();
+    closeMenu();
     return;
   }
   if (UiKit::navigationIconContains(point.x, point.y)) {
@@ -193,23 +190,31 @@ void AssistantScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (UiKit::appBarActionContains(point.x, point.y, _display.width())) {
-    _avatarMenuOpen = true;
-    drawAvatarMenu();
+    _menu = Menu::Root;
+    _confirmNewConversation = false;
+    drawRootMenu();
     return;
   }
-  const int16_t avatarX = (_display.width() - AvatarWidth) / 2;
-  const int16_t avatarY = _display.height() - AvatarHeight;
-  if (point.x < avatarX || point.x >= avatarX + AvatarWidth ||
-      point.y < avatarY || point.y >= avatarY + AvatarHeight) return;
-  if (_snapshot.phase == AssistantPhase::Ready) {
-    _controller.startTurn();
-  } else if (active()) {
-    _controller.cancelTurn();
-  } else if (_snapshot.phase == AssistantPhase::NeedsWiFi) {
-    requestClose(true);
-  } else if (_snapshot.phase == AssistantPhase::Error && _snapshot.retryable) {
-    _controller.retry();
+  if (contains(_scrollUpBounds, point.x, point.y)) {
+    _scrollLine = _scrollLine > VisibleTranscriptLines
+        ? _scrollLine - VisibleTranscriptLines : 0;
+    drawTranscript(false);
+    return;
   }
+  if (contains(_scrollDownBounds, point.x, point.y)) {
+    const uint16_t bottom = _totalLines > VisibleTranscriptLines
+        ? _totalLines - VisibleTranscriptLines : 0;
+    _scrollLine = min<uint16_t>(bottom, _scrollLine + VisibleTranscriptLines);
+    drawTranscript(false);
+    return;
+  }
+  if (!contains(_primaryActionBounds, point.x, point.y) ||
+      _snapshot.resettingConversation) return;
+  if (_snapshot.phase == AssistantPhase::Ready) _controller.startTurn();
+  else if (active()) _controller.cancelTurn();
+  else if (_snapshot.phase == AssistantPhase::NeedsWiFi) requestClose(true);
+  else if (_snapshot.phase == AssistantPhase::Error && _snapshot.retryable)
+    _controller.retry();
 }
 
 void AssistantScreen::tick(uint32_t nowMs) {
@@ -225,31 +230,39 @@ void AssistantScreen::tick(uint32_t nowMs) {
     else _navigator.pop();
     return;
   }
-  // A tap from Ready enters Connecting before the first turn audio arrives.
-  // Keep the face that was already on screen during this short handshake;
-  // later phases are free to select their normal artwork.
-  AssistantAvatar::Asset nextAsset =
+  const AssistantAvatar::Asset nextAsset =
       AssistantAvatar::assetFor(next.phase, next.emotion);
-  if (_avatarAssetValid && next.phase == AssistantPhase::Connecting &&
-      (_snapshot.phase == AssistantPhase::Ready ||
-       _snapshot.phase == AssistantPhase::Connecting)) {
-    nextAsset = _avatarAsset;
-  }
   const bool avatarChanged = !_avatarAssetValid || nextAsset != _avatarAsset ||
                              _avatarLoader.revision() != _lastAvatarRevision;
-  const bool catalogChanged = _avatarLoader.catalogRevision() != _lastAvatarCatalogRevision;
-  const bool textChanged = next.phase != _snapshot.phase ||
-                           !sameText(next.status, _snapshot.status) ||
-                           !sameText(next.activationMessage, _snapshot.activationMessage) ||
-                           !sameText(next.activationCode, _snapshot.activationCode) ||
-                           !sameText(next.sttCaption, _snapshot.sttCaption) ||
-                           !sameText(next.ttsCaption, _snapshot.ttsCaption);
+  const bool catalogChanged =
+      _avatarLoader.catalogRevision() != _lastAvatarCatalogRevision;
+  const bool statusChanged = next.phase != _snapshot.phase ||
+      next.micAvailable != _snapshot.micAvailable ||
+      next.autoListen != _snapshot.autoListen ||
+      next.resettingConversation != _snapshot.resettingConversation ||
+      !sameText(next.status, _snapshot.status) ||
+      !sameText(next.activationMessage, _snapshot.activationMessage) ||
+      !sameText(next.activationCode, _snapshot.activationCode);
+  const bool transcriptChanged =
+      next.transcriptRevision != _snapshot.transcriptRevision;
+  const uint16_t oldBottom = _totalLines > VisibleTranscriptLines
+      ? _totalLines - VisibleTranscriptLines : 0;
+  const bool wasAtBottom = _scrollLine >= oldBottom;
   _snapshot = next;
   _avatarAsset = nextAsset;
   _avatarAssetValid = true;
-  if (avatarChanged) drawAvatar();
-  if (textChanged) drawText();
-  if (_avatarMenuOpen && (avatarChanged || textChanged || catalogChanged)) drawAvatarMenu();
+  if (avatarChanged) { drawAvatar(); drawPrimaryAction(); }
+  if (statusChanged) {
+    drawMicrophoneStrip();
+    drawPrimaryAction();
+    if (!transcriptChanged && _snapshot.transcriptCount == 0)
+      drawTranscript(wasAtBottom);
+  }
+  if (transcriptChanged) drawTranscript(wasAtBottom);
+  if (_menu == Menu::Root && (statusChanged || transcriptChanged)) drawRootMenu();
+  if (_menu == Menu::Avatars && (avatarChanged || statusChanged ||
+                                  transcriptChanged || catalogChanged))
+    drawAvatarMenu();
   _lastAvatarCatalogRevision = _avatarLoader.catalogRevision();
 }
 
@@ -264,16 +277,17 @@ void AssistantScreen::requestClose(bool openWiFi) {
 
 void AssistantScreen::draw(bool full) {
   if (!_display.isReady()) return;
-  TFT_eSPI &tft = _display.tft();
   if (full) {
-    UiKit::drawTopAppBar(tft, _display.width(), F("Assistant"),
-                         UiKit::NavigationIcon::Close,
-                         UiKit::AppBarAction::More);
+    UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Assistant"),
+                         UiKit::NavigationIcon::Close, UiKit::AppBarAction::More);
     clearAvatarPane();
   }
-  drawText();
+  drawMicrophoneStrip();
+  drawTranscript(full);
   drawAvatar();
-  if (_avatarMenuOpen) drawAvatarMenu();
+  drawPrimaryAction();
+  if (_menu == Menu::Root) drawRootMenu();
+  else if (_menu == Menu::Avatars) drawAvatarMenu();
 }
 
 void AssistantScreen::drawAvatar() {
@@ -281,25 +295,19 @@ void AssistantScreen::drawAvatar() {
   const int16_t x = (_display.width() - AvatarWidth) / 2;
   const int16_t y = _display.height() - AvatarHeight;
   if (!_underlayDrawn) {
-    const uint16_t *underlayPixels = nullptr;
-    const uint8_t *underlayAlpha = nullptr;
-    if (_avatarLoader.underlay(underlayPixels, underlayAlpha)) {
-      AssistantAvatar::drawUnderlay(_display.tft(), x, y,
-                                    underlayPixels, underlayAlpha);
+    const uint16_t *pixels = nullptr;
+    const uint8_t *alpha = nullptr;
+    if (_avatarLoader.underlay(pixels, alpha)) {
+      AssistantAvatar::drawUnderlay(_display.tft(), x, y, pixels, alpha);
       _underlayDrawn = true;
     }
   }
   const uint16_t *underlayPixels = nullptr;
   const uint8_t *underlayAlpha = nullptr;
   (void)_avatarLoader.underlay(underlayPixels, underlayAlpha);
-  (void)underlayAlpha;
-  const AssistantAvatar::Asset asset = _avatarAssetValid
-      ? _avatarAsset
-      : AssistantAvatar::assetFor(_snapshot.phase, _snapshot.emotion);
-  // Push replacement artwork directly over the old frame to avoid a blink.
   const uint16_t *avatarPixels = nullptr;
   const uint8_t *avatarAlpha = nullptr;
-  (void)_avatarLoader.image(asset, avatarPixels, avatarAlpha);
+  (void)_avatarLoader.image(_avatarAsset, avatarPixels, avatarAlpha);
   _avatar.draw(_display.tft(), x, y, avatarPixels, ScreenBackground,
                avatarAlpha, underlayPixels);
   _lastAvatarRevision = _avatarLoader.revision();
@@ -313,60 +321,172 @@ void AssistantScreen::clearAvatarPane() {
   _underlayDrawn = false;
 }
 
-void AssistantScreen::drawText() {
+void AssistantScreen::drawMicrophoneStrip() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(TextLeft, TextTop, TextWidth, TextHeight, ScreenBackground);
-  drawSpeechBubble(tft, UserBubbleX, UserBubbleY,
-                   UserBubbleWidth, UserBubbleHeight, true);
-  drawSpeechBubble(tft, AssistantBubbleX, AssistantBubbleY,
-                   AssistantBubbleWidth, AssistantBubbleHeight, false);
-
-  String userCaption = UiText::normalizeAssistantCaption(String(_snapshot.sttCaption));
-  String userLines[MaxUserTextLines];
-  const uint8_t userCount = wrapCaption(userCaption, userLines, MaxUserTextLines,
-                                        UserBubbleWidth - BubbleTextPadding * 2);
-  for (uint8_t index = 0; index < userCount; ++index) {
-    UiText::drawAssistantCaption(tft, userLines[index],
-                                 UserBubbleX + BubbleTextPadding,
-                                 UserTextTop + index * UiText::lineHeight(UiText::Size::Content),
-                                 TFT_WHITE, ScreenBackground, TL_DATUM);
-  }
-
-  String assistantCaption;
-  uint16_t assistantColor = _snapshot.phase == AssistantPhase::Error
-      ? LightErrorColor : TFT_LIGHTGREY;
-  if (_snapshot.phase == AssistantPhase::NeedsActivation) {
-    assistantCaption = String(_snapshot.activationMessage);
-    if (_snapshot.activationCode[0]) assistantCaption += "\n" + String(_snapshot.activationCode);
-  } else if (_snapshot.ttsCaption[0]) {
-    assistantCaption = String(_snapshot.ttsCaption);
-    assistantColor = TFT_WHITE;
-  } else {
-    assistantCaption = String(_snapshot.status);
-  }
-  assistantCaption = UiText::normalizeAssistantCaption(assistantCaption);
-  String assistantLines[MaxAssistantTextLines];
-  const uint8_t assistantCount = wrapCaption(assistantCaption, assistantLines,
-                                             MaxAssistantTextLines,
-                                             AssistantBubbleWidth - BubbleTextPadding * 2);
-  for (uint8_t index = 0; index < assistantCount; ++index) {
-    UiText::drawAssistantCaption(tft, assistantLines[index],
-                                 AssistantBubbleX + BubbleTextPadding,
-                                 AssistantTextTop + index * UiText::lineHeight(UiText::Size::Content),
-                                 assistantColor, ScreenBackground, TL_DATUM);
+  tft.fillRect(0, MicStripTop, _display.width(), MicStripHeight, UiKit::AppBarColor);
+  const bool listening = _snapshot.phase == AssistantPhase::Listening;
+  const char *label = !_snapshot.micAvailable ? "Mic unavailable" :
+                      listening ? "Listening" : "Mic off";
+  const uint16_t color = !_snapshot.micAvailable ? TFT_LIGHTGREY :
+                         listening ? ListeningColor : TFT_WHITE;
+  UiKit::drawMicrophoneStatusIcon(tft, 20, MicStripTop + MicStripHeight / 2,
+                                  listening, _snapshot.micAvailable,
+                                  color, UiKit::AppBarColor);
+  UiText::draw(tft, label, 40, MicStripTop + MicStripHeight / 2,
+               color, UiKit::AppBarColor, UiText::Size::Content, ML_DATUM);
+  if (_snapshot.autoListen) {
+    UiText::draw(tft, F("AUTO"), _display.width() - 12,
+                 MicStripTop + MicStripHeight / 2, ListeningColor,
+                 UiKit::AppBarColor, UiText::Size::Compact, MR_DATUM);
   }
 }
 
+uint16_t AssistantScreen::countTranscriptLines() const {
+  uint16_t total = 0;
+  String lines[MaxWrappedLines];
+  const auto count = [&](const char *text) -> uint8_t {
+    const String normalized = UiText::normalizeAssistantCaption(String(text ? text : ""));
+    return wrapCaption(normalized, lines, MaxWrappedLines,
+                       TranscriptTextWidth - TranscriptTextInset * 2);
+  };
+  AssistantTranscriptTurn turn = {};
+  for (uint8_t index = 0; index < _snapshot.transcriptCount; ++index) {
+    if (!_controller.copyTranscriptTurn(index, turn)) continue;
+    total += count(turn.user);
+    total += count(turn.assistant);
+  }
+  if (_controller.copyTranscriptDraft(turn)) {
+    total += count(turn.user);
+    total += count(turn.assistant);
+  }
+  if (total == 0) {
+    if (_snapshot.phase == AssistantPhase::NeedsActivation) {
+      total += count(_snapshot.activationMessage);
+      total += count(_snapshot.activationCode);
+    } else {
+      total += count(_snapshot.status);
+    }
+  }
+  return total;
+}
+
+void AssistantScreen::drawTranscriptMessage(const char *text, bool user,
+                                             uint16_t &logicalLine,
+                                             uint8_t &visibleLine) {
+  if (!text || !text[0]) return;
+  String lines[MaxWrappedLines];
+  const String normalized = UiText::normalizeAssistantCaption(String(text));
+  const uint8_t count = wrapCaption(normalized, lines, MaxWrappedLines,
+                                    TranscriptTextWidth - TranscriptTextInset * 2);
+  TFT_eSPI &tft = _display.tft();
+  for (uint8_t index = 0; index < count; ++index, ++logicalLine) {
+    if (logicalLine < _scrollLine || visibleLine >= VisibleTranscriptLines) continue;
+    const int16_t measured = UiText::measureAssistantCaption(lines[index]);
+    const int16_t width = min<int16_t>(TranscriptTextWidth - 8,
+                                      measured + TranscriptTextInset * 2);
+    const int16_t x = user ? TranscriptTextWidth - width - 4 : 4;
+    const int16_t y = TranscriptTop + 4 + visibleLine * TranscriptLineHeight;
+    const uint16_t fill = user ? UserBubbleColor : AssistantBubbleColor;
+    tft.fillSmoothRoundRect(x, y, width, 21, 7, fill, ScreenBackground);
+    UiText::drawAssistantCaption(tft, lines[index],
+                                 user ? x + width - TranscriptTextInset
+                                      : x + TranscriptTextInset,
+                                 y + 10, TFT_WHITE, fill,
+                                 user ? MR_DATUM : ML_DATUM);
+    ++visibleLine;
+  }
+}
+
+void AssistantScreen::drawTranscript(bool followTail) {
+  if (!_display.isReady()) return;
+  _totalLines = countTranscriptLines();
+  const uint16_t bottom = _totalLines > VisibleTranscriptLines
+      ? _totalLines - VisibleTranscriptLines : 0;
+  if (followTail) _scrollLine = bottom;
+  else if (_scrollLine > bottom) _scrollLine = bottom;
+
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(0, TranscriptTop, _display.width(), TranscriptHeight,
+               ScreenBackground);
+  uint16_t logicalLine = 0;
+  uint8_t visibleLine = 0;
+  AssistantTranscriptTurn turn = {};
+  for (uint8_t index = 0; index < _snapshot.transcriptCount; ++index) {
+    if (!_controller.copyTranscriptTurn(index, turn)) continue;
+    drawTranscriptMessage(turn.user, true, logicalLine, visibleLine);
+    drawTranscriptMessage(turn.assistant, false, logicalLine, visibleLine);
+  }
+  if (_controller.copyTranscriptDraft(turn)) {
+    drawTranscriptMessage(turn.user, true, logicalLine, visibleLine);
+    drawTranscriptMessage(turn.assistant, false, logicalLine, visibleLine);
+  }
+  if (logicalLine == 0) {
+    if (_snapshot.phase == AssistantPhase::NeedsActivation) {
+      drawTranscriptMessage(_snapshot.activationMessage, false, logicalLine, visibleLine);
+      drawTranscriptMessage(_snapshot.activationCode, false, logicalLine, visibleLine);
+    } else {
+      drawTranscriptMessage(_snapshot.status, false, logicalLine, visibleLine);
+    }
+  }
+  tft.fillRect(TranscriptTextWidth, TranscriptTop, ScrollCellSize,
+               TranscriptHeight, UiKit::AppBarColor);
+  UiKit::drawPageArrow(tft, TranscriptTextWidth + ScrollCellSize / 2,
+                       TranscriptTop + ScrollCellSize / 2, true, false,
+                       _scrollLine ? TFT_WHITE : TFT_DARKGREY, UiKit::AppBarColor);
+  UiKit::drawPageArrow(tft, TranscriptTextWidth + ScrollCellSize / 2,
+                       TranscriptTop + TranscriptHeight - ScrollCellSize / 2,
+                       true, true, _scrollLine < bottom ? TFT_WHITE : TFT_DARKGREY,
+                       UiKit::AppBarColor);
+}
+
+void AssistantScreen::drawPrimaryAction() {
+  if (!_display.isReady()) return;
+  String label;
+  bool enabled = !_snapshot.resettingConversation;
+  if (_snapshot.resettingConversation) label = F("Cancel");
+  else if (_snapshot.phase == AssistantPhase::Ready)
+    label = _snapshot.transcriptCount ? F("Ask follow-up") : F("Ask");
+  else if (_snapshot.phase == AssistantPhase::Listening) label = F("Stop listening");
+  else if (active()) label = F("Cancel");
+  else if (_snapshot.phase == AssistantPhase::NeedsWiFi) label = F("Wi-Fi settings");
+  else if (_snapshot.phase == AssistantPhase::Error && _snapshot.retryable) label = F("Retry");
+  else { label = F("Ask"); enabled = false; }
+  UiKit::drawFilledButton(_display.tft(), _primaryActionBounds.x,
+                          _primaryActionBounds.y, _primaryActionBounds.w,
+                          _primaryActionBounds.h, label,
+                          enabled ? PrimaryButtonColor : DisabledButtonColor,
+                          enabled ? TFT_WHITE : TFT_LIGHTGREY, ScreenBackground);
+}
+
+void AssistantScreen::drawRootMenu() {
+  if (!_display.isReady()) return;
+  const int16_t x = _display.width() - PopupWidth - 8;
+  for (uint8_t index = 0; index < 3; ++index) {
+    _rootMenuRows[index] = {x, static_cast<int16_t>(TranscriptTop +
+        index * UiKit::ListCellHeight), PopupWidth, UiKit::ListCellHeight};
+  }
+  UiKit::drawPopupMenuFrame(_display.tft(), x, TranscriptTop, PopupWidth,
+                            UiKit::ListCellHeight * 3, ScreenBackground);
+  UiKit::drawPopupMenuRow(_display.tft(), x, _rootMenuRows[0].y, PopupWidth,
+      _confirmNewConversation ? F("Tap again to confirm") : F("New conversation"),
+      _confirmNewConversation, ScreenBackground);
+  UiKit::drawPopupMenuRow(_display.tft(), x, _rootMenuRows[1].y, PopupWidth,
+                          F("Auto-listen"), _snapshot.autoListen, ScreenBackground);
+  UiKit::drawPopupMenuRow(_display.tft(), x, _rootMenuRows[2].y, PopupWidth,
+                          F("Avatar"), false, ScreenBackground);
+  drawMicrophoneStrip();
+}
+
 void AssistantScreen::layoutAvatarMenu() {
-  const int16_t width = min<int16_t>(AvatarMenuWidth, _display.width() - 16);
+  const int16_t width = min<int16_t>(PopupWidth, _display.width() - 16);
   const int16_t x = _display.width() - width - 8;
   const uint8_t count = _avatarLoader.avatarCount();
-  _avatarMenuBounds = {x, AvatarMenuTop, width,
-                        static_cast<int16_t>(count * UiKit::ListCellHeight)};
+  _avatarMenuBounds = {x, TranscriptTop, width,
+      static_cast<int16_t>(count * UiKit::ListCellHeight)};
   for (uint8_t index = 0; index < AssistantAvatarLoader::MaxAvatars; ++index) {
     _avatarMenuRows[index] = index < count
-        ? Rect{x, static_cast<int16_t>(AvatarMenuTop + index * UiKit::ListCellHeight),
+        ? Rect{x, static_cast<int16_t>(TranscriptTop + index * UiKit::ListCellHeight),
                width, UiKit::ListCellHeight}
         : Rect{0, 0, 0, 0};
   }
@@ -375,27 +495,24 @@ void AssistantScreen::layoutAvatarMenu() {
 void AssistantScreen::drawAvatarMenu() {
   if (!_display.isReady()) return;
   layoutAvatarMenu();
-  TFT_eSPI &tft = _display.tft();
-  UiKit::drawPopupMenuFrame(tft, _avatarMenuBounds.x, _avatarMenuBounds.y,
-                            _avatarMenuBounds.w, _avatarMenuBounds.h,
-                            ScreenBackground);
+  UiKit::drawPopupMenuFrame(_display.tft(), _avatarMenuBounds.x,
+                            _avatarMenuBounds.y, _avatarMenuBounds.w,
+                            _avatarMenuBounds.h, ScreenBackground);
   const uint8_t count = _avatarLoader.avatarCount();
   for (uint8_t index = 0; index < count; ++index) {
     const Rect &row = _avatarMenuRows[index];
-    UiKit::drawPopupMenuRow(tft, row.x, row.y, row.w,
+    UiKit::drawPopupMenuRow(_display.tft(), row.x, row.y, row.w,
                             _avatarLoader.avatarName(index),
-                            _avatarLoader.avatarSelected(index),
-                            ScreenBackground);
+                            _avatarLoader.avatarSelected(index), ScreenBackground);
   }
+  drawMicrophoneStrip();
 }
 
-void AssistantScreen::closeAvatarMenu() {
-  if (!_avatarMenuOpen) return;
-  _avatarMenuOpen = false;
-  // The popup can cover both caption bubbles and the avatar pane. A full UI
-  // redraw restores them from the current snapshot without touching the
-  // assistant controller or its active dialogue.
-  draw(true);
+void AssistantScreen::closeMenu() {
+  if (_menu == Menu::Closed) return;
+  _menu = Menu::Closed;
+  _confirmNewConversation = false;
+  draw(false);
 }
 
 bool AssistantScreen::active() const {
@@ -413,5 +530,6 @@ void AssistantScreen::handleSdCardEvent(SdCardEvent event) {
     _avatarLoader.requestReload();
     clearAvatarPane();
     drawAvatar();
+    drawPrimaryAction();
   }
 }

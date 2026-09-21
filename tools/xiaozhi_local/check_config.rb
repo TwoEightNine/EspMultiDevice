@@ -37,7 +37,7 @@ required_modules = {
   "LLM" => "OpenAILLM",
   "TTS" => "EdgeTTS",
   "Intent" => "nointent",
-  "Memory" => "nomem"
+  "Memory" => "mem_local_short"
 }
 required_modules.each do |kind, expected|
   fail_check("selected_module.#{kind} must be #{expected}") unless
@@ -59,6 +59,8 @@ fail_check("advertised websocket port is invalid") unless uri.port.between?(1, 6
 fail_check("advertised websocket path is invalid") unless uri.path.start_with?("/")
 fail_check("backend authentication must be enabled") unless
   fetch_path(config, "server", "auth", "enabled") == true
+fail_check("WebSocket ping handling must be enabled") unless
+  config["enable_websocket_ping"] == true
 fail_check("MQTT advertisement must remain disabled") unless
   fetch_path(config, "server", "mqtt_gateway").nil? &&
   fetch_path(config, "server", "mqtt_signature_key").nil?
@@ -85,8 +87,9 @@ fail_check("Silero VAD is not configured") unless
   fetch_path(config, "VAD", "SileroVAD", "type") == "silero"
 fail_check("nointent is not configured") unless
   fetch_path(config, "Intent", "nointent", "type") == "nointent"
-fail_check("nomem is not configured") unless
-  fetch_path(config, "Memory", "nomem", "type") == "nomem"
+fail_check("mem_local_short must use OpenAILLM") unless
+  fetch_path(config, "Memory", "mem_local_short", "type") == "mem_local_short" &&
+  fetch_path(config, "Memory", "mem_local_short", "llm") == "OpenAILLM"
 prompt = config["prompt"].to_s
 fail_check("language-matching bilingual prompt is missing") unless
   prompt.match?(/Simplified Chinese/i) && prompt.match?(/same language/i)

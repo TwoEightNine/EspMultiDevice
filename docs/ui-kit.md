@@ -35,6 +35,8 @@ Use `UiKit`’s generated 40px footer controls and 16px list/keyboard icons. The
 
 Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars. Use `UiKit::drawFullscreenIcon()` for a fullscreen/fullscreen-exit affordance; its owner must provide a complete 48×48px hit target, such as the Video Player's bottom-left control cell.
 
+Use `UiKit::drawMicrophoneStatusIcon()` for a persistent microphone state. It draws an antialiased microphone with a slash when listening is off or unavailable. Listening uses the owning screen's active color; available-but-off uses its ordinary foreground; unavailable uses gray. Pass the exact solid strip color as `backgroundColor`. The helper draws only the glyph: a screen that makes it interactive owns and hit-tests the complete surrounding cell.
+
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
 For full-colour compile-time icons, generate straight RGB565 plus 8-bit alpha

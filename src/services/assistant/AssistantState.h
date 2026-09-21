@@ -36,6 +36,8 @@ enum class AssistantError : uint8_t {
   TimeoutSpeakingPacket,
   TimeoutSpeakingTotal,
   TimeoutTurn,
+  TimeoutConversationReset,
+  ConversationReset,
   Network,
   Internal
 };
@@ -58,12 +60,16 @@ struct AssistantSnapshot {
 
   uint32_t revision;
   uint32_t generation;
+  uint32_t transcriptRevision;
   AssistantPhase phase;
   AssistantError error;
   AssistantEmotion emotion;
   bool retryable;
   bool micAvailable;
   bool sessionActive;
+  bool autoListen;
+  bool resettingConversation;
+  uint8_t transcriptCount;
   char status[StatusBytes + 1];
   char activationCode[ActivationCodeBytes + 1];
   char activationMessage[ActivationMessageBytes + 1];

@@ -73,6 +73,12 @@ void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 // Compact playback control used by streaming media screens.
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       bool paused, uint16_t color, uint16_t backgroundColor);
+// Compact microphone status glyph for persistent status strips. The owner
+// supplies the complete hit target (if interactive) and the exact solid
+// background immediately behind the antialiased primitives.
+void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                              bool listening, bool available,
+                              uint16_t color, uint16_t backgroundColor);
 // 40px assets used by Files and Browser footer controls. The visual canvas
 // fills the 40px-tall footer cells while their complete cells remain tappable.
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

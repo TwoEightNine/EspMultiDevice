@@ -19,6 +19,9 @@ constexpr uint32_t ThinkingTimeoutMs = 60000;
 constexpr uint32_t SpeakingPacketTimeoutMs = 15000;
 constexpr uint32_t SpeakingTotalTimeoutMs = 120000;
 constexpr uint32_t TurnTimeoutMs = 180000;
+constexpr uint32_t HeartbeatIntervalMs = 60000;
+constexpr uint32_t HeartbeatTimeoutMs = 10000;
+constexpr uint32_t ConversationResetTimeoutMs = 10000;
 constexpr uint32_t RetryDelaysMs[] = {2000, 4000, 8000, 15000};
 constexpr size_t AudioEnvelopeBytes = XiaozhiProtocol::MaxAudioPacketBytes + 16;
 
@@ -42,7 +45,8 @@ XiaozhiSession::XiaozhiSession(WiFiController &wifi, TimeController &time,
       _requestedGeneration(0), _cancelRequested(false), _deactivateRequested(false),
       _workerExited(false),
       _screenActive(false), _fatalError(false), _credentialsRejected(false),
-      _generation(0), _retryIndex(0), _sessionId{},
+      _generation(0), _retryIndex(0), _lastHeartbeatMs(0), _heartbeatSentMs(0),
+      _heartbeatPending(false), _sessionId{},
       _uplink(nullptr), _downlink(nullptr), _decodedPcm(nullptr), _uplinkHead(0), _uplinkCount(0),
       _downlinkHead(0), _downlinkCount(0), _receivedDownlinkPackets(0),
       _receivedDownlinkBytes(0), _playedPcmSamples(0), _peakPcm(0) {
@@ -54,7 +58,7 @@ XiaozhiSession::~XiaozhiSession() {
     vTaskDelete(_task);
   }
   _task = nullptr;
-  safeStop(false);
+  stopSession(false);
   clearCredentials();
   if (_commands) vQueueDelete(_commands);
   if (_events) vQueueDelete(_events);
@@ -132,15 +136,39 @@ void XiaozhiSession::workerEntry(void *context) {
 void XiaozhiSession::worker() {
   XiaozhiSessionCommand command = {};
   for (;;) {
-    if (xQueueReceive(_commands, &command, pdMS_TO_TICKS(50)) != pdTRUE) continue;
-    const bool shouldExit = command.type == XiaozhiSessionCommandType::Deactivate &&
-        command.generation == _requestedGeneration.load(std::memory_order_acquire);
-    handle(command);
-    if (shouldExit) {
-      // PublishDeactivated has completed, so the controller can observe the
-      // acknowledgement. Do not touch session storage after this point.
-      _workerExited.store(true, std::memory_order_release);
-      vTaskDelete(nullptr);
+    if (xQueueReceive(_commands, &command, pdMS_TO_TICKS(10)) == pdTRUE) {
+      const bool shouldExit = command.type == XiaozhiSessionCommandType::Deactivate &&
+          command.generation == _requestedGeneration.load(std::memory_order_acquire);
+      handle(command);
+      if (shouldExit) {
+        // PublishDeactivated has completed, so the controller can observe the
+        // acknowledgement. Do not touch session storage after this point.
+        _workerExited.store(true, std::memory_order_release);
+        vTaskDelete(nullptr);
+      }
+      continue;
+    }
+    if (_screenActive && _websocket.isConnected() &&
+        !serviceIdleConnection(_generation) && !interrupted(_generation)) {
+      XiaozhiSessionEvent lost = {};
+      lost.type = XiaozhiSessionEventType::ContextLost;
+      lost.generation = _generation;
+      lost.micAvailable = _mic.isReady() && _mic.isPowered();
+      copyText("Connection lost; captions reset", lost.text, sizeof(lost.text));
+      publish(lost);
+      stopSession(false);
+      clearCredentials();
+      while (_screenActive && !interrupted(_generation)) {
+        if (bootstrapUntilReady(_generation)) {
+          publishPhase(_generation, AssistantPhase::Ready,
+                       "Connection restored; captions reset");
+          break;
+        }
+        if (_fatalError || interrupted(_generation)) break;
+        const uint32_t wait = RetryDelaysMs[min<size_t>(_retryIndex, 3)];
+        if (_retryIndex < 3) ++_retryIndex;
+        if (!delayInterruptible(wait, _generation)) break;
+      }
     }
   }
 }
@@ -152,7 +180,7 @@ void XiaozhiSession::handle(const XiaozhiSessionCommand &command) {
     _deactivateRequested.store(true, std::memory_order_release);
     _screenActive = false;
     sendAbort();
-    safeStop(false);
+    stopSession(false);
     clearCredentials();
     publishDeactivated(command.generation);
     return;
@@ -160,7 +188,8 @@ void XiaozhiSession::handle(const XiaozhiSessionCommand &command) {
   if (command.type == XiaozhiSessionCommandType::CancelTurn) {
     _cancelRequested.store(true, std::memory_order_release);
     sendAbort();
-    safeStop(false);
+    stopTurn(false);
+    _cancelRequested.store(false, std::memory_order_release);
     if (_screenActive) publishPhase(command.generation, AssistantPhase::Ready, "Cancelled");
     return;
   }
@@ -193,16 +222,31 @@ void XiaozhiSession::handle(const XiaozhiSessionCommand &command) {
     return;
   }
 
+  if (command.type == XiaozhiSessionCommandType::ResetConversation) {
+    _cancelRequested.store(false, std::memory_order_release);
+    if (!_websocket.isConnected() && !bootstrapUntilReady(command.generation)) return;
+    if (resetConversation(command.generation)) {
+      XiaozhiSessionEvent event = {};
+      event.type = XiaozhiSessionEventType::ConversationReset;
+      event.generation = command.generation;
+      event.micAvailable = _mic.isReady() && _mic.isPowered();
+      copyText("New conversation", event.text, sizeof(event.text));
+      publish(event);
+      publishPhase(command.generation, AssistantPhase::Ready, "Ready");
+    }
+    return;
+  }
+
   if (command.type != XiaozhiSessionCommandType::StartTurn || !_screenActive) return;
   _cancelRequested.store(false, std::memory_order_release);
-  if (!_bootstrapResponse->websocket.usable() && !bootstrapUntilReady(command.generation)) return;
+  if (!_websocket.isConnected() && !bootstrapUntilReady(command.generation)) return;
   if (runTurn(command.generation)) {
     _retryIndex = 0;
     publishPhase(command.generation, AssistantPhase::Ready, "Ready");
     return;
   }
   if (interrupted(command.generation)) {
-    safeStop(false);
+    stopTurn(false);
     const uint32_t requested = _requestedGeneration.load(std::memory_order_acquire);
     if (_deactivateRequested.load(std::memory_order_acquire))
       publishDeactivated(requested);
@@ -212,17 +256,30 @@ void XiaozhiSession::handle(const XiaozhiSessionCommand &command) {
   }
   if (_credentialsRejected ||
       _websocket.lastFailure() == SecureWebSocketClient::FailureKind::AuthenticationRejected) {
+    XiaozhiSessionEvent lost = {};
+    lost.type = XiaozhiSessionEventType::ContextLost;
+    lost.generation = command.generation;
+    lost.micAvailable = _mic.isReady() && _mic.isPowered();
+    copyText("Connection lost; captions reset", lost.text, sizeof(lost.text));
+    publish(lost);
+    stopSession(false);
     clearCredentials();
     bootstrapUntilReady(command.generation);
     return;
   }
+  XiaozhiSessionEvent lost = {};
+  lost.type = XiaozhiSessionEventType::ContextLost;
+  lost.generation = command.generation;
+  lost.micAvailable = _mic.isReady() && _mic.isPowered();
+  copyText("Connection lost; captions reset", lost.text, sizeof(lost.text));
+  publish(lost);
   const uint32_t wait = RetryDelaysMs[min<size_t>(_retryIndex, 3)];
   if (_retryIndex < 3) ++_retryIndex;
   if (delayInterruptible(wait, command.generation)) bootstrapUntilReady(command.generation);
 }
 
 bool XiaozhiSession::bootstrapUntilReady(uint32_t generation) {
-  safeStop(false);
+  stopSession(false);
   clearCredentials();
   if (!_wifi.isConnected()) {
     publishPhase(generation, AssistantPhase::NeedsWiFi, "Connect to Wi-Fi");
@@ -292,6 +349,7 @@ bool XiaozhiSession::bootstrapUntilReady(uint32_t generation) {
     return false;
   }
   _retryIndex = 0;
+  if (!openConversation(generation)) return false;
   publishPhase(generation, AssistantPhase::Ready, "Ready");
   return true;
 }
@@ -370,6 +428,75 @@ bool XiaozhiSession::connectWebSocket(uint32_t generation) {
   return connected;
 }
 
+bool XiaozhiSession::openConversation(uint32_t generation) {
+  memset(_sessionId, 0, sizeof(_sessionId));
+  publishPhase(generation, AssistantPhase::Connecting, "Connecting");
+  if (!connectWebSocket(generation)) return false;
+  if (interrupted(generation)) {
+    stopSession(false);
+    return false;
+  }
+  char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
+  const bool helloSent = XiaozhiProtocol::buildClientHello(
+      _bootstrapResponse->websocket.version, json, sizeof(json)) &&
+      _websocket.sendText(json, strlen(json));
+  memset(json, 0, sizeof(json));
+  if (!helloSent) {
+    publishError(generation, AssistantError::Protocol, true);
+    stopSession(false);
+    return false;
+  }
+
+  const uint32_t started = millis();
+  SecureWebSocketClient::Event event = {};
+  while (!interrupted(generation) && millis() - started < HelloTimeoutMs) {
+    if (!_wifi.isConnected()) {
+      publishPhase(generation, AssistantPhase::NeedsWiFi, "Connect to Wi-Fi");
+      stopSession(false);
+      return false;
+    }
+    if (!_websocket.poll(event)) {
+      vTaskDelay(1);
+      continue;
+    }
+    if (event.type == SecureWebSocketClient::EventType::Text) {
+      XiaozhiProtocol::Message message = {};
+      if (!XiaozhiProtocol::parseMessage(event.payload, event.length, nullptr, message) ||
+          message.type != XiaozhiProtocol::MessageType::ServerHello ||
+          !message.sessionId[0]) {
+        publishError(generation, AssistantError::Protocol, true);
+        stopSession(false);
+        return false;
+      }
+      copyText(message.sessionId, _sessionId, sizeof(_sessionId));
+      if (!_encoder.begin() || !_decoder.begin(message.audio.sampleRate)) {
+        publishError(generation, AssistantError::Codec, true);
+        stopSession(false);
+        return false;
+      }
+      _speaker.mute();
+      _speaker.stop();
+      _lastHeartbeatMs = millis();
+      _heartbeatPending = false;
+      return true;
+    }
+    if (event.type == SecureWebSocketClient::EventType::Error ||
+        event.type == SecureWebSocketClient::EventType::Disconnected ||
+        event.type == SecureWebSocketClient::EventType::Overflow) {
+      publishError(generation, event.type == SecureWebSocketClient::EventType::Overflow
+                                   ? AssistantError::QueueOverflow
+                                   : AssistantError::WebSocket,
+                   true);
+      stopSession(false);
+      return false;
+    }
+    memset(&event, 0, sizeof(event));
+  }
+  if (!interrupted(generation)) publishError(generation, AssistantError::TimeoutHello, true);
+  stopSession(false);
+  return false;
+}
+
 bool XiaozhiSession::runTurn(uint32_t generation) {
   clearAudioQueues();
   _receivedDownlinkPackets = 0;
@@ -377,54 +504,49 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
   _playedPcmSamples = 0;
   _peakPcm = 0;
   _credentialsRejected = false;
-  memset(_sessionId, 0, sizeof(_sessionId));
-  publishPhase(generation, AssistantPhase::Connecting, "Connecting");
-  if (!connectWebSocket(generation)) return false;
-  if (interrupted(generation)) {
-    safeStop(false);
+  if (!_websocket.isConnected() || !_sessionId[0]) return false;
+  _speaker.mute();
+  _speaker.stop();
+  if (!_mic.isPowered() || !_mic.start()) {
+    publishError(generation, AssistantError::Microphone, true);
     return false;
   }
   char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
-  if (!XiaozhiProtocol::buildClientHello(_bootstrapResponse->websocket.version,
-                                         json, sizeof(json)) ||
+  if (!XiaozhiProtocol::buildListenStart(_sessionId, json, sizeof(json)) ||
       !_websocket.sendText(json, strlen(json))) {
     memset(json, 0, sizeof(json));
     publishError(generation, AssistantError::Protocol, true);
-    safeStop(false);
+    stopTurn(false);
     return false;
   }
   memset(json, 0, sizeof(json));
   const uint32_t turnStarted = millis();
   uint32_t phaseStarted = turnStarted;
   uint32_t lastPacket = turnStarted;
-  bool helloReceived = false;
   bool ttsStopped = false;
-  AssistantPhase phase = AssistantPhase::Connecting;
+  AssistantPhase phase = AssistantPhase::Listening;
+  publishPhase(generation, phase, "Listening");
   size_t pcmUsed = 0;
   SecureWebSocketClient::Event event = {};
 
   while (!interrupted(generation)) {
     const uint32_t now = millis();
     if (!_wifi.isConnected()) {
-      safeStop(false);
+      stopSession(false);
       publishPhase(generation, AssistantPhase::NeedsWiFi, "Connect to Wi-Fi");
       return false;
     }
     if (now - turnStarted >= TurnTimeoutMs) {
       publishError(generation, AssistantError::TimeoutTurn, true);
-      safeStop(false); return false;
-    }
-    if (!helloReceived && now - phaseStarted >= HelloTimeoutMs) {
-      publishError(generation, AssistantError::TimeoutHello, true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
     if (phase == AssistantPhase::Listening && now - lastPacket >= ListeningTimeoutMs) {
       publishError(generation, AssistantError::TimeoutListening, true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
     if (phase == AssistantPhase::Thinking && now - phaseStarted >= ThinkingTimeoutMs) {
       publishError(generation, AssistantError::TimeoutThinking, true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
     if (phase == AssistantPhase::Speaking &&
         (now - lastPacket >= SpeakingPacketTimeoutMs ||
@@ -434,14 +556,14 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
                        ? AssistantError::TimeoutSpeakingTotal
                        : AssistantError::TimeoutSpeakingPacket,
                    true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
 
     if (_websocket.poll(event)) {
       if (event.type == SecureWebSocketClient::EventType::Text) {
-        if (!handleText(event, generation, helloReceived, ttsStopped, phase,
+        if (!handleText(event, generation, ttsStopped, phase,
                         phaseStarted, lastPacket)) {
-          memset(&event, 0, sizeof(event)); safeStop(false); return false;
+          memset(&event, 0, sizeof(event)); stopTurn(false); return false;
         }
       } else if (event.type == SecureWebSocketClient::EventType::Binary) {
         const uint8_t *opus = nullptr;
@@ -454,17 +576,16 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
           publishError(generation, _downlinkCount >= DownlinkQueueCapacity
                                        ? AssistantError::QueueOverflow
                                        : AssistantError::Protocol, true);
-          memset(&event, 0, sizeof(event)); safeStop(false); return false;
+          memset(&event, 0, sizeof(event)); stopTurn(false); return false;
         }
         lastPacket = now;
       } else if (event.type == SecureWebSocketClient::EventType::Overflow) {
         publishError(generation, AssistantError::QueueOverflow, true);
-        safeStop(false); return false;
+        stopTurn(false); return false;
       } else if (event.type == SecureWebSocketClient::EventType::Error ||
                  event.type == SecureWebSocketClient::EventType::Disconnected) {
-        if (ttsStopped) break;
         publishError(generation, AssistantError::WebSocket, true);
-        safeStop(false); return false;
+        stopSession(false); return false;
       }
       memset(&event, 0, sizeof(event));
     }
@@ -475,62 +596,44 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
                                    ? AssistantError::QueueOverflow
                                    : AssistantError::Microphone,
                    true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
     if (phase == AssistantPhase::Speaking && _downlinkCount && !playOne(generation)) {
       if (interrupted(generation)) break;
       publishError(generation, AssistantError::Speaker, true);
-      safeStop(false); return false;
+      stopTurn(false); return false;
     }
     if (ttsStopped && _downlinkCount == 0) break;
     vTaskDelay(1);
   }
   if (interrupted(generation)) {
     sendAbort();
+    stopTurn(false);
     return false;
   }
   if (ttsStopped && phase == AssistantPhase::Speaking && _receivedDownlinkPackets == 0) {
     publishError(generation, AssistantError::Protocol, true);
-    safeStop(false);
+    stopTurn(false);
     return false;
   }
-  safeStop(true);
+  stopTurn(true);
+  _lastHeartbeatMs = millis();
   return true;
 }
 
 bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
-                                uint32_t generation, bool &helloReceived,
-                                bool &ttsStopped, AssistantPhase &phase,
+                                uint32_t generation, bool &ttsStopped,
+                                AssistantPhase &phase,
                                 uint32_t &phaseStarted, uint32_t &lastPacket) {
   XiaozhiProtocol::Message message = {};
   if (!XiaozhiProtocol::parseMessage(event.payload, event.length,
-                                     helloReceived ? _sessionId : nullptr, message)) {
+                                     _sessionId, message)) {
     publishError(generation, AssistantError::Protocol, true);
     return false;
   }
   if (interrupted(generation)) return true;
   const uint32_t now = millis();
-  if (message.type == XiaozhiProtocol::MessageType::ServerHello) {
-    if (helloReceived) return false;
-    copyText(message.sessionId, _sessionId, sizeof(_sessionId));
-    if (!_encoder.begin() || !_decoder.begin(message.audio.sampleRate)) {
-      publishError(generation, AssistantError::Codec, true); return false;
-    }
-    _speaker.mute();
-    _speaker.stop();
-    if (!_mic.isPowered() || !_mic.start()) {
-      publishError(generation, AssistantError::Microphone, true); return false;
-    }
-    char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
-    const bool sent = XiaozhiProtocol::buildListenStart(_sessionId, json, sizeof(json)) &&
-                      _websocket.sendText(json, strlen(json));
-    memset(json, 0, sizeof(json));
-    if (!sent) return false;
-    helloReceived = true;
-    phase = AssistantPhase::Listening;
-    phaseStarted = lastPacket = now;
-    publishPhase(generation, phase, "Listening");
-  } else if (message.type == XiaozhiProtocol::MessageType::Stt) {
+  if (message.type == XiaozhiProtocol::MessageType::Stt) {
     _mic.stop();
     char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
     if (XiaozhiProtocol::buildListenStop(_sessionId, json, sizeof(json))) {
@@ -555,9 +658,15 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
     output.generation = generation;
     output.emotion = message.emotion;
     publish(output);
-  } else if (message.type == XiaozhiProtocol::MessageType::TtsStop ||
-             message.type == XiaozhiProtocol::MessageType::Goodbye) {
+  } else if (message.type == XiaozhiProtocol::MessageType::TtsStop) {
     ttsStopped = true;
+  } else if (message.type == XiaozhiProtocol::MessageType::Pong) {
+    _heartbeatPending = false;
+    _lastHeartbeatMs = now;
+  } else if (message.type == XiaozhiProtocol::MessageType::Goodbye ||
+             message.type == XiaozhiProtocol::MessageType::ServerHello) {
+    publishError(generation, AssistantError::WebSocket, true);
+    return false;
   } else if (message.type == XiaozhiProtocol::MessageType::Error) {
     if (message.authenticationRejected) {
       _credentialsRejected = true;
@@ -571,6 +680,96 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
     return false;
   }
   return true;
+}
+
+bool XiaozhiSession::resetConversation(uint32_t generation) {
+  stopTurn(false);
+  if (!_websocket.isConnected()) return false;
+  char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
+  const bool sent = XiaozhiProtocol::buildConversationReset(
+      generation, json, sizeof(json)) &&
+      _websocket.sendText(json, strlen(json));
+  memset(json, 0, sizeof(json));
+  if (!sent) {
+    publishError(generation, AssistantError::ConversationReset, true);
+    return false;
+  }
+
+  const uint32_t started = millis();
+  SecureWebSocketClient::Event event = {};
+  while (!interrupted(generation) && millis() - started < ConversationResetTimeoutMs) {
+    if (!_websocket.poll(event)) {
+      vTaskDelay(1);
+      continue;
+    }
+    if (event.type == SecureWebSocketClient::EventType::Text) {
+      XiaozhiProtocol::Message message = {};
+      if (!XiaozhiProtocol::parseMessage(event.payload, event.length,
+                                         _sessionId, message)) {
+        publishError(generation, AssistantError::Protocol, true);
+        return false;
+      }
+      if (message.type == XiaozhiProtocol::MessageType::Pong) {
+        _heartbeatPending = false;
+        _lastHeartbeatMs = millis();
+      } else if (message.type == XiaozhiProtocol::MessageType::ConversationReset &&
+                 message.requestId == generation) {
+        if (!message.resetSucceeded) {
+          publishError(generation, AssistantError::ConversationReset, true);
+          return false;
+        }
+        return true;
+      }
+    } else if (event.type == SecureWebSocketClient::EventType::Error ||
+               event.type == SecureWebSocketClient::EventType::Disconnected ||
+               event.type == SecureWebSocketClient::EventType::Overflow) {
+      publishError(generation, AssistantError::ConversationReset, true);
+      return false;
+    }
+    memset(&event, 0, sizeof(event));
+  }
+  if (!interrupted(generation))
+    publishError(generation, AssistantError::TimeoutConversationReset, true);
+  return false;
+}
+
+bool XiaozhiSession::serviceIdleConnection(uint32_t generation) {
+  if (!_websocket.isConnected()) return false;
+  const uint32_t now = millis();
+  if (_heartbeatPending && now - _heartbeatSentMs >= HeartbeatTimeoutMs) return false;
+  if (!_heartbeatPending && now - _lastHeartbeatMs >= HeartbeatIntervalMs) {
+    char json[48] = {};
+    if (!XiaozhiProtocol::buildPing(json, sizeof(json)) ||
+        !_websocket.sendText(json, strlen(json))) return false;
+    _heartbeatPending = true;
+    _heartbeatSentMs = now;
+  }
+
+  SecureWebSocketClient::Event event = {};
+  if (!_websocket.poll(event)) return true;
+  if (event.type == SecureWebSocketClient::EventType::Text) {
+    XiaozhiProtocol::Message message = {};
+    if (!XiaozhiProtocol::parseMessage(event.payload, event.length,
+                                       _sessionId, message)) return false;
+    if (message.type == XiaozhiProtocol::MessageType::Pong) {
+      _heartbeatPending = false;
+      _lastHeartbeatMs = now;
+      return true;
+    }
+    // No unsolicited assistant instruction is actionable while idle.
+    return message.type == XiaozhiProtocol::MessageType::Ignored;
+  }
+  if (event.type == SecureWebSocketClient::EventType::Pong) {
+    _heartbeatPending = false;
+    _lastHeartbeatMs = now;
+    return true;
+  }
+  if (event.type == SecureWebSocketClient::EventType::Ping ||
+      event.type == SecureWebSocketClient::EventType::Connected) return true;
+  (void)generation;
+  return event.type != SecureWebSocketClient::EventType::Error &&
+         event.type != SecureWebSocketClient::EventType::Disconnected &&
+         event.type != SecureWebSocketClient::EventType::Overflow;
 }
 
 bool XiaozhiSession::captureAndSend(uint32_t generation, size_t &pcmUsed) {
@@ -656,14 +855,11 @@ bool XiaozhiSession::playOne(uint32_t generation) {
   return played;
 }
 
-void XiaozhiSession::safeStop(bool drainPlayback) {
+void XiaozhiSession::stopTurn(bool drainPlayback) {
   _mic.stop();
   if (drainPlayback) _speaker.drain();
   _speaker.mute();
   _speaker.stop();
-  _websocket.close();
-  _encoder.end();
-  _decoder.end();
   if (_receivedDownlinkPackets) {
     Serial.print(F("Assistant playback generation="));
     Serial.print(_generation);
@@ -681,7 +877,17 @@ void XiaozhiSession::safeStop(bool drainPlayback) {
   _playedPcmSamples = 0;
   _peakPcm = 0;
   clearAudioQueues();
+}
+
+void XiaozhiSession::stopSession(bool drainPlayback) {
+  stopTurn(drainPlayback);
+  _websocket.close();
+  _encoder.end();
+  _decoder.end();
   memset(_sessionId, 0, sizeof(_sessionId));
+  _heartbeatPending = false;
+  _heartbeatSentMs = 0;
+  _lastHeartbeatMs = 0;
 }
 
 void XiaozhiSession::sendAbort() {
@@ -781,7 +987,7 @@ void XiaozhiSession::publishDeactivated(uint32_t generation) {
 
 bool XiaozhiSession::publish(const XiaozhiSessionEvent &event) {
   if (xQueueSend(_events, &event, 0) == pdTRUE) return true;
-  safeStop(false);
+  stopSession(false);
   xQueueReset(_events);
   XiaozhiSessionEvent overflow = {};
   overflow.type = XiaozhiSessionEventType::Error;

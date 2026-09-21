@@ -24,6 +24,7 @@ enum class XiaozhiSessionCommandType : uint8_t {
   Deactivate,
   StartTurn,
   CancelTurn,
+  ResetConversation,
   Retry
 };
 
@@ -38,6 +39,8 @@ enum class XiaozhiSessionEventType : uint8_t {
   SttCaption,
   TtsCaption,
   Emotion,
+  ConversationReset,
+  ContextLost,
   Error,
   Deactivated
 };
@@ -113,6 +116,9 @@ private:
   bool _credentialsRejected;
   uint32_t _generation;
   uint8_t _retryIndex;
+  uint32_t _lastHeartbeatMs;
+  uint32_t _heartbeatSentMs;
+  bool _heartbeatPending;
   char _sessionId[XiaozhiProtocol::MaxSessionIdBytes + 1];
   PcmFrame *_uplink;
   OpusPacket *_downlink;
@@ -135,14 +141,18 @@ private:
                       const XiaozhiActivationInstructions &instructions);
   bool runTurn(uint32_t generation);
   bool connectWebSocket(uint32_t generation);
+  bool openConversation(uint32_t generation);
+  bool resetConversation(uint32_t generation);
+  bool serviceIdleConnection(uint32_t generation);
   bool handleText(const SecureWebSocketClient::Event &event, uint32_t generation,
-                  bool &helloReceived, bool &ttsStopped, AssistantPhase &phase,
+                  bool &ttsStopped, AssistantPhase &phase,
                   uint32_t &phaseStarted, uint32_t &lastPacket);
   bool captureAndSend(uint32_t generation, size_t &pcmUsed);
   bool playOne(uint32_t generation);
   bool enqueueDownlink(uint32_t generation, const uint8_t *bytes, size_t length,
                        uint32_t timestamp);
-  void safeStop(bool drainPlayback);
+  void stopTurn(bool drainPlayback);
+  void stopSession(bool drainPlayback);
   void sendAbort();
   void clearAudioQueues();
   void clearCredentials();

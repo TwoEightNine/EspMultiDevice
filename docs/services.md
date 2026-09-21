@@ -40,13 +40,15 @@ Recording and speaker playback never run concurrently because they share I2S clo
 
 ### Production assistant
 
-The Stage 2 assistant exists only while its screen is active. The lightweight
+The assistant exists only while its screen is active. The lightweight
 controller is registered at boot, but it creates the worker/session only on
 screen entry and releases its WebSocket/codec buffers after safe screen exit.
 Its controller publishes fixed-size immutable snapshots; the session worker alone performs
 bootstrap, activation polling, WebSocket I/O, Opus conversion, microphone
 capture, and speaker playback. Closing the screen waits for a worker
-acknowledgement after capture/playback are stopped and credentials are wiped.
+acknowledgement after capture/playback are stopped, WSS and codecs are closed,
+and credentials are wiped. Normal answer completion stops only the turn's I2S
+paths and leaves the authenticated WSS and codecs alive for follow-up turns.
 
 The microphone produces exact 960-sample, mono 16 kHz frames. The namespaced
 OpusEncoder and OpusDecoder adapters delegate to the existing fixed-point
@@ -56,7 +58,7 @@ the bounded downlink ring and I2S DMA before mute/stop; cancellation discards
 queued audio immediately. The persisted global speaker volume remains
 authoritative.
 
-Four commands, eight typed events, four uplink frames (240 ms), and eight
+Command/event queue depths of four/eight, four uplink frames (240 ms), and eight
 downlink packets (480 ms) are the hard queue limits. Overflow closes the
 connection. The opposite-core worker uses a 48 KiB internal-RAM stack and reports safe
 stack/heap metrics. Stage 1 retained 21,076 bytes; production hardware
@@ -71,6 +73,18 @@ bootstrap flow. Other recoverable failures retry after 2, 4, 8, then 15
 seconds. Tokens, Authorization, complete WSS URLs, session IDs, raw JSON,
 audio, and captions are prohibited from logs and snapshots. Firmware-update,
 MQTT, system, MCP, alert, custom, and unknown instructions are ignored.
+
+While Ready, firmware sends an application ping every 60 seconds and requires
+a pong within 10 seconds. Any reconnect clears the screen transcript and shows
+the bounded reset notice because exact WSS dialogue context was lost; the
+backend summary may still influence future replies. A five-exchange PSRAM ring
+stores completed local captions (192 user bytes and 384 assistant bytes per
+exchange), appends multi-sentence TTS captions, and discards cancelled drafts.
+The ring and Auto-listen setting are screen-scoped and are wiped on exit;
+Auto-listen is opt-in on every visit. `mem_local_short` persists summarized,
+per-device context in the backend. Confirmed New conversation aborts active
+work, sends the authenticated idempotent reset request, and clears local text
+only after an `ok` acknowledgement.
 
 The self-hosted assistant advertises `zh-CN` during bootstrap and its local
 configuration uses a language-matching prompt plus the Edge-TTS-supported

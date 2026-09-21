@@ -47,6 +47,8 @@ const char *assistantErrorName(AssistantError error) {
     case AssistantError::TimeoutSpeakingPacket: return "speaking_packet_timeout";
     case AssistantError::TimeoutSpeakingTotal: return "speaking_total_timeout";
     case AssistantError::TimeoutTurn: return "turn_timeout";
+    case AssistantError::TimeoutConversationReset: return "conversation_reset_timeout";
+    case AssistantError::ConversationReset: return "conversation_reset";
     case AssistantError::Network: return "network";
     case AssistantError::Internal: return "internal";
   }
@@ -57,16 +59,19 @@ bool assistantTransitionAllowed(AssistantPhase from, AssistantPhase to) {
   if (to == AssistantPhase::NeedsWiFi) return true;
   if (from == AssistantPhase::NeedsWiFi) return to == AssistantPhase::Bootstrapping;
   if (from == AssistantPhase::Bootstrapping) {
-    return to == AssistantPhase::Ready || to == AssistantPhase::NeedsActivation ||
+    return to == AssistantPhase::Connecting || to == AssistantPhase::NeedsActivation ||
            to == AssistantPhase::Error;
   }
   if (from == AssistantPhase::NeedsActivation) {
     return to == AssistantPhase::Bootstrapping || to == AssistantPhase::Ready ||
            to == AssistantPhase::Error;
   }
-  if (from == AssistantPhase::Ready) return to == AssistantPhase::Connecting;
+  if (from == AssistantPhase::Ready) {
+    return to == AssistantPhase::Listening || to == AssistantPhase::Connecting ||
+           to == AssistantPhase::Error;
+  }
   if (from == AssistantPhase::Connecting) {
-    return to == AssistantPhase::Listening || to == AssistantPhase::Ready ||
+    return to == AssistantPhase::Ready ||
            to == AssistantPhase::Bootstrapping || to == AssistantPhase::Error;
   }
   if (from == AssistantPhase::Listening) {

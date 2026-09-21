@@ -32,6 +32,8 @@ enum class MessageType : uint8_t {
   TtsStop,
   TtsCaption,
   Emotion,
+  Pong,
+  ConversationReset,
   Goodbye,
   Error,
   Invalid
@@ -42,6 +44,8 @@ struct Message {
   AudioFormat audio;
   AssistantEmotion emotion;
   bool authenticationRejected;
+  bool resetSucceeded;
+  uint32_t requestId;
   char sessionId[MaxSessionIdBytes + 1];
   char text[AssistantSnapshot::CaptionBytes + 1];
   void clear();
@@ -56,6 +60,8 @@ bool buildClientHello(uint8_t version, char *output, size_t capacity);
 bool buildListenStart(const char *sessionId, char *output, size_t capacity);
 bool buildListenStop(const char *sessionId, char *output, size_t capacity);
 bool buildAbort(const char *sessionId, char *output, size_t capacity);
+bool buildPing(char *output, size_t capacity);
+bool buildConversationReset(uint32_t requestId, char *output, size_t capacity);
 bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessionId,
                   Message &message);
 bool encodeAudioEnvelope(uint8_t version, const uint8_t *opus, size_t opusLength,

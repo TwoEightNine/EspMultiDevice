@@ -21,15 +21,16 @@ public:
 
 private:
   static constexpr uint16_t ScreenBackground = TFT_BLACK;
-  static constexpr int16_t TextLeft = 0;
-  static constexpr int16_t TextTop = 48;
-  static constexpr int16_t TextWidth = 319;
-  static constexpr int16_t TextHeight = 192;
+  static constexpr int16_t MicStripTop = 48;
+  static constexpr int16_t MicStripHeight = 32;
+  static constexpr int16_t TranscriptTop = 80;
+  static constexpr int16_t TranscriptHeight = 160;
+  static constexpr int16_t TranscriptTextWidth = 280;
+  static constexpr int16_t ScrollCellSize = 40;
   static constexpr int16_t AvatarWidth = 320;
   static constexpr int16_t AvatarHeight = 240;
-  static constexpr uint8_t MaxUserTextLines = 2;
-  static constexpr uint8_t MaxAssistantTextLines = 4;
-  static constexpr int16_t BubbleTextPadding = 12;
+  static constexpr uint8_t VisibleTranscriptLines = 6;
+  static constexpr uint8_t MaxWrappedLines = 24;
 
   struct Rect {
     int16_t x;
@@ -37,6 +38,8 @@ private:
     int16_t w;
     int16_t h;
   };
+
+  enum class Menu : uint8_t { Closed, Root, Avatars };
 
   AssistantController &_controller;
   SdCardController &_sdCard;
@@ -51,20 +54,34 @@ private:
   AssistantAvatar::Asset _avatarAsset;
   bool _avatarAssetValid;
   bool _underlayDrawn;
-  bool _avatarMenuOpen;
+  Menu _menu;
+  bool _confirmNewConversation;
   Rect _avatarMenuBounds;
   Rect _avatarMenuRows[AssistantAvatarLoader::MaxAvatars];
   uint32_t _lastAvatarCatalogRevision;
+  uint16_t _scrollLine;
+  uint16_t _totalLines;
+  Rect _scrollUpBounds;
+  Rect _scrollDownBounds;
+  Rect _primaryActionBounds;
+  Rect _rootMenuRows[3];
 
   void enter(bool resetAvatarSelection);
   void requestClose(bool openWiFi);
   void draw(bool full);
   void drawAvatar();
   void clearAvatarPane();
-  void drawText();
+  void drawMicrophoneStrip();
+  void drawTranscript(bool preservePosition = true);
+  void drawPrimaryAction();
+  uint16_t countTranscriptLines() const;
+  void drawTranscriptMessage(const char *text, bool user, uint16_t &logicalLine,
+                             uint8_t &visibleLine);
   void layoutAvatarMenu();
+  void drawRootMenu();
   void drawAvatarMenu();
-  void closeAvatarMenu();
+  void closeMenu();
+  bool contains(const Rect &rect, int16_t x, int16_t y) const;
   bool active() const;
   void handleSdCardEvent(SdCardEvent event);
 };

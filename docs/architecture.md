@@ -177,26 +177,27 @@ unavailable assets leave an otherwise empty pane at the screen background; once
 a frame is visible, replacement frames are pushed directly over it to avoid a
 transition blink. SD removal/remount explicitly clears the pane so stale
 artwork cannot remain.
-The portrait layout uses a 48px app bar, a black 319×192 text viewport at
-`(0,48)`–`(318,239)`, and the native avatar frame at the bottom. The text
-renderer never paints the avatar pane. User/STT text is top-aligned in a black,
-white-outlined rounded bubble at `(62,58)`–`(307,112)` with an upward V-tail on
-its top-right edge and wraps to two Content lines. Assistant/TTS text is
-top-aligned in a matching bubble at `(12,125)`–`(257,227)` with a downward
-V-tail on its bottom-left edge and wraps to four Content lines. Captions select the
-assistant-only 18 px Noto Sans CJK SC face when they contain Han text; its
-embedded GB2312 coverage includes common Simplified Chinese, punctuation, and
-Latin, while unsupported characters become `?`. Technical status text,
-including errors and activation instructions, uses the assistant slot in light
-gray (light red for errors) until a reply is available; replies and user text
-are white. The assistant reply is offset above the avatar with a bottom gutter.
-The full avatar rectangle is the state-dependent primary touch target.
+The portrait layout uses a 48px app bar, a permanent 32px microphone strip,
+a 160px transcript viewport, and the native 320×240 avatar pane. The strip is
+never obscured by popup content and always says Listening, Mic off, or Mic
+unavailable. The transcript uses role-specific fill-only bubbles and shared
+40×40 page-up/page-down controls. Captions have no per-message line cap; new
+text follows only when the reader was already at the bottom. Han text selects
+the assistant-only 18px Noto Sans CJK SC face. A fill-only action overlays the
+avatar and reads Ask, Ask follow-up, Stop listening, or Cancel for the current
+phase. The overflow menu contains a two-tap New conversation confirmation,
+Auto-listen, and the existing Avatar submenu; all popup rows begin below the
+microphone strip.
 
-AssistantController is the UI-facing boundary. Its commands are begin,
-activate, deactivate, startTurn, cancelTurn, retry, and tick; callers receive a
-value copy of the mutex-protected AssistantSnapshot. Snapshots and session
-events use fixed buffers and never contain credentials, Authorization headers,
-complete WSS URLs, or session IDs.
+AssistantController is the UI-facing boundary. Its commands include manual
+turn start/cancel, Auto-listen, authenticated conversation reset, retry, and
+screen activation/deactivation. Callers receive a value copy of the
+mutex-protected AssistantSnapshot and copy transcript entries through the same
+mutex. The screen-scoped PSRAM ring retains five completed exchanges plus one
+draft: user text is UTF-8-safe at 192 bytes and assistant text at 384 bytes.
+Completion of a sixth exchange evicts only the oldest; cancellation discards
+the draft. Snapshots and events never contain credentials, Authorization
+headers, complete WSS URLs, device/session IDs, or raw JSON.
 
 XiaozhiSession is created only while the Assistant screen is active; it owns
 the opposite-core 48 KiB worker with an internal-RAM stack (required while network code disables the flash cache), bootstrap lifecycle, verified WebSocket,
@@ -208,10 +209,11 @@ queue terminates that connection with a recoverable typed error. WebSocket
 ingress yields after each complete frame so normal TTS bursts are backpressured
 by playback instead of overflowing the four-event staging queue. Every command
 and event carries a generation; cancellation changes the requested generation,
-stale results are dropped, audio rings are wiped, the socket closes, and both
-I2S paths stop. Its safe-stop acknowledgement lets the controller destroy the
-session and release its internal-heap WebSocket buffers before the user returns
-to another screen.
+stale results are dropped and audio rings are wiped. Turn cleanup drains or
+discards playback and stops both I2S paths without closing WSS or destroying
+codecs. Only session cleanup—screen release, failed connection, or reconnect—
+closes WSS, destroys codecs, wipes credentials, and acknowledges safe resource
+release to the controller.
 
 XiaozhiBootstrap is the renamed Stage 1 implementation and owns only
 certificate-checked activation/bootstrap HTTP and bounded response parsing.
@@ -221,15 +223,21 @@ XiaozhiProtocol exclusively builds/parses JSON and v1/v2/v3 audio envelopes.
 It always advertises features.mcp false, accepts only mono Opus with 60 ms
 frames (16 kHz uplink and 16/24 kHz downlink), and ignores MCP, system,
 firmware-update, MQTT, alert, custom, and unknown messages.
+It also owns bounded ping/pong and authenticated conversation-reset envelopes.
+Reset validates the `reset` action, nonzero 32-bit request ID, and `ok`/`error`
+result; generation/request matching prevents stale acknowledgements from
+clearing captions.
 
-The current state path is NeedsWiFi → Bootstrapping → Ready, with optional
-NeedsActivation → Bootstrapping, followed by Ready → Connecting → Listening →
-Thinking → Speaking → Ready. Wi-Fi loss returns to NeedsWiFi; 401/403 discards
-credentials and returns directly to Bootstrapping; cancellation from active
-work returns to Ready. Recoverable errors are visible before a
-2/4/8/15-second capped bootstrap backoff. Each completed answer drains
-playback, closes WSS, and returns to Ready; Stage 2 has no automatic continued
-listening.
+The connection path is NeedsWiFi → Bootstrapping → Connecting → Ready, with
+optional NeedsActivation → Bootstrapping. Every turn then follows Ready →
+Listening → Thinking → Speaking → Ready on that same authenticated WSS.
+Cancellation aborts only the active turn. Auto-listen defaults off on every
+entry; enabling it from Ready starts immediately and completed playback starts
+the next turn, while disabling it cancels Listening but lets Thinking/Speaking
+finish. Idle Ready sends a heartbeat every 60 seconds and requires pong within
+10 seconds. Recoverable reconnects retain the 2/4/8/15-second backoff, clear the
+local transcript, and show `Connection restored; captions reset` because the
+exact server Dialogue was replaced.
 
 The injected AssistantBackendConfig borrows a bootstrap URL, activation URL,
 and PEM trust anchor. Production accepts HTTPS bootstrap/activation and WSS
@@ -242,7 +250,7 @@ fallback points at a public Xiaozhi service.
 The worker enforces 15-second bootstrap and WSS-connect limits, a 10-second
 server-hello limit, 45-second listening inactivity, 60-second thinking,
 15-second speaking packet inactivity, 120-second speaking total, and
-180-second total turn. Microphone capture stops before speaker startup;
+180-second total turn, plus a 10-second reset acknowledgement limit. Microphone capture stops before speaker startup;
 playback drains, mutes, and stops before Ready. Logs contain only generation,
 phase, safe error category, bounded queue counts, heap/PSRAM, and stack
 headroom.

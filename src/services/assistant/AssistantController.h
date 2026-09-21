@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 
 #include "AssistantState.h"
+#include "AssistantTranscript.h"
 #include "XiaozhiBootstrap.h"
 #include "XiaozhiSession.h"
 
@@ -23,9 +24,13 @@ public:
   void deactivate();
   void startTurn();
   void cancelTurn();
+  void setAutoListen(bool enabled);
+  void newConversation();
   void retry();
   void tick(uint32_t nowMs);
   AssistantSnapshot snapshot() const;
+  bool copyTranscriptTurn(uint8_t index, AssistantTranscriptTurn &output) const;
+  bool copyTranscriptDraft(AssistantTranscriptTurn &output) const;
 
 private:
   WiFiController &_wifi;
@@ -36,17 +41,22 @@ private:
   XiaozhiSession *_session;
   mutable SemaphoreHandle_t _snapshotMutex;
   AssistantSnapshot _snapshot;
+  AssistantTranscript _transcript;
   uint32_t _generation;
   bool _begun;
   bool _screenActive;
   bool _deactivationPending;
   bool _disposeSession;
   bool _lastWifiConnected;
+  bool _resetPending;
+  bool _turnPending;
 
   bool ensureSession();
   void disposeSession();
   uint32_t nextGeneration();
   bool send(XiaozhiSessionCommandType type, uint32_t generation);
+  bool sendResetConversation();
+  void syncTranscriptMetadata();
   void apply(const XiaozhiSessionEvent &event);
   void setLocalError(AssistantError error, bool retryable, const char *status);
   void mutatePhase(AssistantPhase phase, const char *status);

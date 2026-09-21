@@ -1,13 +1,15 @@
 # Local Xiaozhi production backend
 
-This pinned arm64 Compose stack is the Stage 2 production target for ESP Media.
-It runs Xiaozhi's authenticated bootstrap and voice WebSocket service behind
+This pinned arm64 Compose stack is the production target for ESP Media.
+It builds a small checksum-guarded reset overlay on the digest-pinned Xiaozhi
+image, then runs authenticated bootstrap and voice WebSocket service behind
 Caddy-managed HTTPS/WSS. The language-matching pipeline is `SileroVAD`, `OpenaiASR`,
-`OpenAILLM`, `EdgeTTS`, `nointent`, and `nomem`; it uses
+`OpenAILLM`, `EdgeTTS`, `nointent`, and `mem_local_short` using `OpenAILLM`; it uses
 `zh-CN-XiaoxiaoNeural`, the Edge TTS voice supported by the local service, so
 Chinese input receives Simplified-Chinese speech. The prompt still makes replies
 match other input languages, although the fixed Mandarin voice may give non-Chinese
 speech a Mandarin accent. MQTT and public Xiaozhi fallback remain disabled.
+WebSocket ping handling is enabled for the firmware's 60-second heartbeat.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
@@ -26,7 +28,10 @@ put it in Compose, firmware configuration, tracked examples, logs, or commands.
    `config.example.yaml` to `.runtime/data/.config.yaml`. Replace the example
    LAN host with this Mac's current `sslip.io` DNS hostname in both files. Keep
    the advertised endpoint on WSS and enter the OpenAI key only in the two
-   private `api_key` fields.
+   private `api_key` fields. Existing installations must also change
+   `selected_module.Memory` from `nomem` to `mem_local_short`, add the matching
+   `Memory.mem_local_short` block, and enable the root-level
+   `enable_websocket_ping` setting.
 3. Put the pinned Silero VAD ONNX file at
    `.runtime/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx`.
    The validated file is 2,327,524 bytes with SHA-256
@@ -35,6 +40,7 @@ put it in Compose, firmware configuration, tracked examples, logs, or commands.
 
    ```sh
    ruby check_config.rb config .runtime/data/.config.yaml
+   docker-compose --env-file .runtime/endpoint.env build xiaozhi
    docker-compose --env-file .runtime/endpoint.env up -d
    ./check_backend.sh
    ```
@@ -49,8 +55,8 @@ put it in Compose, firmware configuration, tracked examples, logs, or commands.
 
 `check_backend.sh` verifies the selected providers, exact pinned models,
 placeholder-free private keys, DNS/WSS advertisement, disabled MQTT, container
-health, the Caddy trust chain, and the authenticated bootstrap response without
-printing credentials. Use `docker-compose --env-file .runtime/endpoint.env ps`
+health, the Caddy trust chain, authenticated bootstrap, and an authenticated
+idempotent reset for an isolated test device without printing credentials. Use `docker-compose --env-file .runtime/endpoint.env ps`
 for status. Avoid routine backend log output because transcripts and provider
 errors can contain user data.
 
@@ -61,3 +67,22 @@ CA. Deleting `.runtime/caddy-data`, or starting Caddy with a new data volume,
 rotates that CA. After a rotation, copy the new root into the ignored firmware
 configuration and rebuild before the device can connect. Never disable
 certificate verification or replace the DNS hostname with a bare LAN IP.
+
+## Conversation memory and reset overlay
+
+Exact dialogue remains inside one WSS connection. On close, `mem_local_short`
+stores a summarized per-device memory in `.runtime/data/.memory.yaml`; it is
+personalization, not a transcript. New conversation sends
+`{"type":"conversation","action":"reset","request_id":N}` over the already
+authenticated WSS. The server aborts outstanding dialogue work, atomically
+deletes only that device's YAML entry, clears the provider summary and live
+Dialogue, restores the system prompt, and returns an `ok` or bounded error
+category. Duplicate requests are safe. Per-device epochs and locks prevent a
+late summary from a closing connection from resurrecting reset memory.
+
+`server_overlay/Dockerfile` retains upstream commit
+`6afc54a17def47578a4b3efc4680873689d3168b` and base manifest
+`sha256:4673fac2cb7125d6370a3e8cd6cd9985195c9bfc6203d3ced41e86a1b9775c30`.
+`apply_overlay.py` verifies every modified upstream file checksum before
+patching, so layout drift fails the image build. Xiaozhi's MIT notice is copied
+into the image and retained in `server_overlay/XIAOZHI_MIT_LICENSE.txt`.
