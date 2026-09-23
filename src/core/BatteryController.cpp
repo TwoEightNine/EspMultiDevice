@@ -78,6 +78,11 @@ BatteryReading BatteryController::read() {
   return {_returnedVoltage, percentageForVoltage(_returnedVoltage)};
 }
 
+BatteryReading BatteryController::readLive() {
+  const float medianVoltage = readMedianVoltage();
+  return {medianVoltage, percentageForVoltage(medianVoltage)};
+}
+
 uint8_t BatteryController::percentageForVoltage(float measuredVoltage) const {
   if (measuredVoltage <= DischargeCurve[0].voltage) {
     return DischargeCurve[0].percentage;

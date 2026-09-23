@@ -18,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 17 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
+`Navigator` registers the 18 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -41,7 +41,7 @@ Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Im
 | `DisplayController` | Initializes TFT_eSPI, exposes the display, can apply a runtime rotation, reports dimensions, and clears the panel. A caller changing its rotation must update `TouchController` with the same rotation and new dimensions before handling touches. |
 | `TouchController` | Polls XPT2046 over SPI; debounces press/release, filters samples, maps to the display, and persists 4×4 mesh calibration at `/.system/touch`. Its rotation-aware mesh mapping preserves calibration when a screen changes display orientation. |
 | `SpiBusLock` | FreeRTOS mutex for the SPI wires shared by SD and XPT2046. Concurrent work locks only individual transactions. |
-| `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. During one controller session, it retains the lowest median voltage; each returned voltage and its linearly interpolated discharge-curve percentage therefore never increase. The percentage is calculated from exactly the voltage returned in the same `BatteryReading`. |
+| `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. `read()` retains the lowest median voltage during one controller session, so Home's returned voltage and linearly interpolated discharge-curve percentage never increase. `readLive()` returns the current median and percentage from that same value without changing the retained reading; Settings → Battery refreshes it every second. |
 | `SdCardController` | Mounts, monitors, and remounts FAT storage. `update()` is called from the main loop and consumers obtain pending `Mounted`, `Removed`, or `MountFailed` state through `takeEvent()`. |
 | `UsbMassStorageController` | Owns the TinyUSB MSC callbacks and host-visible state. In transfer boot it asks `SdCardController` to replace local FAT ownership with an unmounted raw SPI block device, exposes the whole card, and reports eject/disconnect/error state to `UsbDriveScreen::tick()`. |
 | `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, incremental sidecar cleanup, and staged sidecar relocation across encryption boundaries. Cache codecs retain their format-specific header and payload validation. |

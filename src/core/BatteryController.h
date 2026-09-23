@@ -18,6 +18,11 @@ public:
   // percentage is derived from that same returned voltage.
   BatteryReading read();
 
+  // Takes one fresh three-sample median measurement without changing the
+  // retained-low reading used by Home. The percentage is derived from that
+  // same live cell voltage.
+  BatteryReading readLive();
+
 private:
   static const uint8_t SampleCount = 3;
 
