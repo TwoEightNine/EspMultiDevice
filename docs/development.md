@@ -186,6 +186,11 @@ path/dimensions, voice-control hold activation, two-line human ellipsizing, thre
 state/timeout categories, bounded queue overflow, and generation/request
 filtering without network or audio I/O.
 
+When adding an Assistant capability, follow
+[agentic-commands.md](agentic-commands.md). It defines the required strict RPC
+schema, worker/UI ownership, backend overlay, redaction, and two-layer test
+work before the command is exposed to the LLM.
+
 Current compile gates on Arduino-ESP32 3.3.8:
 
 | Image | Result |

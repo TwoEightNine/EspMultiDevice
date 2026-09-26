@@ -62,6 +62,7 @@ docs/              detailed developer and behavior documentation
 - [Media support and SD cache formats](docs/media.md)
 - [Browser behavior and security limits](docs/browser.md)
 - [Storage, audio, network, and device behavior](docs/services.md)
+- [Assistant device-command contributor guide](docs/agentic-commands.md)
 - [Hardware, wiring, power, and SD preparation](docs/hardware.md)
 - [Development, dependencies, licenses, and fixtures](docs/development.md)
 

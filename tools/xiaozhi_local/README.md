@@ -72,6 +72,11 @@ duplicate, or mismatched results are discarded. `play_audio` is terminal: the
 backend gives the result to the LLM but suppresses a competing TTS reply while
 the firmware transitions to its Audio Player.
 
+To add another device capability, follow
+[the repository command guide](../../docs/agentic-commands.md). Keep all
+backend changes in `server_overlay`, update the checksum-guarded patch and its
+tests, and do not expose tool inputs or result payloads in logs.
+
 ## Trust-anchor lifecycle
 
 `docker-compose down` preserves `.runtime/` and therefore preserves the private
