@@ -6,12 +6,12 @@
 
 The one-shot USB Drive flag selects an isolated alternate composition. Transfer boot constructs only UART Serial, display, touch, SD/raw-block storage, Navigator, and `UsbDriveScreen`; it does not construct network, browser, cache, decoder, recording, or playback components. Normal boot disconnects the ROM USB-Serial/JTAG pad so the native connector remains inactive after startup. Because that register can survive a software reset, transfer boot explicitly reconnects the pad before configuring the static MSC descriptor and callbacks and calling `USB.begin()`. The flag is cleared as it is consumed, so the next reset returns to the normal composition and the native connector stops enumerating.
 
-The loop forwards touch **state edges** only, updates SD hot-swap state, Wi-Fi, and time, then calls `tick(millis())` on the active `Screen`. The state-edge rule prevents a held press that opened a screen from also activating a control in that screen.
+The loop forwards touch **state edges** only, updates SD hot-swap state, boot-scoped battery telemetry, Wi-Fi, and time, then calls `tick(millis())` on the active `Screen`. The state-edge rule prevents a held press that opened a screen from also activating a control in that screen.
 
 ```text
 setup: services -> Navigator -> screens -> register -> Splash
 loop:  touch edge -> active Screen::handleTouch()
-       SD update -> Wi-Fi update -> Time update -> active Screen::tick()
+       SD update -> Battery telemetry -> Wi-Fi update -> Time update -> active Screen::tick()
 ```
 
 ## Screens and navigation
@@ -41,7 +41,8 @@ Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Im
 | `DisplayController` | Initializes TFT_eSPI, exposes the display, can apply a runtime rotation, reports dimensions, and clears the panel. A caller changing its rotation must update `TouchController` with the same rotation and new dimensions before handling touches. |
 | `TouchController` | Polls XPT2046 over SPI; debounces press/release, filters samples, maps to the display, and persists 4×4 mesh calibration at `/.system/touch`. Its rotation-aware mesh mapping preserves calibration when a screen changes display orientation. |
 | `SpiBusLock` | FreeRTOS mutex for the SPI wires shared by SD and XPT2046. Concurrent work locks only individual transactions. |
-| `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. `read()` retains the lowest median voltage during one controller session, so Home's returned voltage and linearly interpolated discharge-curve percentage never increase. `readLive()` returns the current median and percentage from that same value without changing the retained reading; Settings → Battery refreshes it every second. |
+| `BatteryController` | Reads a divider-corrected cell voltage from the median of three calibrated samples. `read()` retains the lowest median voltage during one controller session, so Home's returned voltage and linearly interpolated discharge-curve percentage never increase. `readLive()` returns the current median and percentage from that same value without changing the retained reading; `readingForVoltage()` applies that same curve to a supplied calibrated voltage. |
+| `BatteryHistoryService` | Owns the boot-scoped one-second live sample, 30-sample voltage moving average, bounded chart summary, and `/.system/battery_history.bin` append log. It depends on `BatteryController` and `SdCardController`, performs each SD transaction under `SpiBusLock`, and supplies cached raw/smooth readings and history to Settings → Battery without modifying Home's retained-low value. |
 | `SdCardController` | Mounts, monitors, and remounts FAT storage. `update()` is called from the main loop and consumers obtain pending `Mounted`, `Removed`, or `MountFailed` state through `takeEvent()`. |
 | `UsbMassStorageController` | Owns the TinyUSB MSC callbacks and host-visible state. In transfer boot it asks `SdCardController` to replace local FAT ownership with an unmounted raw SPI block device, exposes the whole card, and reports eject/disconnect/error state to `UsbDriveScreen::tick()`. |
 | `MediaCache` | Owns source-derived cache paths and fingerprints, bounded SPI-safe cache file operations, `.tmp` write transactions, atomic publication, abort cleanup, incremental sidecar cleanup, and staged sidecar relocation across encryption boundaries. Cache codecs retain their format-specific header and payload validation. |
@@ -164,30 +165,34 @@ safe-close handshake. AssistantAvatar owns the lower 320×240 avatar pane,
 including clearing it before a new asset set is available, and paints one
 prepared 320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
 decodes the five exact PNG assets from the selected `/.system/ai_avatars/<dir>/` into
-PSRAM; it never draws or updates assistant state. `/.system/ai_avatars/avatars.config`
+PSRAM; it never draws or updates assistant state. It also decodes the required,
+non-interlaced 320×432 `/.system/ai_avatars/background.png` into PSRAM; the UI
+draws it one-for-one at (0,48). `/.system/ai_avatars/avatars.config`
 contains optional `Name:dir` entries. The Assistant overflow menu always offers
 Default (`default`) followed by at most nine valid entries; missing, unreadable, or
 malformed configs expose Default only. Selection is screen-scoped, resets to Default
 on a fresh entry, and preserves the previous artwork until the selected replacement
-frame is decoded, so it does not clear captions or interrupt a dialogue. SD reads remain bounded by
-`SpiBusLock`, and the UI task publishes frames to the TFT. It also decodes the
-alpha-capable `/.system/ai_avatars/blur.png` underlay and composites it over the
-black avatar pane before the selected avatar. Missing, invalid, or temporarily
-unavailable assets leave an otherwise empty pane at the screen background; once
-a frame is visible, replacement frames are pushed directly over it to avoid a
-transition blink. SD removal/remount explicitly clears the pane so stale
-artwork cannot remain.
-The portrait layout uses a 48px app bar, a permanent 32px microphone strip,
-a 160px transcript viewport, and the native 320×240 avatar pane. The strip is
-never obscured by popup content and always says Listening, Mic off, or Mic
-unavailable. The transcript uses role-specific fill-only bubbles and shared
-40×40 page-up/page-down controls. Captions have no per-message line cap; new
-text follows only when the reader was already at the bottom. Han text selects
-the assistant-only 18px Noto Sans CJK SC face. A fill-only action overlays the
-avatar and reads Ask, Ask follow-up, Stop listening, or Cancel for the current
-phase. The overflow menu contains a two-tap New conversation confirmation,
-Auto-listen, and the existing Avatar submenu; all popup rows begin below the
-microphone strip.
+frame is decoded, so it does not clear captions or interrupt a dialogue. SD
+reads remain bounded by `SpiBusLock`, and the UI task publishes frames to the
+TFT. Missing, invalid, or temporarily unavailable background artwork falls
+back to black; SD removal/remount clears and reloads it so stale artwork cannot
+remain. Avatar alpha is composited over the matching 320×240 slice of that
+background, rather than a black pane.
+The portrait layout uses a 48px app bar and the 320×432 background from y=48
+through the bottom edge. The background owns the visible bubble shapes; the UI
+draws only the latest live user/reply pair, never transcript history or page
+arrows. The user caption is in (22,69)–(297,116), wraps to two 21px lines, and
+ellipsizes overflow. The assistant caption is in (22,148)–(297,219), shows at
+most three spoken lines, starts at its first page, and advances by three lines
+every two seconds to the final page without restarting on each sentence. Han
+text selects the assistant-only 18px Noto Sans CJK SC face. A 60×60 fill-only
+voice control at (130,396) overlays the avatar: blue microphone while ready,
+green stop while listening, blue cancel during active work, and gray slashed
+microphone when unavailable or disabled. The overflow menu contains a two-tap
+New conversation confirmation and the existing Avatar submenu; its rows begin
+immediately below the app bar. Holding the voice control inside its bounds for
+800 ms enables screen-session Auto-listen and produces a 160 ms cyan pulse;
+the next tap disables it without applying that tap's normal action.
 
 AssistantController is the UI-facing boundary. Its commands include manual
 turn start/cancel, Auto-listen, authenticated conversation reset, retry, and

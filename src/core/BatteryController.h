@@ -23,6 +23,11 @@ public:
   // same live cell voltage.
   BatteryReading readLive();
 
+  // Converts an already measured divider-corrected cell voltage using the
+  // same discharge curve as read() and readLive(). This does not sample the
+  // ADC or change Home's retained-low reading.
+  BatteryReading readingForVoltage(float voltage) const;
+
 private:
   static const uint8_t SampleCount = 3;
 

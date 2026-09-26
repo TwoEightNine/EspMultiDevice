@@ -32,6 +32,7 @@ USBMSC usbMsc;
 #include <esp_system.h>
 
 #include "src/core/BatteryController.h"
+#include "src/services/storage/BatteryHistoryService.h"
 #include "src/core/DisplayController.h"
 #include "src/services/audio/AudioSettings.h"
 #include "src/services/led/LedSettings.h"
@@ -147,6 +148,7 @@ LedSettings *ledSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 BatteryController *batteryController = nullptr;
+BatteryHistoryService *batteryHistory = nullptr;
 AssistantController *assistantController = nullptr;
 UsbMassStorageController *usbMassStorage = nullptr;
 
@@ -332,6 +334,9 @@ void setup() {
   batteryController = new BatteryController(BATTERY_ADC_PIN);
   batteryController->begin();
   Serial.println(F("Battery controller ready."));
+  batteryHistory = new BatteryHistoryService(*batteryController, *sdCard);
+  batteryHistory->begin(millis());
+  Serial.println(F("Battery history ready."));
 
   mic = new MicController(
     MIC_BCLK_PIN,
@@ -394,7 +399,7 @@ void setup() {
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
   ledScreen = new LedScreen(*navigator, *touch, *display, *ledSettings);
-  batteryInfoScreen = new BatteryInfoScreen(*navigator, *touch, *display, *batteryController);
+  batteryInfoScreen = new BatteryInfoScreen(*navigator, *touch, *display, *batteryHistory);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
@@ -497,6 +502,10 @@ void loop() {
   if (sdCard) {
     sdCard->update();
     if (!sdCard->isMounted() && secretStorage) secretStorage->lock();
+  }
+
+  if (batteryHistory) {
+    batteryHistory->update(millis());
   }
 
   if (wifiController) {

@@ -80,7 +80,11 @@ BatteryReading BatteryController::read() {
 
 BatteryReading BatteryController::readLive() {
   const float medianVoltage = readMedianVoltage();
-  return {medianVoltage, percentageForVoltage(medianVoltage)};
+  return readingForVoltage(medianVoltage);
+}
+
+BatteryReading BatteryController::readingForVoltage(float voltage) const {
+  return {voltage, percentageForVoltage(voltage)};
 }
 
 uint8_t BatteryController::percentageForVoltage(float measuredVoltage) const {

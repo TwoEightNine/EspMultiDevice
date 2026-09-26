@@ -14,6 +14,9 @@ class AssistantAvatarLoader {
 public:
   static constexpr uint16_t Width = 320;
   static constexpr uint16_t Height = 240;
+  static constexpr uint16_t BackgroundWidth = 320;
+  static constexpr uint16_t BackgroundHeight = 432;
+  static constexpr const char *BackgroundPath = "/.system/ai_avatars/background.png";
   static constexpr uint8_t AssetCount = 5;
   static constexpr uint8_t MaxConfiguredAvatars = 9;
   static constexpr uint8_t MaxAvatars = MaxConfiguredAvatars + 1;
@@ -29,6 +32,7 @@ public:
   bool releaseResources();
   bool running() const;
   uint32_t revision() const;
+  uint32_t backgroundRevision() const;
   uint32_t catalogRevision() const;
   uint8_t avatarCount() const;
   String avatarName(uint8_t index) const;
@@ -39,7 +43,7 @@ public:
   const uint8_t *frameAlpha(AssistantAvatar::Asset asset) const;
   bool image(AssistantAvatar::Asset asset, const uint16_t *&pixels,
              const uint8_t *&alpha) const;
-  bool underlay(const uint16_t *&pixels, const uint8_t *&alpha) const;
+  bool background(const uint16_t *&pixels) const;
 
   // Kept public for the assistant contract diagnostic. A nonblank config line
   // must have exactly one usable Name:dir pair.
@@ -53,7 +57,7 @@ private:
   void run();
   bool loadCatalog();
   bool decode(AssistantAvatar::Asset asset, uint32_t generation);
-  bool decodeUnderlay(uint32_t generation);
+  bool decodeBackground(uint32_t generation);
   bool clearFrames();
   bool generationCurrent(uint32_t generation) const;
   bool directoryForGeneration(uint32_t generation, char *directory,
@@ -83,13 +87,16 @@ private:
   uint16_t *_frames[AssetCount];
   uint8_t *_frameAlpha[AssetCount];
   uint32_t _frameGeneration[AssetCount];
-  uint16_t *_underlayFrame;
-  uint8_t *_underlayAlpha;
-  uint32_t _underlayGeneration;
+  uint16_t *_backgroundFrame;
+  uint32_t _backgroundGeneration;
+  uint32_t _backgroundAttemptGeneration;
+  volatile uint32_t _backgroundRevision;
   PNG _png;
   fs::File _file;
   uint16_t *_decodeFrame;
   uint8_t *_decodeAlpha;
-  bool _decodingUnderlay;
+  bool _decodingBackground;
+  uint16_t _decodeWidth;
+  uint16_t _decodeHeight;
   static AssistantAvatarLoader *_decoderOwner;
 };

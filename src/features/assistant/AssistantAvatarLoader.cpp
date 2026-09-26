@@ -19,14 +19,6 @@ constexpr const char *DefaultAvatarName = "Default";
 constexpr const char *DefaultAvatarDirectory = "default";
 constexpr size_t MaxAvatarConfigBytes = 2048;
 constexpr size_t ReadChunkBytes = 128;
-// The first path is the user-facing SD path. The absolute variants keep the
-// loader tolerant of the two path spellings accepted by Arduino FS builds.
-constexpr const char *UnderlayPaths[] = {
-    "/.system/ai_avatars/blur.png",
-    "./system/ai_avatars/blur.png",
-    "/system/ai_avatars/blur.png"
-};
-constexpr uint8_t UnderlayPathCount = sizeof(UnderlayPaths) / sizeof(UnderlayPaths[0]);
 
 uint8_t pixelAlpha(const PNGDRAW &draw, int x) {
   const uint8_t *pixels = draw.pPixels;
@@ -90,9 +82,11 @@ AssistantAvatarLoader::AssistantAvatarLoader(SdCardController &sdCard)
       _running(false), _requestedGeneration(1), _revision(0), _frames{},
       _catalogReloadRequested(true), _catalogRevision(0), _avatarNames{},
       _avatarDirectories{}, _avatarCount(1), _selectedDirectory{},
-      _underlayFrame(nullptr), _underlayAlpha(nullptr), _underlayGeneration(0),
+      _backgroundFrame(nullptr), _backgroundGeneration(0),
+      _backgroundAttemptGeneration(0), _backgroundRevision(0),
       _png(), _file(),
-      _decodeFrame(nullptr), _decodeAlpha(nullptr), _decodingUnderlay(false) {
+      _decodeFrame(nullptr), _decodeAlpha(nullptr), _decodingBackground(false),
+      _decodeWidth(Width), _decodeHeight(Height) {
   memset(_frameAlpha, 0, sizeof(_frameAlpha));
   memset(_frameGeneration, 0, sizeof(_frameGeneration));
   strncpy(_avatarNames[0], DefaultAvatarName, AvatarNameBytes - 1);
@@ -148,6 +142,10 @@ bool AssistantAvatarLoader::running() const {
 
 uint32_t AssistantAvatarLoader::revision() const {
   return _revision;
+}
+
+uint32_t AssistantAvatarLoader::backgroundRevision() const {
+  return _backgroundRevision;
 }
 
 uint32_t AssistantAvatarLoader::catalogRevision() const {
@@ -246,15 +244,12 @@ bool AssistantAvatarLoader::image(AssistantAvatar::Asset asset,
   return available;
 }
 
-bool AssistantAvatarLoader::underlay(const uint16_t *&pixels,
-                                     const uint8_t *&alpha) const {
+bool AssistantAvatarLoader::background(const uint16_t *&pixels) const {
   pixels = nullptr;
-  alpha = nullptr;
   if (!_mutex) return false;
   if (xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
-  pixels = (_underlayGeneration == _requestedGeneration) ? _underlayFrame : nullptr;
-  alpha = (_underlayGeneration == _requestedGeneration) ? _underlayAlpha : nullptr;
-  const bool available = pixels && alpha;
+  pixels = (_backgroundGeneration == _requestedGeneration) ? _backgroundFrame : nullptr;
+  const bool available = pixels != nullptr;
   xSemaphoreGive(_mutex);
   return available;
 }
@@ -268,6 +263,13 @@ void AssistantAvatarLoader::run() {
     if (_catalogReloadRequested) (void)loadCatalog();
     const uint32_t generation = _requestedGeneration;
     bool attempted = false;
+    const uint16_t *backgroundPixels = nullptr;
+    if (generationCurrent(generation) && generation != _backgroundAttemptGeneration &&
+        !background(backgroundPixels)) {
+      attempted = true;
+      _backgroundAttemptGeneration = generation;
+      (void)decodeBackground(generation);
+    }
     for (uint8_t index = 0; index < AssetCount && !_stopRequested; ++index) {
       const AssistantAvatar::Asset asset = static_cast<AssistantAvatar::Asset>(index);
       if (!generationCurrent(generation)) break;
@@ -275,12 +277,6 @@ void AssistantAvatarLoader::run() {
       if (frame(asset)) continue;
       attempted = true;
       (void)decode(asset, generation);
-    }
-    const uint16_t *underlayPixels = nullptr;
-    const uint8_t *underlayAlpha = nullptr;
-    if (generationCurrent(generation) && !underlay(underlayPixels, underlayAlpha)) {
-      attempted = true;
-      (void)decodeUnderlay(generation);
     }
     if (generationCurrent(generation)) {
       (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(attempted ? 250 : 1000));
@@ -408,7 +404,9 @@ bool AssistantAvatarLoader::decode(AssistantAvatar::Asset asset,
   if (!generationCurrent(generation) || !_sdCard.isMounted() || !psramFound()) {
     return false;
   }
-  _decodingUnderlay = false;
+  _decodingBackground = false;
+  _decodeWidth = Width;
+  _decodeHeight = Height;
   _decoderOwner = this;
   char directory[AvatarDirectoryBytes] = {};
   char path[AvatarDirectoryBytes + 48] = {};
@@ -471,73 +469,61 @@ bool AssistantAvatarLoader::decode(AssistantAvatar::Asset asset,
   return true;
 }
 
-bool AssistantAvatarLoader::decodeUnderlay(uint32_t generation) {
+bool AssistantAvatarLoader::decodeBackground(uint32_t generation) {
   if (!generationCurrent(generation) || !_sdCard.isMounted() || !psramFound()) {
     return false;
   }
-  _decodingUnderlay = true;
+  _decodingBackground = true;
+  _decodeWidth = BackgroundWidth;
+  _decodeHeight = BackgroundHeight;
   _decoderOwner = this;
-  bool opened = false;
-  for (uint8_t index = 0; index < UnderlayPathCount && !opened; ++index) {
-    if (_png.open(UnderlayPaths[index], pngOpen, pngClose, pngRead, pngSeek,
-                  pngDraw) == PNG_SUCCESS) {
-      opened = true;
-    } else {
-      _png.close();
-    }
-  }
-  if (!opened) {
-    _decoderOwner = nullptr;
-    return false;
-  }
-  if (_png.isInterlaced() || _png.getWidth() != Width || _png.getHeight() != Height) {
+  if (_png.open(BackgroundPath, pngOpen, pngClose, pngRead, pngSeek, pngDraw) !=
+      PNG_SUCCESS) {
     _png.close();
     _decoderOwner = nullptr;
+    _decodingBackground = false;
+    return false;
+  }
+  if (_png.isInterlaced() || _png.getWidth() != BackgroundWidth ||
+      _png.getHeight() != BackgroundHeight) {
+    _png.close();
+    _decoderOwner = nullptr;
+    _decodingBackground = false;
     return false;
   }
 
-  const size_t pixelCount = static_cast<size_t>(Width) * Height;
+  const size_t pixelCount = static_cast<size_t>(BackgroundWidth) * BackgroundHeight;
   _decodeFrame = static_cast<uint16_t *>(ps_malloc(pixelCount * sizeof(uint16_t)));
-  _decodeAlpha = static_cast<uint8_t *>(ps_malloc(pixelCount * sizeof(uint8_t)));
-  if (!_decodeFrame || !_decodeAlpha) {
-    if (_decodeFrame) free(_decodeFrame);
-    if (_decodeAlpha) free(_decodeAlpha);
-    _decodeFrame = nullptr;
-    _decodeAlpha = nullptr;
+  _decodeAlpha = nullptr;
+  if (!_decodeFrame) {
     _png.close();
     _decoderOwner = nullptr;
+    _decodingBackground = false;
     return false;
   }
-  memset(_decodeFrame, 0, pixelCount * sizeof(uint16_t));
-  memset(_decodeAlpha, 0, pixelCount * sizeof(uint8_t));
   const bool decoded = _png.decode(this, PNG_CHECK_CRC) == PNG_SUCCESS;
   _png.close();
   _decoderOwner = nullptr;
+  _decodingBackground = false;
   uint16_t *decodedFrame = _decodeFrame;
-  uint8_t *decodedAlpha = _decodeAlpha;
   _decodeFrame = nullptr;
-  _decodeAlpha = nullptr;
   if (!decoded || !generationCurrent(generation)) {
     free(decodedFrame);
-    free(decodedAlpha);
     return false;
   }
 
   if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
-    if (_underlayGeneration != generation || !_underlayFrame || !_underlayAlpha) {
-      if (_underlayFrame) free(_underlayFrame);
-      if (_underlayAlpha) free(_underlayAlpha);
-      _underlayFrame = decodedFrame;
-      _underlayAlpha = decodedAlpha;
-      _underlayGeneration = generation;
+    if (_backgroundGeneration != generation || !_backgroundFrame) {
+      if (_backgroundFrame) free(_backgroundFrame);
+      _backgroundFrame = decodedFrame;
+      _backgroundGeneration = generation;
+      ++_backgroundRevision;
       ++_revision;
       decodedFrame = nullptr;
-      decodedAlpha = nullptr;
     }
     xSemaphoreGive(_mutex);
   }
   if (decodedFrame) free(decodedFrame);
-  if (decodedAlpha) free(decodedAlpha);
   return true;
 }
 
@@ -551,11 +537,11 @@ bool AssistantAvatarLoader::clearFrames() {
     _frameAlpha[index] = nullptr;
     _frameGeneration[index] = 0;
   }
-  if (_underlayFrame) free(_underlayFrame);
-  if (_underlayAlpha) free(_underlayAlpha);
-  _underlayFrame = nullptr;
-  _underlayAlpha = nullptr;
-  _underlayGeneration = 0;
+  if (_backgroundFrame) free(_backgroundFrame);
+  _backgroundFrame = nullptr;
+  _backgroundGeneration = 0;
+  _backgroundAttemptGeneration = 0;
+  ++_backgroundRevision;
   xSemaphoreGive(_mutex);
   return true;
 }
@@ -629,18 +615,19 @@ int32_t AssistantAvatarLoader::pngSeek(PNGFILE *file, int32_t position) {
 int AssistantAvatarLoader::pngDraw(PNGDRAW *draw) {
   AssistantAvatarLoader *owner = _decoderOwner;
   if (!owner || !draw || !owner->_decodeFrame || draw->y < 0 ||
-      draw->y >= Height || draw->iWidth <= 0 || draw->iWidth > Width) return 0;
+      draw->y >= owner->_decodeHeight || draw->iWidth <= 0 ||
+      draw->iWidth > owner->_decodeWidth) return 0;
   uint16_t line[Width + 8];
-  // Keep the separate alpha plane. The underlay is premultiplied against the
-  // black screen background; avatar pixels stay unpremultiplied so the UI can
-  // composite them over that underlay.
+  // Avatar pixels keep a separate alpha plane; background transparency is
+  // flattened against black before its RGB565 frame is published.
   owner->_png.getLineAsRGB565(
       draw, line, PNG_RGB565_LITTLE_ENDIAN,
-      owner->_decodingUnderlay ? BackgroundColor : 0xffffffff);
-  memcpy(owner->_decodeFrame + static_cast<size_t>(draw->y) * Width,
+      owner->_decodingBackground ? BackgroundColor : 0xffffffff);
+  memcpy(owner->_decodeFrame + static_cast<size_t>(draw->y) * owner->_decodeWidth,
          line, static_cast<size_t>(draw->iWidth) * sizeof(uint16_t));
   if (owner->_decodeAlpha) {
-    uint8_t *alpha = owner->_decodeAlpha + static_cast<size_t>(draw->y) * Width;
+    uint8_t *alpha = owner->_decodeAlpha +
+        static_cast<size_t>(draw->y) * owner->_decodeWidth;
     for (int x = 0; x < draw->iWidth; ++x) alpha[x] = pixelAlpha(*draw, x);
   }
   return 1;

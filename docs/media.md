@@ -18,6 +18,16 @@ Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; s
 
 Visible image files may receive 32×32 Files thumbnails. They are worker-decoded, retained for the Files visit, and persist as validated `.cache/*.eth1` sidecars. Unsupported variants, oversized WebP input, and memory failures retain a normal file icon.
 
+## Assistant artwork
+
+Assistant treats `/.system/ai_avatars/background.png` as private screen
+artwork, not user-openable media. It must be a non-interlaced 320×432 PNG and
+is decoded by the screen-scoped avatar worker into PSRAM before being pushed
+one-for-one at display y=48. Its bubble artwork is restored before each caption
+redraw. Source alpha is flattened against black during decode. A missing,
+invalid, or wrong-sized file leaves a black background; there is no scaling,
+cache sidecar, or synchronous UI-task SD decode.
+
 ## Audio and recording
 
 The recorder writes 16 kHz mono PCM WAV from the INMP441. The Audio Player streams mono or stereo integer PCM WAV and local MP3. Global volume is persisted through `AudioSettings` and ranges from 0 to 10 (default 5).

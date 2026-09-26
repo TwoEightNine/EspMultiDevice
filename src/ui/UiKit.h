@@ -43,6 +43,15 @@ enum class AppBarAction : uint8_t {
   More
 };
 
+// Glyph states for a circular voice-action control. The control itself owns
+// its fill and complete hit target; this helper draws only the foreground.
+enum class VoiceActionIcon : uint8_t {
+  Microphone,
+  Stop,
+  Cancel,
+  Unavailable
+};
+
 bool navigationIconContains(int16_t x, int16_t y);
 // All app-bar trailing actions occupy the complete 48px cell.
 bool appBarActionContains(int16_t x, int16_t y, int16_t displayWidth);
@@ -79,6 +88,9 @@ void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                               bool listening, bool available,
                               uint16_t color, uint16_t backgroundColor);
+void drawVoiceActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                         VoiceActionIcon icon, uint16_t color,
+                         uint16_t backgroundColor);
 // 40px assets used by Files and Browser footer controls. The visual canvas
 // fills the 40px-tall footer cells while their complete cells remain tappable.
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,

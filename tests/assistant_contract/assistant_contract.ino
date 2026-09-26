@@ -4,6 +4,8 @@
 #include <freertos/queue.h>
 #include <string.h>
 
+#include "src/features/assistant/AssistantCaptionLayout.h"
+
 namespace {
 uint16_t passed = 0;
 uint16_t failed = 0;
@@ -257,6 +259,99 @@ void testTranscript() {
   transcript.end();
 }
 
+void testFixedCaptionPanel() {
+  check(!strcmp(AssistantAvatarLoader::BackgroundPath,
+                "/.system/ai_avatars/background.png") &&
+        AssistantAvatarLoader::BackgroundWidth == 320 &&
+        AssistantAvatarLoader::BackgroundHeight == 432,
+        "fixed assistant background contract");
+  check(AssistantCaptionLayout::HumanX == 22 &&
+        AssistantCaptionLayout::HumanY == 69 &&
+        AssistantCaptionLayout::HumanWidth == 276 &&
+        AssistantCaptionLayout::HumanHeight == 48 &&
+        AssistantCaptionLayout::AssistantX == 22 &&
+        AssistantCaptionLayout::AssistantY == 148 &&
+        AssistantCaptionLayout::AssistantWidth == 276 &&
+        AssistantCaptionLayout::AssistantHeight == 72 &&
+        AssistantCaptionLayout::VoiceControlX == 130 &&
+        AssistantCaptionLayout::VoiceControlY == 396 &&
+        AssistantCaptionLayout::VoiceControlSize == 60,
+        "fixed bubble and voice-control geometry");
+  check(AssistantScreen::RootMenuRowCount == 2 &&
+        AssistantScreen::RootMenuRowCount * UiKit::ListCellHeight == 80,
+        "assistant overflow menu has two fixed rows");
+  check(AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Ready), true, false) ==
+            AssistantCaptionLayout::VoiceAction::Microphone &&
+        AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Listening), true, false) ==
+            AssistantCaptionLayout::VoiceAction::Stop &&
+        AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Thinking), true, false) ==
+            AssistantCaptionLayout::VoiceAction::Cancel &&
+        AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Speaking), true, false) ==
+            AssistantCaptionLayout::VoiceAction::Cancel &&
+        AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Ready), false, false) ==
+            AssistantCaptionLayout::VoiceAction::Unavailable &&
+        AssistantCaptionLayout::voiceAction(static_cast<uint8_t>(AssistantPhase::Ready), true, true) ==
+            AssistantCaptionLayout::VoiceAction::Unavailable,
+        "voice-control phase and availability mapping");
+
+  String human[AssistantCaptionLayout::HumanLineCapacity];
+  const String longHuman =
+      "one two three four five six seven eight nine ten eleven twelve "
+      "thirteen fourteen fifteen sixteen seventeen eighteen";
+  check(AssistantCaptionLayout::copyHuman(longHuman, human) == 2 &&
+        human[1].endsWith("..."), "two-line human caption ellipsizes");
+  const String chinese =
+      "你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好"
+      "你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好你好";
+  check(AssistantCaptionLayout::copyHuman(chinese, human) == 2 &&
+        human[1].endsWith("..."), "UTF-8 human caption ellipsizes");
+
+  const String assistant =
+      "one two three four five six seven eight nine ten eleven twelve "
+      "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty "
+      "twenty one twenty two twenty three twenty four twenty five";
+  const uint16_t lines = AssistantCaptionLayout::countLines(assistant);
+  String page[AssistantCaptionLayout::AssistantLineCapacity];
+  const uint16_t first = AssistantCaptionLayout::assistantPageStart(lines, 100, 100);
+  const uint16_t later = AssistantCaptionLayout::assistantPageStart(lines, 100, 4100);
+  const uint16_t final = AssistantCaptionLayout::assistantPageStart(lines, 100, 120000);
+  check(lines > AssistantCaptionLayout::AssistantLineCapacity && first == 0 &&
+        later > first && later <= lines - AssistantCaptionLayout::AssistantLineCapacity &&
+        AssistantCaptionLayout::copyWindow(assistant, later, page,
+                                           AssistantCaptionLayout::AssistantLineCapacity) > 0,
+        "assistant advances three-line caption page every two seconds");
+  check(final == lines - AssistantCaptionLayout::AssistantLineCapacity &&
+        AssistantCaptionLayout::copyWindow(assistant, final, page,
+                                           AssistantCaptionLayout::AssistantLineCapacity) ==
+            AssistantCaptionLayout::AssistantLineCapacity &&
+        AssistantCaptionLayout::assistantPageStart(lines, 120000, 120000) == 0 &&
+        AssistantCaptionLayout::countLines(String()) == 0,
+        "assistant reaches final page and resets for new or cancelled reply");
+  check(AssistantCaptionLayout::assistantPageStart(
+            AssistantCaptionLayout::AssistantLineCapacity, 100, 9900) == 0,
+        "assistant caption stays put when three lines fit");
+}
+
+void testAutoListenHoldGesture() {
+  AssistantVoiceGesture gesture;
+  check(gesture.press(100, false) == AssistantVoiceGesture::Event::None &&
+        gesture.tick(899, true) == AssistantVoiceGesture::Event::None &&
+        gesture.tick(900, true) == AssistantVoiceGesture::Event::EnableAutoListen &&
+        gesture.pulsing(1059) && !gesture.pulsing(1060) &&
+        gesture.tick(4000, true) == AssistantVoiceGesture::Event::None,
+        "800ms voice-control hold enables auto-listen once with bounded pulse");
+
+  gesture.release();
+  check(gesture.press(5000, false) == AssistantVoiceGesture::Event::None &&
+        gesture.tick(5300, false) == AssistantVoiceGesture::Event::None &&
+        gesture.tick(6000, true) == AssistantVoiceGesture::Event::None,
+        "release or drift outside cancels pending auto-listen hold");
+
+  check(gesture.press(7000, true) == AssistantVoiceGesture::Event::DisableAutoListen &&
+        gesture.tick(8000, true) == AssistantVoiceGesture::Event::None,
+        "auto-listen tap disables without arming another hold");
+}
+
 void testAvatarAssets() {
   check(AssistantAvatar::assetFor(AssistantPhase::Bootstrapping,
                                   AssistantEmotion::Neutral) == AssistantAvatar::Asset::Waiting &&
@@ -315,6 +410,8 @@ void assistantContractSetup() {
   testAudio();
   testStateAndQueues();
   testTranscript();
+  testFixedCaptionPanel();
+  testAutoListenHoldGesture();
   testAvatarAssets();
   Serial.print(F("ASSISTANT_CONTRACT "));
   Serial.print(failed == 0 ? F("PASS ") : F("FAIL "));

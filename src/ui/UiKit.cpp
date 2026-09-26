@@ -198,6 +198,31 @@ void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   }
 }
 
+void drawVoiceActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                         VoiceActionIcon icon, uint16_t color,
+                         uint16_t backgroundColor) {
+  switch (icon) {
+    case VoiceActionIcon::Stop:
+      tft.fillSmoothRoundRect(centerX - 9, centerY - 9, 18, 18, 3,
+                              color, backgroundColor);
+      return;
+    case VoiceActionIcon::Cancel:
+      drawCloseIcon(tft, centerX, centerY, color, backgroundColor);
+      return;
+    case VoiceActionIcon::Unavailable:
+      drawMicrophoneStatusIcon(tft, centerX, centerY, false, false,
+                               color, backgroundColor);
+      return;
+    case VoiceActionIcon::Microphone:
+    default:
+      // `listening` is true here because the action glyph is an available
+      // microphone, not the removed persistent status indicator.
+      drawMicrophoneStatusIcon(tft, centerX, centerY, true, true,
+                               color, backgroundColor);
+      return;
+  }
+}
+
 void drawFooterBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         uint16_t color, uint16_t backgroundColor) {
   drawAlphaIcon(tft, centerX - ic_back_width / 2, centerY - ic_back_height / 2,

@@ -5,9 +5,13 @@
 #include "../../services/storage/SdCardController.h"
 #include "AssistantAvatar.h"
 #include "AssistantAvatarLoader.h"
+#include "AssistantVoiceGesture.h"
 
 class AssistantScreen : public Screen {
 public:
+  // Kept public for the compile-time Assistant UI contract.
+  static constexpr uint8_t RootMenuRowCount = 2;
+
   AssistantScreen(Navigator &navigator, TouchController &touch,
                   DisplayController &display, AssistantController &controller,
                   SdCardController &sdCard);
@@ -21,16 +25,10 @@ public:
 
 private:
   static constexpr uint16_t ScreenBackground = TFT_BLACK;
-  static constexpr int16_t MicStripTop = 48;
-  static constexpr int16_t MicStripHeight = 32;
-  static constexpr int16_t TranscriptTop = 80;
-  static constexpr int16_t TranscriptHeight = 160;
-  static constexpr int16_t TranscriptTextWidth = 280;
-  static constexpr int16_t ScrollCellSize = 40;
+  static constexpr int16_t BackgroundTop = 48;
+  static constexpr int16_t AvatarTop = 240;
   static constexpr int16_t AvatarWidth = 320;
   static constexpr int16_t AvatarHeight = 240;
-  static constexpr uint8_t VisibleTranscriptLines = 6;
-  static constexpr uint8_t MaxWrappedLines = 24;
 
   struct Rect {
     int16_t x;
@@ -45,38 +43,42 @@ private:
   SdCardController &_sdCard;
   AssistantAvatar _avatar;
   AssistantAvatarLoader _avatarLoader;
+  AssistantVoiceGesture _voiceGesture;
+  bool _voicePulseVisible;
   AssistantSnapshot _snapshot;
   bool _lastTouchDown;
   bool _closePending;
   bool _openingWiFi;
   uint32_t _lastCloseRequestMs;
   uint32_t _lastAvatarRevision;
+  uint32_t _lastBackgroundRevision;
   AssistantAvatar::Asset _avatarAsset;
   bool _avatarAssetValid;
-  bool _underlayDrawn;
   Menu _menu;
   bool _confirmNewConversation;
   Rect _avatarMenuBounds;
   Rect _avatarMenuRows[AssistantAvatarLoader::MaxAvatars];
   uint32_t _lastAvatarCatalogRevision;
-  uint16_t _scrollLine;
-  uint16_t _totalLines;
-  Rect _scrollUpBounds;
-  Rect _scrollDownBounds;
+  Rect _humanBubbleBounds;
+  Rect _assistantBubbleBounds;
   Rect _primaryActionBounds;
-  Rect _rootMenuRows[3];
+  Rect _rootMenuRows[RootMenuRowCount];
+  bool _assistantReplyStarted;
+  bool _assistantReplyDraft;
+  String _assistantReplyText;
+  uint32_t _assistantReplyStartedMs;
+  uint16_t _assistantPageStart;
 
   void enter(bool resetAvatarSelection);
   void requestClose(bool openWiFi);
   void draw(bool full);
+  void drawBackground();
+  void restoreBackground(const Rect &rect);
   void drawAvatar();
-  void clearAvatarPane();
-  void drawMicrophoneStrip();
-  void drawTranscript(bool preservePosition = true);
+  void drawCaptions(uint32_t nowMs);
+  void drawCaptionLines(const String *lines, uint8_t count, const Rect &bounds);
+  bool latestTurn(AssistantTranscriptTurn &turn, bool &draft) const;
   void drawPrimaryAction();
-  uint16_t countTranscriptLines() const;
-  void drawTranscriptMessage(const char *text, bool user, uint16_t &logicalLine,
-                             uint8_t &visibleLine);
   void layoutAvatarMenu();
   void drawRootMenu();
   void drawAvatarMenu();

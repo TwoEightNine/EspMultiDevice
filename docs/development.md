@@ -179,16 +179,17 @@ ESP_MEDIA_ASSISTANT_CONTRACT and built by
 tools/build_assistant_contract.sh. It covers URL rejection, explicit MCP
 disablement, protocol parsing, v1/v2/v3 envelopes, malformed/oversized input,
 session mismatch, heartbeat/reset JSON, malformed reset acknowledgements,
-UTF-8-safe five-turn transcript eviction/draft cancellation, state/timeout
-categories, bounded queue overflow, and generation/request filtering without
-network or audio I/O.
+UTF-8-safe five-turn transcript eviction/draft cancellation, fixed background
+path/dimensions, voice-control hold activation, two-line human ellipsizing, three-line assistant paging,
+state/timeout categories, bounded queue overflow, and generation/request
+filtering without network or audio I/O.
 
 Current compile gates on Arduino-ESP32 3.3.8:
 
 | Image | Result |
 | --- | ---: |
-| Normal assistant firmware | 5,872,832 / 6,553,600 bytes |
-| Assistant contract | 5,883,680 / 6,553,600 bytes |
+| Normal assistant firmware | 5,878,960 / 6,553,600 bytes |
+| Assistant contract | 5,893,312 / 6,553,600 bytes |
 | Migrated Stage 0 dependency probe | 3,150,128 / 6,553,600 bytes |
 | Migrated Stage 1 compatibility probe | 3,149,264 / 4,718,592-byte diagnostic gate |
 
@@ -210,7 +211,7 @@ retain at least 8 KiB.
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
 | `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
-| `tests/assistant_contract/` | Compile-time-only assistant URL, protocol, heartbeat/reset, transcript, envelope, state, queue, overflow, and generation contract diagnostic. |
+| `tests/assistant_contract/` | Compile-time-only assistant URL, protocol, heartbeat/reset, fixed-panel captions/background, transcript, envelope, state, queue, overflow, and generation contract diagnostic. |
 | `tools/xiaozhi_local/` | Pinned local Xiaozhi/Caddy deployment plus checksum-guarded reset overlay and tests; ignored runtime state contains its private config, summary memory, CA, and model. |
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.

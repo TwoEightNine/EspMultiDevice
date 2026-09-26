@@ -16,12 +16,10 @@ public:
   // available. Text chrome must not paint this region.
   static void clear(TFT_eSPI &tft, int16_t x, int16_t y,
                     uint16_t backgroundColor);
-  static void drawUnderlay(TFT_eSPI &tft, int16_t x, int16_t y,
-                           const uint16_t *pixels, const uint8_t *alpha);
   void draw(TFT_eSPI &tft, int16_t x, int16_t y,
             const uint16_t *pixels, uint16_t backgroundColor,
             const uint8_t *alpha = nullptr,
-            const uint16_t *underlayPixels = nullptr) const;
+            const uint16_t *backgroundPixels = nullptr) const;
 
 private:
   static constexpr uint16_t Width = 320;

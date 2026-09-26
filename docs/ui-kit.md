@@ -35,7 +35,7 @@ Use `UiKit`’s generated 40px footer controls and 16px list/keyboard icons. The
 
 Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars. Use `UiKit::drawFullscreenIcon()` for a fullscreen/fullscreen-exit affordance; its owner must provide a complete 48×48px hit target, such as the Video Player's bottom-left control cell.
 
-Use `UiKit::drawMicrophoneStatusIcon()` for a persistent microphone state. It draws an antialiased microphone with a slash when listening is off or unavailable. Listening uses the owning screen's active color; available-but-off uses its ordinary foreground; unavailable uses gray. Pass the exact solid strip color as `backgroundColor`. The helper draws only the glyph: a screen that makes it interactive owns and hit-tests the complete surrounding cell.
+Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws an antialiased microphone, stop square, cancel glyph, or slashed unavailable microphone; the owner supplies the solid control fill as `backgroundColor` and owns the complete hit target. Assistant's documented exception is a 60×60 fill-only circle over its avatar, with blue ready/cancel, green listening, and gray unavailable/disabled fills. Holding it for 800 ms may use a bounded 160 ms cyan fill pulse as feedback; it has no persistent microphone-status strip.
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
