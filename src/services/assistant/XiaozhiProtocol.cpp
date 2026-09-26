@@ -119,6 +119,33 @@ bool numberEquals(cJSON *object, const char *name, int expected) {
   return !item || (cJSON_IsNumber(item) && item->valueint == expected);
 }
 
+bool hasOnlyKeys(cJSON *object, const char *const *allowed, size_t allowedCount) {
+  if (!cJSON_IsObject(object)) return false;
+  for (cJSON *item = object->child; item; item = item->next) {
+    if (!item->string) return false;
+    for (cJSON *previous = object->child; previous != item; previous = previous->next) {
+      if (previous->string && !strcmp(previous->string, item->string)) return false;
+    }
+    bool known = false;
+    for (size_t index = 0; index < allowedCount; ++index) {
+      if (!strcmp(item->string, allowed[index])) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) return false;
+  }
+  return true;
+}
+
+bool validRequestId(cJSON *item, uint32_t &requestId) {
+  if (!cJSON_IsNumber(item) || item->valuedouble < 1 || item->valuedouble > UINT32_MAX ||
+      static_cast<double>(static_cast<uint32_t>(item->valuedouble)) != item->valuedouble)
+    return false;
+  requestId = static_cast<uint32_t>(item->valuedouble);
+  return true;
+}
+
 uint16_t read16(const uint8_t *p) {
   return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
 }
@@ -221,6 +248,11 @@ void Message::clear() {
   emotion = AssistantEmotion::Neutral;
 }
 
+void DeviceToolResult::clear() {
+  memset(this, 0, sizeof(*this));
+  error = DeviceToolError::None;
+}
+
 bool parseHttpsUrl(const char *url, ParsedUrl &output) {
   return parseSecureUrl(url, "https://", 443, output);
 }
@@ -235,6 +267,7 @@ bool buildClientHello(uint8_t version, char *output, size_t capacity) {
   cJSON_AddNumberToObject(root, "version", version);
   cJSON *features = cJSON_AddObjectToObject(root, "features");
   cJSON_AddBoolToObject(features, "mcp", false);
+  cJSON_AddBoolToObject(features, "device_tools", true);
   cJSON_AddStringToObject(root, "transport", "websocket");
   cJSON *audio = cJSON_AddObjectToObject(root, "audio_params");
   cJSON_AddStringToObject(audio, "format", "opus");
@@ -275,6 +308,47 @@ bool buildConversationReset(uint32_t requestId, char *output, size_t capacity) {
   if (!root) return false;
   cJSON_AddStringToObject(root, "action", "reset");
   cJSON_AddNumberToObject(root, "request_id", requestId);
+  return serialize(root, output, capacity);
+}
+
+bool buildDeviceResult(const char *sessionId, uint32_t requestId,
+                       const DeviceToolResult &result, char *output, size_t capacity) {
+  if (!sessionId || !sessionId[0] || !requestId) return false;
+  cJSON *root = baseMessage("device_result", sessionId);
+  if (!root) return false;
+  cJSON_AddNumberToObject(root, "request_id", requestId);
+  cJSON_AddBoolToObject(root, "ok", result.ok);
+  if (result.ok) {
+    cJSON *body = cJSON_AddObjectToObject(root, "result");
+    if (!body) { cJSON_Delete(root); return false; }
+    if (result.accepted) cJSON_AddBoolToObject(body, "accepted", true);
+    cJSON *matches = cJSON_AddArrayToObject(body, "matches");
+    if (!matches) { cJSON_Delete(root); return false; }
+    const uint8_t count = min<uint8_t>(result.matchCount, MaxDeviceMatches);
+    for (uint8_t index = 0; index < count; ++index) {
+      if (!result.matches[index].selectionId || !result.matches[index].name[0]) {
+        cJSON_Delete(root);
+        return false;
+      }
+      cJSON *match = cJSON_CreateObject();
+      cJSON_AddNumberToObject(match, "selection_id", result.matches[index].selectionId);
+      cJSON_AddStringToObject(match, "name", result.matches[index].name);
+      cJSON_AddItemToArray(matches, match);
+    }
+  } else {
+    const char *code = "protocol";
+    switch (result.error) {
+      case DeviceToolError::InvalidArguments: code = "invalid_arguments"; break;
+      case DeviceToolError::StorageUnavailable: code = "storage_unavailable"; break;
+      case DeviceToolError::Busy: code = "busy"; break;
+      case DeviceToolError::SelectionUnavailable: code = "selection_unavailable"; break;
+      case DeviceToolError::None:
+      case DeviceToolError::Protocol: break;
+    }
+    cJSON *error = cJSON_AddObjectToObject(root, "error");
+    if (!error) { cJSON_Delete(root); return false; }
+    cJSON_AddStringToObject(error, "code", code);
+  }
   return serialize(root, output, capacity);
 }
 
@@ -359,6 +433,49 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
     if (cJSON_IsString(emotion)) message.emotion = parseEmotion(emotion->valuestring);
     if (cJSON_IsString(text)) copyUtf8Bounded(text->valuestring, message.text, sizeof(message.text));
     message.type = MessageType::Emotion;
+  } else if (!strcmp(type->valuestring, "device_command")) {
+    static constexpr const char *CommandKeys[] = {
+      "type", "session_id", "request_id", "command", "arguments"
+    };
+    if (!hasOnlyKeys(root, CommandKeys, sizeof(CommandKeys) / sizeof(CommandKeys[0])) ||
+        !session || !expectedSessionId || !expectedSessionId[0] ||
+        !validRequestId(cJSON_GetObjectItemCaseSensitive(root, "request_id"), message.requestId)) {
+      cJSON_Delete(root);
+      return false;
+    }
+    cJSON *command = cJSON_GetObjectItemCaseSensitive(root, "command");
+    cJSON *arguments = cJSON_GetObjectItemCaseSensitive(root, "arguments");
+    if (!cJSON_IsString(command) || !command->valuestring ||
+        strlen(command->valuestring) > MaxDeviceCommandNameBytes || !cJSON_IsObject(arguments)) {
+      cJSON_Delete(root);
+      return false;
+    }
+    if (!strcmp(command->valuestring, "search_audio")) {
+      static constexpr const char *SearchKeys[] = {"query"};
+      cJSON *query = cJSON_GetObjectItemCaseSensitive(arguments, "query");
+      if (!hasOnlyKeys(arguments, SearchKeys, 1) || !cJSON_IsString(query) || !query->valuestring ||
+          strnlen(query->valuestring, MaxDeviceQueryBytes + 1) > MaxDeviceQueryBytes ||
+          !copyUtf8Bounded(query->valuestring, message.text, sizeof(message.text))) {
+        cJSON_Delete(root);
+        return false;
+      }
+      message.deviceCommand = DeviceCommandKind::SearchAudio;
+    } else if (!strcmp(command->valuestring, "play_audio")) {
+      static constexpr const char *PlayKeys[] = {"selection_id"};
+      cJSON *selectionId = cJSON_GetObjectItemCaseSensitive(arguments, "selection_id");
+      uint32_t parsed = 0;
+      if (!hasOnlyKeys(arguments, PlayKeys, 1) || !validRequestId(selectionId, parsed) ||
+          parsed > MaxDeviceMatches) {
+        cJSON_Delete(root);
+        return false;
+      }
+      message.deviceCommand = DeviceCommandKind::PlayAudio;
+      message.selectionId = static_cast<uint8_t>(parsed);
+    } else {
+      cJSON_Delete(root);
+      return false;
+    }
+    message.type = MessageType::DeviceCommand;
   } else if (!strcmp(type->valuestring, "pong")) {
     message.type = MessageType::Pong;
   } else if (!strcmp(type->valuestring, "conversation")) {

@@ -10,6 +10,10 @@ Chinese input receives Simplified-Chinese speech. The prompt still makes replies
 match other input languages, although the fixed Mandarin voice may give non-Chinese
 speech a Mandarin accent. MQTT and public Xiaozhi fallback remain disabled.
 WebSocket ping handling is enabled for the firmware's 60-second heartbeat.
+The backend also uses OpenAI function calling for the firmware's custom,
+authenticated `device_tools` RPC. MCP stays disabled: the only v1 tools search
+normal SD WAV/MP3 filenames and play a returned opaque selection. The backend
+never receives a source path or secret-storage content.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
@@ -29,7 +33,8 @@ put it in Compose, firmware configuration, tracked examples, logs, or commands.
    LAN host with this Mac's current `sslip.io` DNS hostname in both files. Keep
    the advertised endpoint on WSS and enter the OpenAI key only in the two
    private `api_key` fields. Existing installations must also change
-   `selected_module.Memory` from `nomem` to `mem_local_short`, add the matching
+   `selected_module.Memory` from `nomem` to `mem_local_short`, select
+   `Intent: function_call` with the matching `Intent.function_call` block, add the matching
    `Memory.mem_local_short` block, and enable the root-level
    `enable_websocket_ping` setting.
 3. Put the pinned Silero VAD ONNX file at
@@ -59,6 +64,13 @@ health, the Caddy trust chain, authenticated bootstrap, and an authenticated
 idempotent reset for an isolated test device without printing credentials. Use `docker-compose --env-file .runtime/endpoint.env ps`
 for status. Avoid routine backend log output because transcripts and provider
 errors can contain user data.
+
+The overlay only registers the audio tools after the client hello advertises
+`device_tools`. Each tool call uses a session-bound nonzero request ID and a
+single in-flight `device_command`/`device_result` exchange. Invalid, delayed,
+duplicate, or mismatched results are discarded. `play_audio` is terminal: the
+backend gives the result to the LLM but suppresses a competing TTS reply while
+the firmware transitions to its Audio Player.
 
 ## Trust-anchor lifecycle
 

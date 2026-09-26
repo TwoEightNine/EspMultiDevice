@@ -2,7 +2,7 @@ FROM ghcr.io/xinnan-tech/xiaozhi-esp32-server@sha256:4673fac2cb7125d6370a3e8cd6c
 
 LABEL org.opencontainers.image.source="https://github.com/xinnan-tech/xiaozhi-esp32-server"
 LABEL org.opencontainers.image.revision="6afc54a17def47578a4b3efc4680873689d3168b"
-LABEL org.opencontainers.image.description="ESP Media authenticated conversation-reset overlay"
+LABEL org.opencontainers.image.description="ESP Media authenticated conversation-reset and device-audio overlay"
 
 USER root
 COPY . /opt/esp-media-server-overlay

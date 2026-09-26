@@ -2,16 +2,18 @@
 
 #include "../audio/MicController.h"
 #include "../network/WiFiController.h"
+#include "../storage/SdCardController.h"
 
 #include <string.h>
 
 AssistantController::AssistantController(WiFiController &wifi, TimeController &time,
                                          MicController &mic, SpeakerController &speaker,
+                                         SdCardController &sdCard,
                                          const AssistantBackendConfig &config)
-    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _config(config), _session(nullptr),
+    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _sdCard(sdCard), _config(config), _session(nullptr),
       _snapshotMutex(nullptr), _snapshot{}, _transcript{}, _generation(0), _begun(false),
       _screenActive(false), _deactivationPending(false), _disposeSession(false),
-      _lastWifiConnected(false), _resetPending(false), _turnPending(false) {
+      _lastWifiConnected(false), _resetPending(false), _turnPending(false), _pendingAudioLaunch() {
   _snapshot.clear();
 }
 
@@ -251,6 +253,18 @@ bool AssistantController::copyTranscriptDraft(AssistantTranscriptTurn &output) c
   return copied;
 }
 
+bool AssistantController::takeAudioLaunch(String &path) {
+  path = "";
+  if (!_snapshotMutex) return false;
+  xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
+  if (_pendingAudioLaunch.length()) {
+    path = _pendingAudioLaunch;
+    _pendingAudioLaunch = "";
+  }
+  xSemaphoreGive(_snapshotMutex);
+  return path.length() > 0;
+}
+
 uint32_t AssistantController::nextGeneration() {
   ++_generation;
   if (_generation == 0) ++_generation;
@@ -333,6 +347,12 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
     _snapshot.sttCaption[0] = 0;
     _snapshot.ttsCaption[0] = 0;
     copyBounded(event.text, _snapshot.status, sizeof(_snapshot.status));
+  } else if (event.type == XiaozhiSessionEventType::LaunchAudio) {
+    if (event.audioPath[0]) {
+      _pendingAudioLaunch = String(event.audioPath);
+      _snapshot.autoListen = false;
+      copyBounded("Opening audio player", _snapshot.status, sizeof(_snapshot.status));
+    }
   } else if (event.type == XiaozhiSessionEventType::Deactivated) {
     _disposeSession = true;
     copyBounded("Closing safely", _snapshot.status, sizeof(_snapshot.status));
@@ -350,13 +370,14 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
 
 bool AssistantController::ensureSession() {
   if (_session) return true;
-  _session = new XiaozhiSession(_wifi, _time, _mic, _speaker, _config);
+  _session = new XiaozhiSession(_wifi, _time, _mic, _speaker, _sdCard, _config);
   if (_session && _session->begin()) return true;
   disposeSession();
   _screenActive = false;
   _deactivationPending = false;
   _turnPending = false;
   _resetPending = false;
+  _pendingAudioLaunch = "";
   setLocalError(AssistantError::Internal, true, "Assistant worker unavailable");
   return false;
 }

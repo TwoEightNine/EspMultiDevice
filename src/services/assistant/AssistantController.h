@@ -13,11 +13,13 @@ class MicController;
 class SpeakerController;
 class TimeController;
 class WiFiController;
+class SdCardController;
 
 class AssistantController {
 public:
   AssistantController(WiFiController &wifi, TimeController &time, MicController &mic,
-                      SpeakerController &speaker, const AssistantBackendConfig &config);
+                      SpeakerController &speaker, SdCardController &sdCard,
+                      const AssistantBackendConfig &config);
 
   bool begin();
   void activate();
@@ -31,12 +33,16 @@ public:
   AssistantSnapshot snapshot() const;
   bool copyTranscriptTurn(uint8_t index, AssistantTranscriptTurn &output) const;
   bool copyTranscriptDraft(AssistantTranscriptTurn &output) const;
+  // Returns one accepted assistant-owned playback launch. The UI consumes it
+  // only after the worker has been safely deactivated.
+  bool takeAudioLaunch(String &path);
 
 private:
   WiFiController &_wifi;
   TimeController &_time;
   MicController &_mic;
   SpeakerController &_speaker;
+  SdCardController &_sdCard;
   AssistantBackendConfig _config;
   XiaozhiSession *_session;
   mutable SemaphoreHandle_t _snapshotMutex;
@@ -50,6 +56,7 @@ private:
   bool _lastWifiConnected;
   bool _resetPending;
   bool _turnPending;
+  String _pendingAudioLaunch;
 
   bool ensureSession();
   void disposeSession();

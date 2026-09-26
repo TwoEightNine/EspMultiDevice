@@ -71,8 +71,12 @@ injected self-hosted HTTPS endpoint and CA. Session URLs must be WSS with a DNS
 hostname. Authentication rejection clears RAM credentials and restarts the
 bootstrap flow. Other recoverable failures retry after 2, 4, 8, then 15
 seconds. Tokens, Authorization, complete WSS URLs, session IDs, raw JSON,
-audio, and captions are prohibited from logs and snapshots. Firmware-update,
-MQTT, system, MCP, alert, custom, and unknown instructions are ignored.
+audio, captions, device-command payloads, and filenames are prohibited from
+logs and snapshots. Firmware-update, MQTT, system, MCP, alert, custom, and
+unknown instructions are ignored. The only actionable custom RPC messages are
+session-bound `search_audio` and `play_audio` commands from the authenticated
+local backend; their request IDs, arguments, result schemas, and result IDs
+are strictly validated on both sides.
 
 While Ready, firmware sends an application ping every 60 seconds and requires
 a pong within 10 seconds. Any reconnect clears the screen transcript and shows
@@ -96,6 +100,29 @@ other speech is answered in its source language, but may have a Mandarin accent
 because this backend uses one fixed voice.
 Caption buffers preserve only complete UTF-8 code points and replace malformed
 input with `?` before the UI renders it.
+
+### Agentic audio commands
+
+The local backend exposes OpenAI structured tools only after the device's
+hello advertises `device_tools`; MCP remains disabled. `search_audio` accepts
+a UTF-8 title query of at most 96 bytes and returns at most five normal-SD
+WAV/MP3 filename matches with opaque selection IDs. Filename matching is
+case/punctuation/extension insensitive and deterministically prefers exact,
+prefix, substring, then complete-token matches. It does not read tags, return
+paths, enumerate PIN-offset protected storage, or enter hidden, `.system`, or
+cache directories. Ambiguous results are sent back into the LLM context so it
+asks the user to choose.
+For "play any song", the backend searches with `*`; the device returns up to
+five files in deterministic path order, and the backend plays the first one.
+
+`play_audio` accepts only an unexpired selection ID from that session's latest
+search. It rechecks the mounted source before returning acceptance, after which
+the device ends the assistant session and opens the existing auto-playing Audio
+Player without TTS confirmation. The bounded selection set expires after 120
+seconds and is erased on session close or reconnect.
+
+The SD scanner uses each directory entry's absolute VFS path for recursive
+lookup and playback; `File.name()` on Arduino-ESP32 contains only the basename.
 
 ### Stage 0/1 validation history
 

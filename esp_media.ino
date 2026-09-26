@@ -386,7 +386,7 @@ void setup() {
 
   const AssistantBackendConfig assistantBackend = loadAssistantBackendConfig();
   assistantController = new AssistantController(
-    *wifiController, *timeController, *mic, *speaker, assistantBackend
+    *wifiController, *timeController, *mic, *speaker, *sdCard, assistantBackend
   );
   if (!assistantController->begin()) {
     Serial.println(F("Assistant worker unavailable."));

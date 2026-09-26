@@ -29,6 +29,7 @@ AssistantScreen::AssistantScreen(Navigator &navigator, TouchController &touch,
       _avatar(), _avatarLoader(sdCard), _voiceGesture(), _voicePulseVisible(false),
       _snapshot{}, _lastTouchDown(false),
       _closePending(false), _openingWiFi(false), _lastCloseRequestMs(0),
+      _pendingAudioPath(),
       _lastAvatarRevision(0), _lastBackgroundRevision(0),
       _avatarAsset(AssistantAvatar::Asset::Neutral), _avatarAssetValid(false),
       _menu(Menu::Closed), _confirmNewConversation(false),
@@ -57,6 +58,7 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
   _voicePulseVisible = false;
   _closePending = false;
   _openingWiFi = false;
+  _pendingAudioPath = "";
   _lastCloseRequestMs = 0;
   _menu = Menu::Closed;
   _confirmNewConversation = false;
@@ -174,6 +176,15 @@ void AssistantScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
   _controller.tick(nowMs);
   AssistantSnapshot next = _controller.snapshot();
+  String requestedAudioPath;
+  if (!_closePending && _controller.takeAudioLaunch(requestedAudioPath)) {
+    _pendingAudioPath = requestedAudioPath;
+    _closePending = true;
+    _openingWiFi = false;
+    _lastCloseRequestMs = nowMs;
+    _controller.deactivate();
+    next = _controller.snapshot();
+  }
   bool pulseChanged = false;
   const TouchPoint heldPoint = _touch.point();
   if (_voiceGesture.tick(nowMs, _touch.isTouched() &&
@@ -193,7 +204,9 @@ void AssistantScreen::tick(uint32_t nowMs) {
     _lastCloseRequestMs = nowMs;
   }
   if (_closePending && !next.sessionActive) {
-    if (_openingWiFi) _navigator.push(ScreenId::WiFi);
+    if (_pendingAudioPath.length())
+      _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(_pendingAudioPath));
+    else if (_openingWiFi) _navigator.push(ScreenId::WiFi);
     else _navigator.pop();
     return;
   }

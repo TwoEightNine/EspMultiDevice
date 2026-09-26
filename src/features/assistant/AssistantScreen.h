@@ -49,6 +49,7 @@ private:
   bool _lastTouchDown;
   bool _closePending;
   bool _openingWiFi;
+  String _pendingAudioPath;
   uint32_t _lastCloseRequestMs;
   uint32_t _lastAvatarRevision;
   uint32_t _lastBackgroundRevision;

@@ -161,9 +161,10 @@ examples, logs, or command arguments.
 
 The Xiaozhi service is a custom overlay built from the pinned arm64 digest and
 upstream commit already listed above. Checksum guards cover each patched
-handler/registry/memory file; any upstream layout mismatch fails the Docker
+handler/registry/memory/tool file; any upstream layout mismatch fails the Docker
 build. The overlay adds authenticated idempotent reset, per-device serialized
-summary load/save/reset, and atomic temporary-file-and-rename YAML updates. It
+summary load/save/reset, atomic temporary-file-and-rename YAML updates, and the
+custom device-audio structured tool bridge. It
 retains the upstream MIT notice at
 `tools/xiaozhi_local/server_overlay/XIAOZHI_MIT_LICENSE.txt` and in the image.
 
@@ -177,7 +178,8 @@ stack with a placeholder.
 The compile-time Stage 2 contract is selected with
 ESP_MEDIA_ASSISTANT_CONTRACT and built by
 tools/build_assistant_contract.sh. It covers URL rejection, explicit MCP
-disablement, protocol parsing, v1/v2/v3 envelopes, malformed/oversized input,
+disablement plus device-tool negotiation, strict device command/result parsing,
+v1/v2/v3 envelopes, malformed/oversized input,
 session mismatch, heartbeat/reset JSON, malformed reset acknowledgements,
 UTF-8-safe five-turn transcript eviction/draft cancellation, fixed background
 path/dimensions, voice-control hold activation, two-line human ellipsizing, three-line assistant paging,

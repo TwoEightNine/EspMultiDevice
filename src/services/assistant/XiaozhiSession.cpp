@@ -4,6 +4,7 @@
 #include "../audio/SpeakerController.h"
 #include "../network/TimeController.h"
 #include "../network/WiFiController.h"
+#include "../storage/SdCardController.h"
 
 #include <esp_heap_caps.h>
 #include <string.h>
@@ -32,12 +33,25 @@ void copyText(const char *input, char *output, size_t capacity) {
   memcpy(output, input, length);
   output[length] = 0;
 }
+
+const char *deviceToolErrorName(XiaozhiProtocol::DeviceToolError error) {
+  switch (error) {
+    case XiaozhiProtocol::DeviceToolError::None: return "none";
+    case XiaozhiProtocol::DeviceToolError::InvalidArguments: return "invalid_arguments";
+    case XiaozhiProtocol::DeviceToolError::StorageUnavailable: return "storage_unavailable";
+    case XiaozhiProtocol::DeviceToolError::Busy: return "busy";
+    case XiaozhiProtocol::DeviceToolError::SelectionUnavailable: return "selection_unavailable";
+    case XiaozhiProtocol::DeviceToolError::Protocol: return "protocol";
+  }
+  return "unknown";
+}
 }  // namespace
 
 XiaozhiSession::XiaozhiSession(WiFiController &wifi, TimeController &time,
                                MicController &mic, SpeakerController &speaker,
+                               SdCardController &sdCard,
                                const AssistantBackendConfig &config)
-    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _identity(),
+    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _sdCard(sdCard), _identity(),
       _bootstrap(config), _config(config), _websocket(), _encoder(), _decoder(),
       _bootstrapResponse(nullptr), _commands(nullptr), _events(nullptr),
       _commandStorage(nullptr), _eventStorage(nullptr), _commandQueueControl{},
@@ -49,7 +63,8 @@ XiaozhiSession::XiaozhiSession(WiFiController &wifi, TimeController &time,
       _heartbeatPending(false), _sessionId{},
       _uplink(nullptr), _downlink(nullptr), _decodedPcm(nullptr), _uplinkHead(0), _uplinkCount(0),
       _downlinkHead(0), _downlinkCount(0), _receivedDownlinkPackets(0),
-      _receivedDownlinkBytes(0), _playedPcmSamples(0), _peakPcm(0) {
+      _receivedDownlinkBytes(0), _playedPcmSamples(0), _peakPcm(0),
+      _deviceTools(_sdCard), _lastDeviceCommandId(0) {
 }
 
 XiaozhiSession::~XiaozhiSession() {
@@ -523,6 +538,7 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
   const uint32_t turnStarted = millis();
   uint32_t phaseStarted = turnStarted;
   uint32_t lastPacket = turnStarted;
+  bool ttsStarted = false;
   bool ttsStopped = false;
   AssistantPhase phase = AssistantPhase::Listening;
   publishPhase(generation, phase, "Listening");
@@ -561,11 +577,16 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
 
     if (_websocket.poll(event)) {
       if (event.type == SecureWebSocketClient::EventType::Text) {
-        if (!handleText(event, generation, ttsStopped, phase,
+        if (!handleText(event, generation, ttsStarted, ttsStopped, phase,
                         phaseStarted, lastPacket)) {
           memset(&event, 0, sizeof(event)); stopTurn(false); return false;
         }
       } else if (event.type == SecureWebSocketClient::EventType::Binary) {
+        if (!ttsStarted || (phase != AssistantPhase::Thinking &&
+                            phase != AssistantPhase::Speaking)) {
+          publishError(generation, AssistantError::Protocol, true);
+          memset(&event, 0, sizeof(event)); stopTurn(false); return false;
+        }
         const uint8_t *opus = nullptr;
         size_t opusLength = 0;
         uint32_t timestamp = 0;
@@ -577,6 +598,15 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
                                        ? AssistantError::QueueOverflow
                                        : AssistantError::Protocol, true);
           memset(&event, 0, sizeof(event)); stopTurn(false); return false;
+        }
+        if (phase == AssistantPhase::Thinking) {
+          if (!_speaker.start(_decoder.sampleRate())) {
+            publishError(generation, AssistantError::Speaker, true);
+            memset(&event, 0, sizeof(event)); stopTurn(false); return false;
+          }
+          phase = AssistantPhase::Speaking;
+          phaseStarted = now;
+          publishPhase(generation, phase, "Speaking");
         }
         lastPacket = now;
       } else if (event.type == SecureWebSocketClient::EventType::Overflow) {
@@ -622,7 +652,7 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
 }
 
 bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
-                                uint32_t generation, bool &ttsStopped,
+                                uint32_t generation, bool &ttsStarted, bool &ttsStopped,
                                 AssistantPhase &phase,
                                 uint32_t &phaseStarted, uint32_t &lastPacket) {
   XiaozhiProtocol::Message message = {};
@@ -633,23 +663,29 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
   }
   if (interrupted(generation)) return true;
   const uint32_t now = millis();
-  if (message.type == XiaozhiProtocol::MessageType::Stt) {
-    _mic.stop();
-    char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
-    if (XiaozhiProtocol::buildListenStop(_sessionId, json, sizeof(json))) {
-      _websocket.sendText(json, strlen(json));
+  if (message.type == XiaozhiProtocol::MessageType::DeviceCommand) {
+    if (phase != AssistantPhase::Thinking || !handleDeviceCommand(message, generation)) {
+      publishError(generation, AssistantError::Protocol, true);
+      return false;
     }
-    memset(json, 0, sizeof(json));
+  } else if (message.type == XiaozhiProtocol::MessageType::Stt) {
+    // Xiaozhi can finish a second ASR task after the first final STT has
+    // already advanced this half-duplex turn. It is stale at this point; do
+    // not let it disable active TTS playback.
+    if (phase != AssistantPhase::Listening) return true;
+    _mic.stop();
+    // The backend's auto VAD already completed this utterance. Sending a
+    // second listen-stop starts another ASR job while the LLM tool runs.
     phase = AssistantPhase::Thinking;
     phaseStarted = lastPacket = now;
     publishCaption(generation, XiaozhiSessionEventType::SttCaption, message.text);
     publishPhase(generation, phase, "Thinking");
   } else if (message.type == XiaozhiProtocol::MessageType::TtsStart) {
     _mic.stop();
-    if (!_speaker.start(_decoder.sampleRate())) return false;
-    phase = AssistantPhase::Speaking;
-    phaseStarted = lastPacket = now;
-    publishPhase(generation, phase, "Speaking");
+    // The backend sends this before LLM tool selection. Keep the turn in
+    // Thinking so authenticated device commands can run; audio packets are
+    // the point at which the speaker actually becomes active.
+    ttsStarted = true;
   } else if (message.type == XiaozhiProtocol::MessageType::TtsCaption) {
     publishCaption(generation, XiaozhiSessionEventType::TtsCaption, message.text);
   } else if (message.type == XiaozhiProtocol::MessageType::Emotion) {
@@ -678,6 +714,59 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
   } else if (message.type == XiaozhiProtocol::MessageType::Invalid) {
     publishError(generation, AssistantError::Protocol, true);
     return false;
+  }
+  return true;
+}
+
+bool XiaozhiSession::handleDeviceCommand(const XiaozhiProtocol::Message &message,
+                                         uint32_t generation) {
+  if (!message.requestId || message.requestId == _lastDeviceCommandId || !_sessionId[0]) return false;
+  _lastDeviceCommandId = message.requestId;
+  Serial.print(F("Assistant device command generation="));
+  Serial.print(generation);
+  Serial.print(F(" name="));
+  Serial.print(message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::SearchAudio
+                   ? F("search_audio") : F("play_audio"));
+  Serial.print(F(" mounted="));
+  Serial.print(_sdCard.isMounted() ? 1 : 0);
+  Serial.print(F(" owner="));
+  Serial.println(static_cast<uint8_t>(_sdCard.owner()));
+  XiaozhiProtocol::DeviceToolResult result = {};
+  result.clear();
+  String launchPath;
+  if (message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::SearchAudio) {
+    result = _deviceTools.searchAudio(message.text);
+  } else if (message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::PlayAudio) {
+    result = _deviceTools.playAudio(message.selectionId, launchPath);
+  } else {
+    result.error = XiaozhiProtocol::DeviceToolError::Protocol;
+  }
+
+  Serial.print(F("Assistant device result generation="));
+  Serial.print(generation);
+  Serial.print(F(" ok="));
+  Serial.print(result.ok ? 1 : 0);
+  Serial.print(F(" error="));
+  Serial.print(deviceToolErrorName(result.error));
+  Serial.print(F(" matches="));
+  Serial.print(result.matchCount);
+  Serial.print(F(" accepted="));
+  Serial.println(result.accepted ? 1 : 0);
+
+  char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
+  const bool sent = XiaozhiProtocol::buildDeviceResult(_sessionId, message.requestId,
+                                                        result, json, sizeof(json)) &&
+                    _websocket.sendText(json, strlen(json));
+  memset(json, 0, sizeof(json));
+  if (!sent) return false;
+  if (result.ok && result.accepted && launchPath.length() &&
+      launchPath.length() <= AssistantDeviceTools::MaxPathBytes) {
+    XiaozhiSessionEvent event = {};
+    event.type = XiaozhiSessionEventType::LaunchAudio;
+    event.generation = generation;
+    event.micAvailable = _mic.isReady() && _mic.isPowered();
+    copyText(launchPath.c_str(), event.audioPath, sizeof(event.audioPath));
+    if (!publish(event)) return false;
   }
   return true;
 }
@@ -881,6 +970,8 @@ void XiaozhiSession::stopTurn(bool drainPlayback) {
 
 void XiaozhiSession::stopSession(bool drainPlayback) {
   stopTurn(drainPlayback);
+  _deviceTools.clearSelections();
+  _lastDeviceCommandId = 0;
   _websocket.close();
   _encoder.end();
   _decoder.end();
@@ -987,15 +1078,17 @@ void XiaozhiSession::publishDeactivated(uint32_t generation) {
 
 bool XiaozhiSession::publish(const XiaozhiSessionEvent &event) {
   if (xQueueSend(_events, &event, 0) == pdTRUE) return true;
-  stopSession(false);
-  xQueueReset(_events);
-  XiaozhiSessionEvent overflow = {};
-  overflow.type = XiaozhiSessionEventType::Error;
-  overflow.generation = event.generation;
-  overflow.phase = AssistantPhase::Error;
-  overflow.error = AssistantError::QueueOverflow;
-  overflow.retryable = true;
-  return xQueueSend(_events, &overflow, 0) == pdTRUE;
+  // Captions and emotion are advisory UI updates. Dropping one is preferable
+  // to closing the authenticated audio session merely because the renderer
+  // has not reached its next tick yet.
+  if (event.type == XiaozhiSessionEventType::SttCaption ||
+      event.type == XiaozhiSessionEventType::TtsCaption ||
+      event.type == XiaozhiSessionEventType::Emotion) return true;
+
+  // Playback launch, teardown, and errors are control-plane events. Let the
+  // UI drain the bounded PSRAM queue before conceding delivery; this worker
+  // never draws or navigates directly.
+  return xQueueSend(_events, &event, pdMS_TO_TICKS(250)) == pdTRUE;
 }
 
 void XiaozhiSession::logTransition(uint32_t generation, AssistantPhase phase) {

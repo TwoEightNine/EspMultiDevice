@@ -54,7 +54,9 @@ void testJson() {
   cJSON *root = cJSON_Parse(json);
   cJSON *features = root ? cJSON_GetObjectItemCaseSensitive(root, "features") : nullptr;
   cJSON *mcp = features ? cJSON_GetObjectItemCaseSensitive(features, "mcp") : nullptr;
+  cJSON *deviceTools = features ? cJSON_GetObjectItemCaseSensitive(features, "device_tools") : nullptr;
   check(cJSON_IsFalse(mcp), "explicit features.mcp false");
+  check(cJSON_IsTrue(deviceTools), "explicit device tools capability");
   if (root) cJSON_Delete(root);
 
   memset(json, 0, sizeof(json));
@@ -119,6 +121,48 @@ void testJson() {
   check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(pong),
                                       strlen(pong), nullptr, message) &&
         message.type == XiaozhiProtocol::MessageType::Pong, "parse heartbeat pong");
+
+  const char searchAudio[] =
+      "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":8,"
+      "\"command\":\"search_audio\",\"arguments\":{\"query\":\"Night Drive\"}}";
+  check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(searchAudio),
+                                      strlen(searchAudio), "s1", message) &&
+        message.type == XiaozhiProtocol::MessageType::DeviceCommand &&
+        message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::SearchAudio &&
+        message.requestId == 8 && !strcmp(message.text, "Night Drive"),
+        "parse strict audio search command");
+  const char playAudio[] =
+      "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":9,"
+      "\"command\":\"play_audio\",\"arguments\":{\"selection_id\":2}}";
+  check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(playAudio),
+                                      strlen(playAudio), "s1", message) &&
+        message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::PlayAudio &&
+        message.selectionId == 2, "parse strict audio playback command");
+  const char invalidCommand[] =
+      "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":10,"
+      "\"command\":\"search_audio\",\"arguments\":{\"query\":\"song\",\"path\":\"/x\"}}";
+  check(!XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(invalidCommand),
+                                       strlen(invalidCommand), "s1", message) &&
+        !XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(searchAudio),
+                                       strlen(searchAudio), "other", message),
+        "reject malformed or mismatched device command");
+  XiaozhiProtocol::DeviceToolResult toolResult = {};
+  toolResult.clear();
+  toolResult.ok = true;
+  toolResult.matchCount = 1;
+  toolResult.matches[0].selectionId = 1;
+  strcpy(toolResult.matches[0].name, "Night Drive");
+  memset(json, 0, sizeof(json));
+  check(XiaozhiProtocol::buildDeviceResult("s1", 8, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"type\":\"device_result\"") &&
+        strstr(json, "\"selection_id\":1") && !strstr(json, "path"),
+        "build bounded device search result");
+  toolResult.clear();
+  toolResult.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+  memset(json, 0, sizeof(json));
+  check(XiaozhiProtocol::buildDeviceResult("s1", 9, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"ok\":false") && strstr(json, "selection_unavailable"),
+        "build safe device error result");
   const char resetOk[] = "{\"type\":\"conversation\",\"action\":\"reset\",\"request_id\":42,\"result\":\"ok\"}";
   check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(resetOk),
                                       strlen(resetOk), nullptr, message) &&

@@ -8,8 +8,21 @@ from unittest import mock
 
 import yaml
 
+# Tool executors initialize the upstream logger at import time. The production
+# container mounts a private data/.config.yaml; image-build tests deliberately
+# use the tracked non-secret baseline only to satisfy that import contract.
+_test_config = Path("data/.config.yaml")
+if not _test_config.exists():
+    _test_config.parent.mkdir(parents=True, exist_ok=True)
+    _test_config.write_text(Path("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+
 from core.handle.textHandler.conversationMessageHandler import ConversationMessageHandler
 from core.providers.memory.mem_local_short import esp_media_memory_overlay as memory_overlay
+from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
+from core.providers.tools.base import ToolType
+from core.providers.tools.unified_tool_handler import UnifiedToolHandler
+from core.providers.tools.unified_tool_manager import ToolManager
+from plugins_func.register import Action, ActionResponse
 
 
 class DummyProvider:
@@ -90,6 +103,12 @@ class FakeLogger:
     def error(self, *_args, **_kwargs):
         pass
 
+    def debug(self, *_args, **_kwargs):
+        pass
+
+    def warning(self, *_args, **_kwargs):
+        pass
+
     def bind(self, **_kwargs):
         return self
 
@@ -100,6 +119,14 @@ class FakeWebSocket:
 
     async def send(self, value):
         self.messages.append(json.loads(value))
+
+
+class FakeDeviceConnection:
+    def __init__(self, enabled=True):
+        self.features = {"device_tools": enabled}
+        self.session_id = "private-session"
+        self.websocket = FakeWebSocket()
+        self.esp_media_terminal_device_action = False
 
 
 class FakeMemory:
@@ -170,6 +197,119 @@ class ConversationHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acknowledgements), 1)
         self.assertEqual(acknowledgements[0]["result"], "error")
         self.assertEqual(acknowledgements[0]["category"], "reset_failed")
+
+
+class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
+    async def test_any_song_query_uses_bounded_library_pick(self):
+        conn = FakeDeviceConnection()
+        task = asyncio.create_task(DeviceAudioExecutor(conn).execute(
+            conn, "search_audio", {"query": "any song"}
+        ))
+        await asyncio.sleep(0)
+        self.assertEqual(conn.websocket.messages[-1]["arguments"], {"query": "*"})
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "private-session", "request_id": 1,
+            "ok": True, "result": {"matches": [{"selection_id": 1, "name": "First Song"}]},
+        })
+        self.assertEqual((await task).action, Action.REQLLM)
+
+    async def test_search_forwards_strict_command_and_returns_model_result(self):
+        conn = FakeDeviceConnection()
+        executor = DeviceAudioExecutor(conn)
+        self.assertEqual(set(executor.get_tools()), {"search_audio", "play_audio"})
+        search_schema = executor.get_tools()["search_audio"].description["function"]
+        self.assertIn("query '*'", search_schema["description"])
+        task = asyncio.create_task(executor.execute(conn, "search_audio", {"query": "Night Drive"}))
+        await asyncio.sleep(0)
+        self.assertEqual(conn.websocket.messages[-1], {
+            "type": "device_command", "session_id": "private-session", "request_id": 1,
+            "command": "search_audio", "arguments": {"query": "Night Drive"},
+        })
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "private-session", "request_id": 1,
+            "ok": True, "result": {"matches": [{"selection_id": 1, "name": "Night Drive"}]},
+        })
+        response = await task
+        self.assertEqual(response.action, Action.REQLLM)
+        self.assertIn("Night Drive", response.result)
+
+    async def test_malformed_or_mismatched_result_cannot_resolve_command(self):
+        conn = FakeDeviceConnection()
+        executor = DeviceAudioExecutor(conn)
+        task = asyncio.create_task(executor.execute(conn, "search_audio", {"query": "song"}))
+        await asyncio.sleep(0)
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "other", "request_id": 1,
+            "ok": True, "result": {"matches": []},
+        })
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "private-session", "request_id": 1,
+            "ok": True, "result": {"matches": [], "path": "/private.mp3"},
+        })
+        self.assertFalse(task.done())
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "private-session", "request_id": 1,
+            "ok": False, "error": {"code": "selection_unavailable"},
+        })
+        response = await task
+        self.assertEqual(response.action, Action.REQLLM)
+        self.assertIn("selection_unavailable", response.result)
+
+    async def test_playback_is_terminal_and_unavailable_without_capability(self):
+        conn = FakeDeviceConnection()
+        executor = DeviceAudioExecutor(conn)
+        task = asyncio.create_task(executor.execute(conn, "play_audio", {"selection_id": 2}))
+        await asyncio.sleep(0)
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": "private-session", "request_id": 1,
+            "ok": True, "result": {"matches": [], "accepted": True},
+        })
+        self.assertEqual((await task).action, Action.REQLLM)
+        self.assertTrue(conn.esp_media_terminal_device_action)
+        disabled = FakeDeviceConnection(enabled=False)
+        self.assertEqual(DeviceAudioExecutor(disabled).get_tools(), {})
+
+
+class DeviceAudioToolIsolationTests(unittest.TestCase):
+    class StaticExecutor:
+        def __init__(self, tools):
+            self.tools = tools
+
+        def get_tools(self):
+            return self.tools
+
+    def test_device_session_excludes_legacy_play_music(self):
+        manager = ToolManager(FakeDeviceConnection(enabled=True))
+        manager.register_executor(ToolType.SERVER_PLUGIN, self.StaticExecutor({
+            "play_music": object(), "get_weather": object(),
+        }))
+        self.assertEqual(set(manager.get_all_tools()), {"get_weather"})
+
+    def test_non_device_session_retains_legacy_play_music(self):
+        manager = ToolManager(FakeDeviceConnection(enabled=False))
+        manager.register_executor(ToolType.SERVER_PLUGIN, self.StaticExecutor({
+            "play_music": object(), "get_weather": object(),
+        }))
+        self.assertEqual(set(manager.get_all_tools()), {"play_music", "get_weather"})
+
+
+class DeviceAudioDisplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_tool_does_not_send_fake_stt_caption(self):
+        class StubManager:
+            async def execute_tool(self, *_args):
+                return ActionResponse(action=Action.REQLLM, result="{}")
+
+        handler = UnifiedToolHandler.__new__(UnifiedToolHandler)
+        handler.conn = FakeDeviceConnection()
+        handler.logger = FakeLogger()
+        handler.tool_manager = StubManager()
+        with mock.patch("core.providers.tools.unified_tool_handler.send_display_message",
+                        new_callable=mock.AsyncMock) as display:
+            result = await handler.handle_llm_function_call(handler.conn, {
+                "name": "search_audio", "arguments": '{"query":"song"}',
+            })
+        self.assertEqual(result.action, Action.REQLLM)
+        display.assert_not_awaited()
 
 
 if __name__ == "__main__":

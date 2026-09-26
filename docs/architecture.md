@@ -225,9 +225,20 @@ certificate-checked activation/bootstrap HTTP and bounded response parsing.
 AssistantIdentity is the renamed identity service and preserves the
 MAC-derived device ID plus the existing assistant/client_uuid NVS key.
 XiaozhiProtocol exclusively builds/parses JSON and v1/v2/v3 audio envelopes.
-It always advertises features.mcp false, accepts only mono Opus with 60 ms
-frames (16 kHz uplink and 16/24 kHz downlink), and ignores MCP, system,
-firmware-update, MQTT, alert, custom, and unknown messages.
+It always advertises features.mcp false plus `features.device_tools: true`,
+accepts only mono Opus with 60 ms frames (16 kHz uplink and 16/24 kHz
+downlink), and ignores MCP, system, firmware-update, MQTT, alert, custom, and
+unknown messages. It accepts only authenticated, session-matching
+`device_command` messages while a turn is Thinking. The backend's early TTS
+`start` only marks speech as pending; the first audio packet starts the speaker
+and moves the turn to Speaking. Final STT is accepted only
+while Listening; a duplicate arriving after Thinking or Speaking begins is
+stale and ignored, so it cannot interrupt the TTS/audio drain. Auto VAD's final
+STT already ends capture, so the device does not send another listen-stop that
+would trigger a duplicate ASR job. The strict v1 commands are
+`search_audio {query}` and `play_audio {selection_id}`; each has a nonzero
+request ID and receives one correlated `device_result`. Malformed fields,
+unknown commands, duplicate IDs, and mismatched sessions are never executed.
 It also owns bounded ping/pong and authenticated conversation-reset envelopes.
 Reset validates the `reset` action, nonzero 32-bit request ID, and `ok`/`error`
 result; generation/request matching prevents stale acknowledgements from
@@ -259,6 +270,17 @@ server-hello limit, 45-second listening inactivity, 60-second thinking,
 playback drains, mutes, and stops before Ready. Logs contain only generation,
 phase, safe error category, bounded queue counts, heap/PSRAM, and stack
 headroom.
+
+`AssistantDeviceTools` is worker-owned and has no Navigator dependency. It
+searches normal mounted SD storage only: each directory operation takes the
+shared SPI lock briefly, yields between entries, and excludes secret, hidden,
+system, and cache paths. WAV/MP3 classification comes only from `FileFormats`.
+It returns at most five normalized filename matches with opaque IDs, never
+paths; selections expire after 120 seconds and are revalidated before play.
+An accepted play request is first returned to the backend, then published as a
+generation-tagged `LaunchAudio` event. `AssistantScreen` deactivates the
+session before pushing `AudioPlayer` with the retained local path, preventing
+assistant and player I2S overlap.
 
 ## Assistant dependency and compatibility history
 

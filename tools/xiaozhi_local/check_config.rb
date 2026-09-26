@@ -36,7 +36,7 @@ required_modules = {
   "ASR" => "OpenaiASR",
   "LLM" => "OpenAILLM",
   "TTS" => "EdgeTTS",
-  "Intent" => "nointent",
+  "Intent" => "function_call",
   "Memory" => "mem_local_short"
 }
 required_modules.each do |kind, expected|
@@ -85,13 +85,16 @@ fail_check("Simplified-Chinese EdgeTTS voice is not configured") unless
   fetch_path(config, "TTS", "EdgeTTS", "language") == "中文"
 fail_check("Silero VAD is not configured") unless
   fetch_path(config, "VAD", "SileroVAD", "type") == "silero"
-fail_check("nointent is not configured") unless
-  fetch_path(config, "Intent", "nointent", "type") == "nointent"
+fail_check("function_call intent is not configured") unless
+  fetch_path(config, "Intent", "function_call", "type") == "function_call"
 fail_check("mem_local_short must use OpenAILLM") unless
   fetch_path(config, "Memory", "mem_local_short", "type") == "mem_local_short" &&
   fetch_path(config, "Memory", "mem_local_short", "llm") == "OpenAILLM"
 prompt = config["prompt"].to_s
 fail_check("language-matching bilingual prompt is missing") unless
   prompt.match?(/Simplified Chinese/i) && prompt.match?(/same language/i)
+fail_check("agentic audio prompt is missing") unless
+  prompt.match?(/search_audio/i) && prompt.match?(/play_audio/i) &&
+  prompt.include?('query "*"')
 
 puts "PASS private backend configuration"

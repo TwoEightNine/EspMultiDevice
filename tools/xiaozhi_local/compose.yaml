@@ -2,7 +2,7 @@ name: esp-media-xiaozhi
 
 services:
   xiaozhi:
-    image: esp-media-xiaozhi-server:6afc54a-reset-v1
+    image: esp-media-xiaozhi-server:6afc54a-agentic-audio-v1
     build:
       context: ./server_overlay
       dockerfile: Dockerfile

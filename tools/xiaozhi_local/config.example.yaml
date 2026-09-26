@@ -12,13 +12,19 @@ prompt: |
   You are a concise, friendly voice assistant. Reply in Simplified Chinese when
   the user speaks Chinese; otherwise reply in the same language as the user.
   Prefer one or two short sentences unless the user asks for more detail.
+  For a request to play music from this device, use search_audio before
+  play_audio. If search_audio returns several plausible matches, ask a short
+  clarification. play_audio starts playback immediately, so do not speak a
+  confirmation after calling it.
+  For "play any song", call search_audio with query "*" and play the first
+  returned selection without asking for clarification.
 
 selected_module:
   VAD: SileroVAD
   ASR: OpenaiASR
   LLM: OpenAILLM
   TTS: EdgeTTS
-  Intent: nointent
+  Intent: function_call
   Memory: mem_local_short
 
 VAD:
@@ -52,8 +58,8 @@ TTS:
     language: 中文
 
 Intent:
-  nointent:
-    type: nointent
+  function_call:
+    type: function_call
 
 Memory:
   mem_local_short:

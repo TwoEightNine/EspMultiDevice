@@ -11,6 +11,7 @@
 #include "SecureWebSocketClient.h"
 #include "XiaozhiBootstrap.h"
 #include "XiaozhiProtocol.h"
+#include "AssistantDeviceTools.h"
 #include "../audio/OpusDecoder.h"
 #include "../audio/OpusEncoder.h"
 
@@ -18,6 +19,7 @@ class MicController;
 class SpeakerController;
 class TimeController;
 class WiFiController;
+class SdCardController;
 
 enum class XiaozhiSessionCommandType : uint8_t {
   Activate,
@@ -41,6 +43,7 @@ enum class XiaozhiSessionEventType : uint8_t {
   Emotion,
   ConversationReset,
   ContextLost,
+  LaunchAudio,
   Error,
   Deactivated
 };
@@ -55,18 +58,23 @@ struct XiaozhiSessionEvent {
   bool micAvailable;
   char text[AssistantSnapshot::CaptionBytes + 1];
   char code[AssistantSnapshot::ActivationCodeBytes + 1];
+  char audioPath[AssistantDeviceTools::MaxPathBytes + 1];
 };
 
 class XiaozhiSession {
 public:
   static constexpr UBaseType_t CommandQueueCapacity = 4;
-  static constexpr UBaseType_t EventQueueCapacity = 8;
+  // Text/caption frames can arrive in a small burst before the UI's next
+  // tick. Keep the queue in PSRAM and reserve enough room that a cosmetic
+  // caption burst never tears down an otherwise healthy voice session.
+  static constexpr UBaseType_t EventQueueCapacity = 16;
   static constexpr size_t UplinkQueueCapacity = 4;
   static constexpr size_t DownlinkQueueCapacity = 8;
   static constexpr uint32_t WorkerStackBytes = 48U * 1024U;
 
   XiaozhiSession(WiFiController &wifi, TimeController &time, MicController &mic,
-                 SpeakerController &speaker, const AssistantBackendConfig &config);
+                 SpeakerController &speaker, SdCardController &sdCard,
+                 const AssistantBackendConfig &config);
   ~XiaozhiSession();
 
   bool begin();
@@ -90,6 +98,7 @@ private:
   TimeController &_time;
   MicController &_mic;
   SpeakerController &_speaker;
+  SdCardController &_sdCard;
   AssistantIdentity _identity;
   XiaozhiBootstrap _bootstrap;
   AssistantBackendConfig _config;
@@ -131,6 +140,8 @@ private:
   uint32_t _receivedDownlinkBytes;
   uint32_t _playedPcmSamples;
   uint16_t _peakPcm;
+  AssistantDeviceTools _deviceTools;
+  uint32_t _lastDeviceCommandId;
 
   static void workerEntry(void *context);
   void worker();
@@ -145,8 +156,9 @@ private:
   bool resetConversation(uint32_t generation);
   bool serviceIdleConnection(uint32_t generation);
   bool handleText(const SecureWebSocketClient::Event &event, uint32_t generation,
-                  bool &ttsStopped, AssistantPhase &phase,
+                  bool &ttsStarted, bool &ttsStopped, AssistantPhase &phase,
                   uint32_t &phaseStarted, uint32_t &lastPacket);
+  bool handleDeviceCommand(const XiaozhiProtocol::Message &message, uint32_t generation);
   bool captureAndSend(uint32_t generation, size_t &pcmUsed);
   bool playOne(uint32_t generation);
   bool enqueueDownlink(uint32_t generation, const uint8_t *bytes, size_t length,
