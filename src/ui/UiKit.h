@@ -108,6 +108,8 @@ void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       uint16_t color, uint16_t backgroundColor);
 void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
+void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor);
 // Shared black popup-menu chrome. Rows use the standard 40px list-cell
 // height and may show their selected state without requiring a separate icon.
 void drawPopupMenuFrame(TFT_eSPI &tft, int16_t x, int16_t y,

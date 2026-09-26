@@ -12,6 +12,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 - Wi-Fi management, UTC+4 SNTP time, a lightweight HTTP/HTTPS browser, and an interval-workout timer with audio cues.
 - A screen-scoped Xiaozhi voice assistant with a persistent multi-turn WSS session, verified HTTPS/WSS, half-duplex Opus audio, and authenticated agentic normal-SD audio search/play commands that hand off safely to the Audio Player.
 - Runtime SD-card removal/reinsertion handling, touch mesh calibration, battery reporting, and a shared non-blocking screen/navigation model.
+- SD-loaded Lua apps in a foreground Apps launcher, with a versioned UI, app-file, and device-status SDK. Installing an app requires no firmware upload.
 
 ## Hardware profile
 
@@ -31,6 +32,8 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
 6. For the assistant, copy src/services/assistant/LocalAssistantBackendConfig.example.h to the ignored LocalAssistantBackendConfig.h, set the self-hosted HTTPS endpoints, and paste the Caddy root CA. Copy a non-interlaced 320×432 `background.png` to `/.system/ai_avatars/background.png`; it is drawn exactly below the app bar and contains the fixed chat-bubble artwork. Copy the five 320×240 avatar PNGs (`w.png`, `n.png`, `s.png`, `h.png`, `t.png`) into `/.system/ai_avatars/default/`. Optional additional sets use the same five filenames in `/.system/ai_avatars/<dir>/`; list them in `/.system/ai_avatars/avatars.config` as one `Name:dir` entry per line. A missing, corrupt, or wrong-sized background falls back to black. The Assistant shows only the latest live user/reply pair: user text is two lines with ellipsis, while assistant captions page through three spoken lines every two seconds. Its 60×60 avatar-overlay control is blue while ready, green while listening, and gray when unavailable. Hold it for 800 ms to enable screen-session auto-listen; a short cyan pulse confirms it, and the next tap disables it. The overflow menu contains New conversation and the Avatar submenu. Local captions disappear on screen close; `mem_local_short` keeps only a summarized per-device memory across visits until New conversation is confirmed. The local backend matches the speaker's language, with Simplified Chinese rendered and spoken through the assistant-specific font and a supported Mandarin Edge voice. Non-Chinese replies can have a Mandarin accent because Edge TTS uses one fixed voice. Configure and validate the custom pinned backend through tools/xiaozhi_local/README.md. There is no public-service fallback.
 
+To try an SD app, copy `examples/apps/counter` to `/Apps/counter` on the card and open **Apps** on Home. See [docs/external-apps.md](docs/external-apps.md) for the package and SDK contract.
+
 Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART connector. If its automatic reset cannot enter the downloader, hold **BOOT**, tap **RESET/EN**, release **RESET/EN**, then release **BOOT** and upload again. USB Drive uses the second connector wired directly to the ESP32-S3 native USB D-/D+ pins (GPIO 19/20); it remains inactive during normal boot. Start the **USB Drive** Home app, connect the native port, transfer files in Finder, and eject the volume before unplugging it.
 
 The first upload after changing from the old 3 MB/9.9 MB FATFS scheme must flash the new partition table. Preferences/NVS remains at the same offset and is compatible. Contents of the old, now-unused internal FATFS region are not preserved; ESP Media user media remains on SD.
@@ -46,6 +49,7 @@ partitions.csv     16 MiB dual-OTA application/SPIFFS layout
 src/app/           Navigator and screen stack
 src/core/          display, touch, battery, SPI lock, base Screen contract
 src/features/      user-visible screens grouped by capability
+examples/apps/      sample SD app packages
 src/media/         media-format registry, cache contract, video adapters
 src/services/      audio, network, and storage controllers
 src/ui/            shared UI kit, text, icons, logo, generated fonts
@@ -65,6 +69,7 @@ docs/              detailed developer and behavior documentation
 - [Assistant device-command contributor guide](docs/agentic-commands.md)
 - [Hardware, wiring, power, and SD preparation](docs/hardware.md)
 - [Development, dependencies, licenses, and fixtures](docs/development.md)
+- [SD app package and SDK contract](docs/external-apps.md)
 
 ## Contributing
 

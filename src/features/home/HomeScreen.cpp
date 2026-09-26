@@ -44,6 +44,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
   _apps[4] = { "Settings", AppAction::Settings, 0xfda0, 0, 0, 0, 0 };
   _apps[5] = { "USB Drive", AppAction::UsbDrive, 0x0799, 0, 0, 0, 0 };
   _apps[6] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
+  _apps[7] = { "Apps", AppAction::Apps, 0x6318, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -99,6 +100,8 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::UsbDrive);
     } else if (app.action == AppAction::Workout) {
       _navigator.push(ScreenId::Workout);
+    } else if (app.action == AppAction::Apps) {
+      _navigator.push(ScreenId::Apps);
     }
     return;
   }
@@ -240,6 +243,10 @@ void HomeScreen::drawApps() {
 }
 
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
+  if (app.action == AppAction::Apps) {
+    UiKit::drawAppsIcon(_display.tft(), centerX, centerY, TFT_WHITE, app.circleColor);
+    return;
+  }
   const uint16_t *colors = nullptr;
   const uint8_t *alpha = nullptr;
   uint16_t width = 0;

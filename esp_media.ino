@@ -46,6 +46,8 @@ USBMSC usbMsc;
 #include "src/features/video_player/VideoPlayerScreen.h"
 #include "src/features/browser/BrowserScreen.h"
 #include "src/features/files/FilesScreen.h"
+#include "src/features/apps/AppLauncherScreen.h"
+#include "src/features/apps/AppHostScreen.h"
 #include "src/features/home/HomeScreen.h"
 #include "src/features/image_viewer/ImageViewerScreen.h"
 #include "src/services/audio/MicController.h"
@@ -171,6 +173,8 @@ BrowserScreen *browserScreen = nullptr;
 WorkoutScreen *workoutScreen = nullptr;
 UsbDriveScreen *usbDriveScreen = nullptr;
 AssistantScreen *assistantScreen = nullptr;
+AppLauncherScreen *appLauncherScreen = nullptr;
+AppHostScreen *appHostScreen = nullptr;
 
 void updateTouch();
 
@@ -412,6 +416,9 @@ void setup() {
   assistantScreen = new AssistantScreen(
     *navigator, *touch, *display, *assistantController, *sdCard
   );
+  appLauncherScreen = new AppLauncherScreen(*navigator, *touch, *display, *sdCard);
+  appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
+                                    *wifiController, *batteryController);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -466,6 +473,12 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::UsbDrive, *usbDriveScreen)) {
     Serial.println(F("Navigator failed to register USB Drive screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::Apps, *appLauncherScreen)) {
+    Serial.println(F("Navigator failed to register Apps screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::ExternalApp, *appHostScreen)) {
+    Serial.println(F("Navigator failed to register external app screen."));
   }
 
   if (!navigator->setRoot(ScreenId::Splash)) {

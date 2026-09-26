@@ -550,6 +550,10 @@ bool SdCardController::mount() {
     return false;
   }
 
+  // A worker may have a file open when the card is removed/reinserted. Never
+  // reset the SPI and FatFs drivers in the middle of its bounded transaction.
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(200))) return false;
+
   SD.end();
   SPI.end();
   delay(10);
@@ -565,6 +569,7 @@ bool SdCardController::mount() {
       _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
       Serial.println(F("SD mount failed; retrying in 3 seconds without a card-detect pin."));
     }
+    SpiBusLock::unlock();
     return false;
   }
   Serial.println(F("SD mounted at 25 MHz SPI."));
@@ -576,19 +581,23 @@ bool SdCardController::mount() {
       _nextMountAttemptMs = millis() + NoDetectRetryIntervalMs;
       Serial.println(F("SD card not detected; retrying in 3 seconds without a card-detect pin."));
     }
+    SpiBusLock::unlock();
     return false;
   }
 
   _mounted = true;
   _owner = SdCardOwner::Device;
   _lastHealthCheckMs = millis();
+  SpiBusLock::unlock();
   return true;
 }
 
 void SdCardController::unmount() {
+  const bool locked = SpiBusLock::lock(portMAX_DELAY);
   SD.end();
   _mounted = false;
   _owner = SdCardOwner::None;
+  if (locked) SpiBusLock::unlock();
 }
 
 bool SdCardController::mountedCardStillResponds() {

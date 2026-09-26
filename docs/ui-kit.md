@@ -39,6 +39,8 @@ Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
+Home's Apps tile uses `UiKit::drawAppsIcon()`, a four-cell smooth icon drawn over the tile's solid circle fill.
+
 For full-colour compile-time icons, generate straight RGB565 plus 8-bit alpha
 arrays with `tools/png_to_rgba565_icon.py` and draw them through
 `UiKit::drawRgba565Icon()`. Pass the icon's actual solid immediate background
@@ -71,6 +73,8 @@ to that screen, not the shared app chrome. Redrawing text or an antialiased
 icon requires the same immediate background color used on its first draw.
 
 ## Buttons, inputs, and progress
+
+The external-app host draws SDK 1 pages with the shared 48px app bar, `drawListCell()` for text, and `drawFilledButton()` for action rows. The complete 40px row is the action hit target. App scripts submit data only; they never call TFT_eSPI or choose a separate navigation icon.
 
 Rounded controls are fill-only smooth rounded rectangles: use `fillSmoothRoundRect()` with the fill as the edge background, never an outline. Labels default to `UiText::Size::Content`; numeric PIN keys are the sole exception and use `Title`.
 

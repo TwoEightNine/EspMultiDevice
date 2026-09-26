@@ -18,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 18 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`.
+`Navigator` registers the 20 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -53,6 +53,8 @@ Without a card-detect pin, `SdCardController` probes an attached card every 500 
 ## Concurrency and memory
 
 The UI loop must continue to process touch and redraw while expensive work is under way. Files thumbnails, browser inline images, and animated-image cache loading use worker work on the other core; results are returned to the UI task for display updates. Do not let a worker redraw UI directly.
+
+An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its Lua state, bounded app-file transactions, and callback limits. It publishes validated, fixed-size UI scenes to `AppHostScreen`; only the UI task renders them and converts button hit tests into action IDs. Final navigation is deferred until the worker stops, then its task, queue, and Lua state are released. The launcher scans one package per `tick()` and polls mount state without consuming the single-recipient SD event. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
 Navigator records free/largest internal heap and free/largest PSRAM before and
 after every successful final screen release. This is the hardware audit point

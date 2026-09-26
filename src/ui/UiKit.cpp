@@ -3,6 +3,17 @@
 #include "icons.h"
 
 namespace UiKit {
+
+void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  uint16_t color, uint16_t backgroundColor) {
+  for (int16_t row = 0; row < 2; ++row) {
+    for (int16_t column = 0; column < 2; ++column) {
+      tft.fillSmoothRoundRect(centerX - 21 + column * 24,
+                              centerY - 21 + row * 24, 18, 18, 4,
+                              color, backgroundColor);
+    }
+  }
+}
 namespace {
 constexpr int16_t NavigationIconLeft = AppBarIconPadding;
 constexpr int16_t NavigationIconTop = AppBarIconPadding;

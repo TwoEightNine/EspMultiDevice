@@ -6,6 +6,8 @@ Open `esp_media.ino` as an Arduino sketch. Arduino recursively compiles `src/`; 
 
 The standard profile is Arduino-ESP32 3.3.8, **ESP32S3 Dev Module**, 16 MB flash, OPI PSRAM, Custom partition scheme, and 240 MHz CPU. Select USB-OTG (TinyUSB), disable CDC/Firmware MSC/DFU On Boot, and use UART0 / Hardware CDC upload mode. `Serial` consequently resolves to UART0. Run `tools/build_esp32s3.sh` for the reproducible build. It selects that complete profile and overrides Arduino's overly broad generic Custom maximum with the actual application-slot limit of 6,553,600 bytes, then independently checks the emitted binary.
 
+The SD-app interpreter vendors upstream Lua 5.4.9 (MIT) in `third_party/lua/` and compiles only selected C units through `src/vendor_shims/lua/`. The project shim defines the 64-bit limit macros missing from the Arduino-ESP32 C++ limits header so Lua uses the same integer ABI in all translation units. Its integration and excluded libraries are recorded in `third_party/lua/README.esp-media.md`. Test the sample in `examples/apps/counter/` after firmware builds; the source is copied to SD, not linked into the firmware.
+
 `partitions.csv` retains NVS at `0x9000`/`0x5000` and OTA data at `0xe000`/`0x2000`, followed by two `0x640000` OTA slots, `0x360000` SPIFFS, and `0x10000` core dump. Flash the partition table when migrating from the old 3 MB/9.9 MB FATFS profile. Preferences/NVS remains compatible because its location and size do not change; internal FATFS content is not preserved or used by ESP Media.
 
 Install `TFT_eSPI`, `PNGdec`, and `JPEGDEC` through Arduino Library Manager. The TFT setup is a library-level configuration described in [hardware.md](hardware.md), not a source change in this repository.

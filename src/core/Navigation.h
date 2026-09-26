@@ -10,7 +10,8 @@ enum class ScreenDataKind : uint8_t {
   AudioPath,
   VideoPath,
   TextInput,
-  SecretFiles
+  SecretFiles,
+  ExternalApp
 };
 
 enum class FileAccessMode : uint8_t { Normal, Secret };
@@ -102,6 +103,13 @@ struct ScreenData {
     data.kind = ScreenDataKind::SecretFiles;
     data.fileAccess = FileAccessMode::Secret;
     data.pin = pin;
+    return data;
+  }
+
+  static ScreenData externalApp(const String &id) {
+    ScreenData data;
+    data.kind = ScreenDataKind::ExternalApp;
+    data.text = id;
     return data;
   }
 };
