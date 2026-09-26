@@ -14,6 +14,10 @@ The backend also uses OpenAI function calling for the firmware's custom,
 authenticated `device_tools` RPC. MCP stays disabled: the only v1 tools search
 normal SD WAV/MP3 filenames and play a returned opaque selection. The backend
 never receives a source path or secret-storage content.
+Version-2 firmware additionally exposes eight device-status commands, three
+persisted setting commands, Battery Details, image/video/file search and
+selection, and DuckDuckGo Lite Browser search. The backend never sends a raw
+file path or URL to firmware.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
@@ -65,12 +69,15 @@ idempotent reset for an isolated test device without printing credentials. Use `
 for status. Avoid routine backend log output because transcripts and provider
 errors can contain user data.
 
-The overlay only registers the audio tools after the client hello advertises
-`device_tools`. Each tool call uses a session-bound nonzero request ID and a
+The overlay registers only audio tools for version-1 `device_tools` clients
+and the expanded catalog for clients advertising `device_tools_version: 2`.
+Each tool call uses a session-bound nonzero request ID and a
 single in-flight `device_command`/`device_result` exchange. Invalid, delayed,
-duplicate, or mismatched results are discarded. `play_audio` is terminal: the
-backend gives the result to the LLM but suppresses a competing TTS reply while
-the firmware transitions to its Audio Player.
+duplicate, or mismatched results are discarded. Media, folder, Battery Details,
+and Browser launches are terminal: the backend gives the result to the LLM but
+suppresses competing TTS while the firmware changes screens. Status and
+setting results remain speakable. All device-tool arguments and results are
+redacted from backend logs; Browser logs redact HTTP(S) URLs.
 
 To add another device capability, follow
 [the repository command guide](../../docs/agentic-commands.md). Keep all

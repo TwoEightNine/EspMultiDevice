@@ -7,6 +7,7 @@
 
 #include "BrowserDownloadStore.h"
 #include "BrowserLimits.h"
+#include "BrowserLog.h"
 #include "../../services/network/TlsMemoryScope.h"
 #include "../../services/network/WiFiController.h"
 
@@ -18,7 +19,7 @@ void browserLog(const __FlashStringHelper *message) {
 
 void browserLog(const String &message) {
   Serial.print(F("[Browser] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 
 String clientState(WiFiClient &client) {

@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "BrowserLimits.h"
+#include "BrowserLog.h"
 #include "BrowserPersistentState.h"
 #include "BrowserSessionCache.h"
 #include "BrowserText.h"
@@ -16,7 +17,7 @@ void loaderLog(const __FlashStringHelper *message) {
 
 void loaderLog(const String &message) {
   Serial.print(F("[Browser loader] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 
 class StateLock {

@@ -44,6 +44,8 @@ enum class XiaozhiSessionEventType : uint8_t {
   ConversationReset,
   ContextLost,
   LaunchAudio,
+  LaunchDevice,
+  UiAction,
   Error,
   Deactivated
 };
@@ -59,6 +61,11 @@ struct XiaozhiSessionEvent {
   char text[AssistantSnapshot::CaptionBytes + 1];
   char code[AssistantSnapshot::ActivationCodeBytes + 1];
   char audioPath[AssistantDeviceTools::MaxPathBytes + 1];
+  XiaozhiProtocol::DeviceCommandKind deviceCommand;
+  uint32_t requestId;
+  uint8_t level;
+  bool enabled;
+  char launchValue[AssistantDeviceTools::MaxPathBytes + 1];
 };
 
 class XiaozhiSession {
@@ -81,6 +88,7 @@ public:
   bool post(const XiaozhiSessionCommand &command);
   bool poll(XiaozhiSessionEvent &event);
   bool running() const;
+  bool completeUiAction(uint32_t requestId, const XiaozhiProtocol::DeviceToolResult &result);
 
 private:
   struct PcmFrame {
@@ -111,6 +119,7 @@ private:
   XiaozhiBootstrapResponse *_bootstrapResponse;
   QueueHandle_t _commands;
   QueueHandle_t _events;
+  QueueHandle_t _uiResults;
   uint8_t *_commandStorage;
   uint8_t *_eventStorage;
   StaticQueue_t _commandQueueControl;
@@ -141,7 +150,7 @@ private:
   uint32_t _playedPcmSamples;
   uint16_t _peakPcm;
   AssistantDeviceTools _deviceTools;
-  uint32_t _lastDeviceCommandId;
+  std::atomic<uint32_t> _lastDeviceCommandId;
 
   static void workerEntry(void *context);
   void worker();
@@ -159,6 +168,8 @@ private:
                   bool &ttsStarted, bool &ttsStopped, AssistantPhase &phase,
                   uint32_t &phaseStarted, uint32_t &lastPacket);
   bool handleDeviceCommand(const XiaozhiProtocol::Message &message, uint32_t generation);
+  bool requestUiAction(const XiaozhiProtocol::Message &message, uint32_t generation,
+                       XiaozhiProtocol::DeviceToolResult &result);
   bool captureAndSend(uint32_t generation, size_t &pcmUsed);
   bool playOne(uint32_t generation);
   bool enqueueDownlink(uint32_t generation, const uint8_t *bytes, size_t length,

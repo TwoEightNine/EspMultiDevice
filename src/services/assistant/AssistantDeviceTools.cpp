@@ -3,6 +3,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <ctype.h>
+#include <string.h>
 
 #include "../../core/SpiBusLock.h"
 #include "../../media/FileFormats.h"
@@ -17,10 +18,34 @@ bool lockSd() {
   return SpiBusLock::lock(pdMS_TO_TICKS(LockTimeoutMs));
 }
 
+void copyFileType(const char *name, FileFormats::Format format, char *output, size_t capacity) {
+  const char *known = FileFormats::extension(format);
+  if (known && known[0]) {
+    strncpy(output, known, capacity - 1);
+    return;
+  }
+  const char *dot = name ? strrchr(name, '.') : nullptr;
+  if (dot && dot[1] && strlen(dot) < capacity) {
+    size_t index = 1;
+    for (; dot[index]; ++index) {
+      if (!isalnum(static_cast<unsigned char>(dot[index]))) break;
+    }
+    if (!dot[index]) {
+      for (index = 0; dot[index]; ++index)
+        output[index] = static_cast<char>(tolower(static_cast<unsigned char>(dot[index])));
+      output[index] = 0;
+      return;
+    }
+  }
+  strncpy(output, "unknown", capacity - 1);
+}
+
 }  // namespace
 
 AssistantDeviceTools::AssistantDeviceTools(SdCardController &sdCard)
-    : _sdCard(sdCard), _selections{}, _selectionExpiresAt(0), _scanDeadlineMs(0), _scanBusy(false) {
+    : _sdCard(sdCard), _selections{}, _selectionExpiresAt(0), _scanDeadlineMs(0),
+      _scanBusy(false), _scanCancelled(nullptr), _scanCancelContext(nullptr),
+      _searchKind(XiaozhiProtocol::DeviceCommandKind::None) {
   clearSelections();
 }
 
@@ -29,13 +54,32 @@ void AssistantDeviceTools::clearSelections() {
     selection.path = "";
     selection.score = 0;
     selection.used = false;
+    selection.directory = false;
   }
   _selectionExpiresAt = 0;
+  _searchKind = XiaozhiProtocol::DeviceCommandKind::None;
 }
 
 XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::searchAudio(const char *queryText) {
+  return search(queryText, XiaozhiProtocol::DeviceCommandKind::SearchAudio);
+}
+
+XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::search(
+    const char *queryText, XiaozhiProtocol::DeviceCommandKind kind,
+    bool (*cancelled)(void *), void *cancelContext) {
   XiaozhiProtocol::DeviceToolResult result = {};
   result.clear();
+  result.command = kind;
+  // Every new search invalidates the previous opaque selection set, even if
+  // validation or storage access fails before scanning can begin.
+  clearSelections();
+  if (kind != XiaozhiProtocol::DeviceCommandKind::SearchAudio &&
+      kind != XiaozhiProtocol::DeviceCommandKind::SearchImages &&
+      kind != XiaozhiProtocol::DeviceCommandKind::SearchVideos &&
+      kind != XiaozhiProtocol::DeviceCommandKind::SearchFiles) {
+    result.error = XiaozhiProtocol::DeviceToolError::InvalidArguments;
+    return result;
+  }
   if (!queryText || !queryText[0] || strnlen(queryText, MaxQueryBytes + 1) > MaxQueryBytes) {
     result.error = XiaozhiProtocol::DeviceToolError::InvalidArguments;
     return result;
@@ -57,10 +101,14 @@ XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::searchAudio(const char *
     return result;
   }
   _scanBusy = true;
+  _scanCancelled = cancelled;
+  _scanCancelContext = cancelContext;
   _scanDeadlineMs = millis() + SearchDeadlineMs;
-  clearSelections();
+  _searchKind = kind;
   const bool complete = scanDirectory("/", 0, query, result);
   _scanBusy = false;
+  _scanCancelled = nullptr;
+  _scanCancelContext = nullptr;
   _scanDeadlineMs = 0;
   if (!complete) {
     clearSelections();
@@ -79,8 +127,14 @@ XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::searchAudio(const char *
 
 XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::playAudio(uint8_t selectionId,
                                                                     String &path) {
+  return selected(selectionId, XiaozhiProtocol::DeviceCommandKind::PlayAudio, path);
+}
+
+XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::selected(
+    uint8_t selectionId, XiaozhiProtocol::DeviceCommandKind kind, String &path) {
   XiaozhiProtocol::DeviceToolResult result = {};
   result.clear();
+  result.command = kind;
   path = "";
   if (!_sdCard.isMounted()) {
     result.error = XiaozhiProtocol::DeviceToolError::StorageUnavailable;
@@ -90,29 +144,58 @@ XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::playAudio(uint8_t select
     result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
     return result;
   }
-  const String &candidate = _selections[selectionId - 1].path;
-  if (hiddenOrPrivate(candidate) ||
-      !FileFormats::isAudio(FileFormats::fromPath(candidate)) || !lockSd()) {
+  const Selection &selection = _selections[selectionId - 1];
+  const String &candidate = selection.path;
+  const bool expected =
+      (kind == XiaozhiProtocol::DeviceCommandKind::PlayAudio &&
+       _searchKind == XiaozhiProtocol::DeviceCommandKind::SearchAudio && !selection.directory) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::OpenImage &&
+       _searchKind == XiaozhiProtocol::DeviceCommandKind::SearchImages && !selection.directory) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::PlayVideo &&
+       _searchKind == XiaozhiProtocol::DeviceCommandKind::SearchVideos && !selection.directory) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::ShowFileInfo &&
+       _searchKind == XiaozhiProtocol::DeviceCommandKind::SearchFiles && !selection.directory) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::OpenFolder &&
+       _searchKind == XiaozhiProtocol::DeviceCommandKind::SearchFiles && selection.directory);
+  const FileFormats::Format format = FileFormats::fromPath(candidate);
+  if (!expected || hiddenOrPrivate(candidate) ||
+      (!selection.directory && FileFormats::isInternal(format)) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::PlayAudio && !FileFormats::isAudio(format)) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::OpenImage && !FileFormats::isImage(format)) ||
+      (kind == XiaozhiProtocol::DeviceCommandKind::PlayVideo && !FileFormats::isVideo(format)) ||
+      !lockSd()) {
     result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
     return result;
   }
   fs::File source = SD.open(candidate, FILE_READ);
-  const bool valid = source && !source.isDirectory() && source.size() > 0;
+  const bool valid = source && source.isDirectory() == selection.directory &&
+      (selection.directory || source.size() > 0 || kind == XiaozhiProtocol::DeviceCommandKind::ShowFileInfo);
+  if (valid && kind == XiaozhiProtocol::DeviceCommandKind::ShowFileInfo) {
+    XiaozhiProtocol::copyUtf8Bounded(source.name(), result.name, sizeof(result.name));
+    copyFileType(source.name(), format, result.fileType, sizeof(result.fileType));
+    result.sizeBytes = source.size();
+    result.modifiedUnix = source.getLastWrite();
+    result.modifiedKnown = result.modifiedUnix > 0;
+  }
   if (source) source.close();
   SpiBusLock::unlock();
   if (!valid) {
     result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
     return result;
   }
-  path = candidate;
+  if (kind != XiaozhiProtocol::DeviceCommandKind::ShowFileInfo) path = candidate;
   result.ok = true;
-  result.accepted = true;
-  clearSelections();
+  result.accepted = kind != XiaozhiProtocol::DeviceCommandKind::ShowFileInfo;
+  if (result.accepted) clearSelections();
   return result;
 }
 
 bool AssistantDeviceTools::scanDirectory(const String &path, uint8_t depth, const String &query,
                                           XiaozhiProtocol::DeviceToolResult &result) {
+  if (_scanCancelled && _scanCancelled(_scanCancelContext)) {
+    result.error = XiaozhiProtocol::DeviceToolError::Busy;
+    return false;
+  }
   if (!_sdCard.isMounted()) return false;
   if (depth > MaxDirectoryDepth) return true;
   if (_scanDeadlineMs && static_cast<int32_t>(millis() - _scanDeadlineMs) >= 0) {
@@ -129,6 +212,11 @@ bool AssistantDeviceTools::scanDirectory(const String &path, uint8_t depth, cons
   if (!usable) return false;
 
   for (;;) {
+    if (_scanCancelled && _scanCancelled(_scanCancelContext)) {
+      result.error = XiaozhiProtocol::DeviceToolError::Busy;
+      if (lockSd()) { directory.close(); SpiBusLock::unlock(); }
+      return false;
+    }
     if (_scanDeadlineMs && static_cast<int32_t>(millis() - _scanDeadlineMs) >= 0) {
       result.error = XiaozhiProtocol::DeviceToolError::Busy;
       if (lockSd()) { directory.close(); SpiBusLock::unlock(); }
@@ -153,12 +241,13 @@ bool AssistantDeviceTools::scanDirectory(const String &path, uint8_t depth, cons
     SpiBusLock::unlock();
     if (entryPath.length() <= MaxPathBytes && !hiddenOrPrivate(entryPath)) {
       if (directoryEntry) {
+        considerPath(entryPath, true, query, result);
         if (!scanDirectory(entryPath, depth + 1, query, result)) {
           if (lockSd()) { directory.close(); SpiBusLock::unlock(); }
           return false;
         }
       } else {
-        considerPath(entryPath, query, result);
+        considerPath(entryPath, false, query, result);
       }
     }
     vTaskDelay(1);
@@ -167,26 +256,33 @@ bool AssistantDeviceTools::scanDirectory(const String &path, uint8_t depth, cons
   return true;
 }
 
-void AssistantDeviceTools::considerPath(const String &path, const String &query,
+void AssistantDeviceTools::considerPath(const String &path, bool directory, const String &query,
                                          XiaozhiProtocol::DeviceToolResult &result) {
   const FileFormats::Format format = FileFormats::fromPath(path);
-  if (!FileFormats::isAudio(format) || !FileFormats::isOpenable(format)) return;
+  if (!directory && FileFormats::isInternal(format)) return;
+  if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchAudio &&
+      (directory || !FileFormats::isAudio(format) || !FileFormats::isOpenable(format))) return;
+  if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchImages &&
+      (directory || !FileFormats::isImage(format) || !FileFormats::isOpenable(format))) return;
+  if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchVideos &&
+      (directory || !FileFormats::isVideo(format) || !FileFormats::isOpenable(format))) return;
+  if (_searchKind != XiaozhiProtocol::DeviceCommandKind::SearchFiles && directory) return;
   const uint16_t score = scoreMatch(normalizedName(baseName(path)), query);
-  if (score) insertMatch(path, score, result);
+  if (score) insertMatch(path, directory, score, result);
 }
 
-void AssistantDeviceTools::insertMatch(const String &path, uint16_t score,
+void AssistantDeviceTools::insertMatch(const String &path, bool directory, uint16_t score,
                                         XiaozhiProtocol::DeviceToolResult &result) {
   uint8_t slot = MaxMatches;
   for (uint8_t index = 0; index < MaxMatches; ++index) {
     if (!_selections[index].used) { slot = index; break; }
   }
   if (slot == MaxMatches) {
-    Selection candidate = {path, score, true};
+    Selection candidate = {path, score, true, directory};
     if (!before(candidate, _selections[MaxMatches - 1])) return;
     slot = MaxMatches - 1;
   }
-  _selections[slot] = {path, score, true};
+  _selections[slot] = {path, score, true, directory};
   for (int8_t index = slot; index > 0 && before(_selections[index], _selections[index - 1]); --index) {
     Selection swap = _selections[index - 1];
     _selections[index - 1] = _selections[index];
@@ -196,7 +292,15 @@ void AssistantDeviceTools::insertMatch(const String &path, uint16_t score,
   for (uint8_t index = 0; index < MaxMatches && _selections[index].used; ++index) {
     XiaozhiProtocol::DeviceToolMatch &match = result.matches[result.matchCount++];
     match.selectionId = index + 1;
-    copyDisplayName(_selections[index].path, match.name, sizeof(match.name));
+    if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchFiles) {
+      const String &selectedPath = _selections[index].path;
+      const int16_t slash = selectedPath.lastIndexOf('/');
+      XiaozhiProtocol::copyUtf8Bounded(selectedPath.c_str() + slash + 1,
+                                       match.name, sizeof(match.name));
+    } else {
+      copyDisplayName(_selections[index].path, match.name, sizeof(match.name));
+    }
+    match.directory = _selections[index].directory;
   }
 }
 
@@ -221,7 +325,8 @@ bool AssistantDeviceTools::hiddenOrPrivate(const String &path) {
   while (start < path.length()) {
     const int16_t slash = path.indexOf('/', start);
     const String segment = path.substring(start, slash < 0 ? path.length() : slash);
-    if (segment.startsWith(".") || segment == "") return true;
+    if (segment.startsWith(".") || segment == "" || segment.endsWith(".tmp") ||
+        segment == ".configs") return true;
     if (slash < 0) break;
     start = slash + 1;
   }

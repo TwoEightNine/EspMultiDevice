@@ -88,9 +88,13 @@ bool LedSettings::setEnabled(bool enabled) {
     return false;
   }
 
+  if (_enabled == enabled) return true;
+  const bool previous = _enabled;
   _enabled = enabled;
-  if (!apply()) return false;
-  return save();
+  if (apply() && save()) return true;
+  _enabled = previous;
+  (void)apply();
+  return false;
 }
 
 bool LedSettings::setColor(LedColor color) {
@@ -99,9 +103,13 @@ bool LedSettings::setColor(LedColor color) {
     return false;
   }
 
+  if (_color == color) return true;
+  const LedColor previous = _color;
   _color = color;
-  if (!apply()) return false;
-  return save();
+  if (apply() && save()) return true;
+  _color = previous;
+  (void)apply();
+  return false;
 }
 
 const char *LedSettings::colorName(LedColor color) {

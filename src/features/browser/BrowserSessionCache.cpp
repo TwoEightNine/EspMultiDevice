@@ -7,6 +7,7 @@
 #include "../../core/SpiBusLock.h"
 #include "../../services/storage/SdCardController.h"
 #include "BrowserLimits.h"
+#include "BrowserLog.h"
 
 using File = fs::File;
 
@@ -20,7 +21,7 @@ void cacheLog(const __FlashStringHelper *message) {
 
 void cacheLog(const String &message) {
   Serial.print(F("[Browser] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 
 class CacheLock {

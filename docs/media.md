@@ -6,6 +6,12 @@
 
 `.eth1`, `.em16`, `.em16z`, `.emga`, and `.empa` are internal cache files. They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
 
+Assistant image and video filename searches use this registry and the same
+normal-SD privacy filter as audio search. They return at most five opaque
+selections, revalidate the selected source before launch, and hand off to the
+existing Image Viewer or Video Player after the Assistant session stops.
+Internal cache files are never selections.
+
 ## Image viewer
 
 The viewer supports BMP, static non-interlaced PNG, baseline JPEG, simple/extended WebP, GIF87a/GIF89a, and animated WebP. Animated PNG and progressive JPEG are unsupported. Source images render aspect-fit on the 480 × 320 display.

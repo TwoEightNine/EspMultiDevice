@@ -30,6 +30,7 @@ AssistantScreen::AssistantScreen(Navigator &navigator, TouchController &touch,
       _snapshot{}, _lastTouchDown(false),
       _closePending(false), _openingWiFi(false), _lastCloseRequestMs(0),
       _pendingAudioPath(),
+      _pendingLaunchKind(XiaozhiProtocol::DeviceCommandKind::None), _pendingLaunchValue(),
       _lastAvatarRevision(0), _lastBackgroundRevision(0),
       _avatarAsset(AssistantAvatar::Asset::Neutral), _avatarAssetValid(false),
       _menu(Menu::Closed), _confirmNewConversation(false),
@@ -59,6 +60,8 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
   _closePending = false;
   _openingWiFi = false;
   _pendingAudioPath = "";
+  _pendingLaunchKind = XiaozhiProtocol::DeviceCommandKind::None;
+  _pendingLaunchValue = "";
   _lastCloseRequestMs = 0;
   _menu = Menu::Closed;
   _confirmNewConversation = false;
@@ -185,6 +188,17 @@ void AssistantScreen::tick(uint32_t nowMs) {
     _controller.deactivate();
     next = _controller.snapshot();
   }
+  XiaozhiProtocol::DeviceCommandKind requestedKind = XiaozhiProtocol::DeviceCommandKind::None;
+  String requestedValue;
+  if (!_closePending && _controller.takeDeviceLaunch(requestedKind, requestedValue)) {
+    _pendingLaunchKind = requestedKind;
+    _pendingLaunchValue = requestedValue;
+    _closePending = true;
+    _openingWiFi = false;
+    _lastCloseRequestMs = nowMs;
+    _controller.deactivate();
+    next = _controller.snapshot();
+  }
   bool pulseChanged = false;
   const TouchPoint heldPoint = _touch.point();
   if (_voiceGesture.tick(nowMs, _touch.isTouched() &&
@@ -206,6 +220,16 @@ void AssistantScreen::tick(uint32_t nowMs) {
   if (_closePending && !next.sessionActive) {
     if (_pendingAudioPath.length())
       _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(_pendingAudioPath));
+    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenBatteryDetails)
+      _navigator.push(ScreenId::BatteryInfo);
+    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenImage)
+      _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(_pendingLaunchValue));
+    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::PlayVideo)
+      _navigator.push(ScreenId::VideoPlayer, ScreenData::videoPath(_pendingLaunchValue));
+    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenFolder)
+      _navigator.push(ScreenId::Files, ScreenData::normalFolder(_pendingLaunchValue));
+    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::SearchWeb)
+      _navigator.push(ScreenId::Browser, ScreenData::webSearchQuery(_pendingLaunchValue));
     else if (_openingWiFi) _navigator.push(ScreenId::WiFi);
     else _navigator.pop();
     return;

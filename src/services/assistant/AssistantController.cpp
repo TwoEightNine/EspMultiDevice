@@ -1,19 +1,30 @@
 #include "AssistantController.h"
 
 #include "../audio/MicController.h"
+#include "../audio/AudioSettings.h"
 #include "../network/WiFiController.h"
+#include "../network/TimeController.h"
 #include "../storage/SdCardController.h"
+#include "../storage/BatteryHistoryService.h"
+#include "../led/LedSettings.h"
+
+#include <math.h>
 
 #include <string.h>
 
 AssistantController::AssistantController(WiFiController &wifi, TimeController &time,
                                          MicController &mic, SpeakerController &speaker,
                                          SdCardController &sdCard,
+                                         BatteryHistoryService &batteryHistory,
+                                         AudioSettings &audioSettings, LedSettings &ledSettings,
                                          const AssistantBackendConfig &config)
-    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _sdCard(sdCard), _config(config), _session(nullptr),
+    : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _sdCard(sdCard),
+      _batteryHistory(batteryHistory), _audioSettings(audioSettings), _ledSettings(ledSettings),
+      _config(config), _session(nullptr),
       _snapshotMutex(nullptr), _snapshot{}, _transcript{}, _generation(0), _begun(false),
       _screenActive(false), _deactivationPending(false), _disposeSession(false),
-      _lastWifiConnected(false), _resetPending(false), _turnPending(false), _pendingAudioLaunch() {
+      _lastWifiConnected(false), _resetPending(false), _turnPending(false), _pendingAudioLaunch(),
+      _pendingLaunchKind(XiaozhiProtocol::DeviceCommandKind::None), _pendingLaunchValue() {
   _snapshot.clear();
 }
 
@@ -37,6 +48,9 @@ void AssistantController::activate() {
   }
   _transcript.clear();
   if (!ensureSession()) return;
+  _pendingAudioLaunch = "";
+  _pendingLaunchKind = XiaozhiProtocol::DeviceCommandKind::None;
+  _pendingLaunchValue = "";
   _screenActive = true;
   _deactivationPending = false;
   _turnPending = false;
@@ -211,7 +225,10 @@ void AssistantController::tick(uint32_t nowMs) {
   XiaozhiSessionEvent event = {};
   uint8_t drained = 0;
   while (_session && drained++ < XiaozhiSession::EventQueueCapacity && _session->poll(event)) {
-    if (event.generation == _generation) apply(event);
+    if (event.generation == _generation) {
+      if (event.type == XiaozhiSessionEventType::UiAction) handleUiAction(event);
+      else apply(event);
+    }
     memset(&event, 0, sizeof(event));
   }
   if (_disposeSession && _session && !_session->running()) {
@@ -263,6 +280,115 @@ bool AssistantController::takeAudioLaunch(String &path) {
   }
   xSemaphoreGive(_snapshotMutex);
   return path.length() > 0;
+}
+
+bool AssistantController::takeDeviceLaunch(XiaozhiProtocol::DeviceCommandKind &kind,
+                                          String &value) {
+  kind = XiaozhiProtocol::DeviceCommandKind::None;
+  value = "";
+  if (!_snapshotMutex) return false;
+  xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
+  kind = _pendingLaunchKind;
+  value = _pendingLaunchValue;
+  _pendingLaunchKind = XiaozhiProtocol::DeviceCommandKind::None;
+  _pendingLaunchValue = "";
+  xSemaphoreGive(_snapshotMutex);
+  return kind != XiaozhiProtocol::DeviceCommandKind::None;
+}
+
+void AssistantController::handleUiAction(const XiaozhiSessionEvent &event) {
+  if (!_session) return;
+  using Kind = XiaozhiProtocol::DeviceCommandKind;
+  XiaozhiProtocol::DeviceToolResult result = {};
+  result.clear();
+  result.command = event.deviceCommand;
+  result.ok = true;
+  switch (event.deviceCommand) {
+    case Kind::GetTime: {
+      struct tm local = {};
+      result.available = _time.localTime(local);
+      if (result.available)
+        snprintf(result.localTime, sizeof(result.localTime),
+                 "%04d-%02d-%02dT%02d:%02d:%02d+04:00",
+                 local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+                 local.tm_hour, local.tm_min, local.tm_sec);
+      break;
+    }
+    case Kind::GetWifiStatus: {
+      static constexpr const char *States[] = {
+        "disabled", "disconnected", "scanning", "connecting", "connected", "failed"
+      };
+      const uint8_t state = static_cast<uint8_t>(_wifi.state());
+      strcpy(result.state, state < 6 ? States[state] : "failed");
+      break;
+    }
+    case Kind::GetWifiSignal:
+      result.connected = _wifi.isConnected();
+      if (result.connected) result.rssiDbm = constrain(WiFi.RSSI(), -127, 0);
+      break;
+    case Kind::GetSdStatus:
+      result.present = _sdCard.isCardPresent();
+      result.mounted = _sdCard.isMounted();
+      strcpy(result.state, _sdCard.owner() == SdCardOwner::Device ? "device" :
+             _sdCard.owner() == SdCardOwner::UsbHost ? "usb_host" : "none");
+      break;
+    case Kind::GetMicStatus:
+      result.ready = _mic.isReady();
+      result.powered = _mic.isPowered();
+      result.powerSensePresent = _mic.hasPowerSense();
+      break;
+    case Kind::GetBatteryStatus: {
+      const BatteryReading reading = _batteryHistory.latest().raw;
+      if (isfinite(reading.voltage) && reading.voltage > 0.0f && reading.voltage <= 6.0f) {
+        result.voltageMv = static_cast<int32_t>(lroundf(reading.voltage * 1000.0f));
+        result.percentage = reading.percentage;
+      } else {
+        result.ok = false;
+        result.error = XiaozhiProtocol::DeviceToolError::Unavailable;
+      }
+      break;
+    }
+    case Kind::GetVolume:
+      result.level = _audioSettings.volume();
+      break;
+    case Kind::GetLedStatus:
+      result.available = _ledSettings.isAvailable();
+      result.enabled = _ledSettings.isEnabled();
+      strncpy(result.color, LedSettings::colorName(_ledSettings.color()), sizeof(result.color) - 1);
+      break;
+    case Kind::SetVolume:
+      result.ok = _audioSettings.setVolume(event.level);
+      result.level = _audioSettings.volume();
+      if (!result.ok) result.error = XiaozhiProtocol::DeviceToolError::SettingsFailed;
+      break;
+    case Kind::SetLedEnabled:
+      result.ok = _ledSettings.setEnabled(event.enabled);
+      result.available = _ledSettings.isAvailable();
+      result.enabled = _ledSettings.isEnabled();
+      strncpy(result.color, LedSettings::colorName(_ledSettings.color()), sizeof(result.color) - 1);
+      if (!result.ok) result.error = result.available
+          ? XiaozhiProtocol::DeviceToolError::SettingsFailed
+          : XiaozhiProtocol::DeviceToolError::Unavailable;
+      break;
+    case Kind::SetLedColor: {
+      static constexpr const char *Colors[] = {"red", "green", "blue", "yellow", "cyan", "magenta"};
+      uint8_t index = 0;
+      while (index < 6 && strcmp(event.text, Colors[index])) ++index;
+      result.ok = index < 6 && _ledSettings.setColor(static_cast<LedColor>(index));
+      result.available = _ledSettings.isAvailable();
+      result.enabled = _ledSettings.isEnabled();
+      strncpy(result.color, LedSettings::colorName(_ledSettings.color()), sizeof(result.color) - 1);
+      if (!result.ok) result.error = result.available
+          ? XiaozhiProtocol::DeviceToolError::SettingsFailed
+          : XiaozhiProtocol::DeviceToolError::Unavailable;
+      break;
+    }
+    default:
+      result.ok = false;
+      result.error = XiaozhiProtocol::DeviceToolError::Protocol;
+      break;
+  }
+  _session->completeUiAction(event.requestId, result);
 }
 
 uint32_t AssistantController::nextGeneration() {
@@ -353,6 +479,11 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
       _snapshot.autoListen = false;
       copyBounded("Opening audio player", _snapshot.status, sizeof(_snapshot.status));
     }
+  } else if (event.type == XiaozhiSessionEventType::LaunchDevice) {
+    _pendingLaunchKind = event.deviceCommand;
+    _pendingLaunchValue = event.launchValue;
+    _snapshot.autoListen = false;
+    copyBounded("Opening", _snapshot.status, sizeof(_snapshot.status));
   } else if (event.type == XiaozhiSessionEventType::Deactivated) {
     _disposeSession = true;
     copyBounded("Closing safely", _snapshot.status, sizeof(_snapshot.status));

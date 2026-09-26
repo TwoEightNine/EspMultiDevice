@@ -55,8 +55,11 @@ void testJson() {
   cJSON *features = root ? cJSON_GetObjectItemCaseSensitive(root, "features") : nullptr;
   cJSON *mcp = features ? cJSON_GetObjectItemCaseSensitive(features, "mcp") : nullptr;
   cJSON *deviceTools = features ? cJSON_GetObjectItemCaseSensitive(features, "device_tools") : nullptr;
+  cJSON *deviceToolsVersion = features ? cJSON_GetObjectItemCaseSensitive(features, "device_tools_version") : nullptr;
   check(cJSON_IsFalse(mcp), "explicit features.mcp false");
   check(cJSON_IsTrue(deviceTools), "explicit device tools capability");
+  check(cJSON_IsNumber(deviceToolsVersion) && deviceToolsVersion->valueint == 2,
+        "versioned device tools capability");
   if (root) cJSON_Delete(root);
 
   memset(json, 0, sizeof(json));
@@ -148,6 +151,7 @@ void testJson() {
         "reject malformed or mismatched device command");
   XiaozhiProtocol::DeviceToolResult toolResult = {};
   toolResult.clear();
+  toolResult.command = XiaozhiProtocol::DeviceCommandKind::SearchAudio;
   toolResult.ok = true;
   toolResult.matchCount = 1;
   toolResult.matches[0].selectionId = 1;
@@ -157,6 +161,74 @@ void testJson() {
         strstr(json, "\"type\":\"device_result\"") &&
         strstr(json, "\"selection_id\":1") && !strstr(json, "path"),
         "build bounded device search result");
+  static const struct {
+    const char *name;
+    const char *arguments;
+    XiaozhiProtocol::DeviceCommandKind kind;
+  } commands[] = {
+    {"get_time", "{}", XiaozhiProtocol::DeviceCommandKind::GetTime},
+    {"get_wifi_status", "{}", XiaozhiProtocol::DeviceCommandKind::GetWifiStatus},
+    {"get_wifi_signal", "{}", XiaozhiProtocol::DeviceCommandKind::GetWifiSignal},
+    {"get_sd_status", "{}", XiaozhiProtocol::DeviceCommandKind::GetSdStatus},
+    {"get_mic_status", "{}", XiaozhiProtocol::DeviceCommandKind::GetMicStatus},
+    {"get_battery_status", "{}", XiaozhiProtocol::DeviceCommandKind::GetBatteryStatus},
+    {"get_volume", "{}", XiaozhiProtocol::DeviceCommandKind::GetVolume},
+    {"get_led_status", "{}", XiaozhiProtocol::DeviceCommandKind::GetLedStatus},
+    {"open_battery_details", "{}", XiaozhiProtocol::DeviceCommandKind::OpenBatteryDetails},
+    {"set_volume", "{\"level\":5}", XiaozhiProtocol::DeviceCommandKind::SetVolume},
+    {"set_led_enabled", "{\"enabled\":true}", XiaozhiProtocol::DeviceCommandKind::SetLedEnabled},
+    {"set_led_color", "{\"color\":\"cyan\"}", XiaozhiProtocol::DeviceCommandKind::SetLedColor},
+    {"search_images", "{\"query\":\"photo\"}", XiaozhiProtocol::DeviceCommandKind::SearchImages},
+    {"open_image", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::OpenImage},
+    {"search_videos", "{\"query\":\"clip\"}", XiaozhiProtocol::DeviceCommandKind::SearchVideos},
+    {"play_video", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::PlayVideo},
+    {"search_files", "{\"query\":\"notes\"}", XiaozhiProtocol::DeviceCommandKind::SearchFiles},
+    {"show_file_info", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::ShowFileInfo},
+    {"open_folder", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::OpenFolder},
+    {"search_web", "{\"query\":\"weather\"}", XiaozhiProtocol::DeviceCommandKind::SearchWeb},
+  };
+  for (const auto &command : commands) {
+    snprintf(json, sizeof(json),
+             "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":11,\"command\":\"%s\",\"arguments\":%s}",
+             command.name, command.arguments);
+    check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(json),
+                                        strlen(json), "s1", message) &&
+          message.deviceCommand == command.kind, "parse additional device command");
+  }
+  const char *invalidExtras[] = {
+    "{\"level\":11}", "{\"level\":1.5}", "{\"enabled\":1}",
+    "{\"color\":\"purple\"}", "{\"selection_id\":0}",
+    "{\"query\":\"x\",\"path\":\"/private\"}"
+  };
+  const char *invalidNames[] = {
+    "set_volume", "set_volume", "set_led_enabled", "set_led_color",
+    "open_image", "search_files"
+  };
+  for (uint8_t index = 0; index < 6; ++index) {
+    snprintf(json, sizeof(json),
+             "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":11,\"command\":\"%s\",\"arguments\":%s}",
+             invalidNames[index], invalidExtras[index]);
+    check(!XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(json),
+                                         strlen(json), "s1", message),
+          "reject invalid additional device argument");
+  }
+  toolResult.clear();
+  toolResult.command = XiaozhiProtocol::DeviceCommandKind::GetBatteryStatus;
+  toolResult.ok = true;
+  toolResult.voltageMv = 3850;
+  toolResult.percentage = 60;
+  check(XiaozhiProtocol::buildDeviceResult("s1", 12, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"voltage_mv\":3850") && strstr(json, "\"percentage\":60"),
+        "build typed battery result");
+  toolResult.clear();
+  toolResult.command = XiaozhiProtocol::DeviceCommandKind::SearchFiles;
+  toolResult.ok = true;
+  toolResult.matchCount = 1;
+  toolResult.matches[0].selectionId = 1;
+  toolResult.matches[0].directory = true;
+  strcpy(toolResult.matches[0].name, "Photos");
+  check(XiaozhiProtocol::buildDeviceResult("s1", 13, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"kind\":\"folder\""), "build typed folder search result");
   toolResult.clear();
   toolResult.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
   memset(json, 0, sizeof(json));

@@ -50,6 +50,8 @@ private:
   bool _closePending;
   bool _openingWiFi;
   String _pendingAudioPath;
+  XiaozhiProtocol::DeviceCommandKind _pendingLaunchKind;
+  String _pendingLaunchValue;
   uint32_t _lastCloseRequestMs;
   uint32_t _lastAvatarRevision;
   uint32_t _lastBackgroundRevision;

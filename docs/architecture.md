@@ -284,6 +284,17 @@ generation-tagged `LaunchAudio` event. `AssistantScreen` deactivates the
 session before pushing `AudioPlayer` with the retained local path, preventing
 assistant and player I2S overlap.
 
+Version-2 device tools reuse the same bounded scanner for images, videos, and
+ordinary files/folders; every search invalidates the preceding selection set.
+The worker forwards status and persisted-setting requests through a correlated
+UI action handled by `AssistantController`. Accepted media, folder, Battery
+Details, and web-search launches publish generation-tagged events only after
+their device result was sent; `AssistantScreen` safely deactivates the session
+and pushes the selected screen with a `Navigator` payload. Files accepts a
+normal-folder payload, while Browser accepts only a search-query payload and
+builds its fixed provider URL internally. Neither worker nor backend receives
+navigation authority.
+
 ## Assistant dependency and compatibility history
 
 Stage 0 adds no assistant screen, session controller, Xiaozhi activation, or

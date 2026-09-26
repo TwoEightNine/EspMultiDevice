@@ -14,11 +14,16 @@ class SpeakerController;
 class TimeController;
 class WiFiController;
 class SdCardController;
+class BatteryHistoryService;
+class AudioSettings;
+class LedSettings;
 
 class AssistantController {
 public:
   AssistantController(WiFiController &wifi, TimeController &time, MicController &mic,
                       SpeakerController &speaker, SdCardController &sdCard,
+                      BatteryHistoryService &batteryHistory, AudioSettings &audioSettings,
+                      LedSettings &ledSettings,
                       const AssistantBackendConfig &config);
 
   bool begin();
@@ -36,6 +41,7 @@ public:
   // Returns one accepted assistant-owned playback launch. The UI consumes it
   // only after the worker has been safely deactivated.
   bool takeAudioLaunch(String &path);
+  bool takeDeviceLaunch(XiaozhiProtocol::DeviceCommandKind &kind, String &value);
 
 private:
   WiFiController &_wifi;
@@ -43,6 +49,9 @@ private:
   MicController &_mic;
   SpeakerController &_speaker;
   SdCardController &_sdCard;
+  BatteryHistoryService &_batteryHistory;
+  AudioSettings &_audioSettings;
+  LedSettings &_ledSettings;
   AssistantBackendConfig _config;
   XiaozhiSession *_session;
   mutable SemaphoreHandle_t _snapshotMutex;
@@ -57,6 +66,8 @@ private:
   bool _resetPending;
   bool _turnPending;
   String _pendingAudioLaunch;
+  XiaozhiProtocol::DeviceCommandKind _pendingLaunchKind;
+  String _pendingLaunchValue;
 
   bool ensureSession();
   void disposeSession();
@@ -65,6 +76,7 @@ private:
   bool sendResetConversation();
   void syncTranscriptMetadata();
   void apply(const XiaozhiSessionEvent &event);
+  void handleUiAction(const XiaozhiSessionEvent &event);
   void setLocalError(AssistantError error, bool retryable, const char *status);
   void mutatePhase(AssistantPhase phase, const char *status);
   static bool turnActive(AssistantPhase phase);

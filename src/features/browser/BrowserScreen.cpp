@@ -2,6 +2,7 @@
 
 #include "../../app/Navigator.h"
 #include "BrowserText.h"
+#include "BrowserLog.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../core/SpiBusLock.h"
 #include "../../ui/UiKit.h"
@@ -40,7 +41,7 @@ void browserLog(const __FlashStringHelper *message) {
 
 void browserLog(const String &message) {
   Serial.print(F("[Browser] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 
 // The TFT, SD card, and image decoders share the SPI bus.  Image decoding
@@ -156,6 +157,27 @@ void BrowserScreen::onEnter() {
   // other core; this avoids holding the Home screen during Browser entry.
   if ((!_sessionCache.active() || !_loaded) && !_lifecycle.loading()) startLifecycleLoad();
   draw();
+}
+
+void BrowserScreen::onEnter(const ScreenData &data) {
+  onEnter();
+  if (data.kind != ScreenDataKind::WebSearchQuery || data.text.isEmpty() ||
+      data.text.length() > 96) return;
+  static const char Hex[] = "0123456789ABCDEF";
+  String url = F("https://lite.duckduckgo.com/lite/?q=");
+  url.reserve(url.length() + data.text.length() * 3);
+  for (size_t index = 0; index < data.text.length(); ++index) {
+    const uint8_t byte = static_cast<uint8_t>(data.text[index]);
+    if ((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+        (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' || byte == '.' || byte == '~')
+      url += static_cast<char>(byte);
+    else {
+      url += '%';
+      url += Hex[byte >> 4];
+      url += Hex[byte & 0x0f];
+    }
+  }
+  openUrl(url, false, false);
 }
 
 bool BrowserScreen::releaseResources() {
@@ -1208,7 +1230,7 @@ void BrowserScreen::handlePageLoadResult(PageLoadResult &result) {
   if (navigation.addToRecent) addRecent(_currentUrl, _title);
   saveState();
   finishLoading();
-  browserLog(String(F("page ready: title=\"")) + _title + F("\", rows=") +
+  browserLog(String(F("page ready: rows=")) +
              String(_document.rowCount()) + F(", pages=") + String(_document.pageCount()) +
              F(", images=") + String(_document.imageCount()) +
              (result.fromSessionCache ? F(", session cache") : F("")));

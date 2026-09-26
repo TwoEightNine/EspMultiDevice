@@ -45,14 +45,14 @@ bool AudioSettings::setVolume(uint8_t volume) {
     return true;
   }
 
-  _volume = volume;
-  _speaker.setVolume(_volume);
-
   Preferences preferences;
   if (!preferences.begin(PreferencesNamespace, false)) {
     return false;
   }
-  bool saved = preferences.putUChar(VolumeKey, _volume) == sizeof(_volume);
+  bool saved = preferences.putUChar(VolumeKey, volume) == sizeof(volume);
   preferences.end();
+  if (!saved) return false;
+  _volume = volume;
+  _speaker.setVolume(_volume);
   return saved;
 }

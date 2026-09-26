@@ -13,6 +13,26 @@ must never accept an arbitrary path, URL, shell expression, or configuration
 key from the LLM. Use opaque IDs for resources selected on the device, then
 revalidate the selected resource immediately before performing the action.
 
+Capability version 2 retains `search_audio`/`play_audio` and adds read-only
+device status, persisted volume/LED settings, normal-SD image/video/file
+search and selection, Battery Details navigation, and fixed-provider web
+search. The client hello advertises `features.device_tools_version: 2` beside
+`device_tools: true`; a backend serving a version-1 client exposes only the
+two original audio commands. The version-2 backend validates a distinct
+`device_result.result` shape for every command, including typed file/folder
+matches, nullable unavailable telemetry, and `accepted: true` for terminal
+launches. A command result must never contain a source path.
+
+All local searches share one latest selection set: at most five matches,
+120-second expiry, an eight-second scan deadline, and the audio scanner's
+normal-storage privacy filter. A new search clears selections from every
+search type. `search_files` may select an ordinary file for `show_file_info`
+or a folder for `open_folder`; unsupported ordinary file types are included.
+`search_web` accepts only a 96-byte query. Browser constructs the fixed
+DuckDuckGo Lite URL on the UI side and excludes it from recents and logs.
+The built-in recorder's `/voice_last.wav` remains discoverable through
+`search_audio`; no recording-specific command exists.
+
 Keep the command set deliberately narrow. If an action reads files, exposes
 data, changes settings, sends network traffic, or starts playback/recording,
 document the privacy boundary and require a user-visible confirmation when the
@@ -61,6 +81,9 @@ If a command changes screens or starts another audio owner, publish a
 generation-tagged `XiaozhiSessionEvent`. `AssistantController` consumes that
 event and `AssistantScreen` performs the safe deactivation and Navigator push.
 No worker, backend message handler, or service may navigate directly.
+Status and persisted-setting requests use a separate generation-tagged UI
+request and correlated reply, so NVS, LED hardware, and UI-owned telemetry
+are read or changed on the UI task before a device result is sent.
 
 ## Backend overlay
 

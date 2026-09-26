@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Apply ESP Media reset and custom device-audio extensions to pinned upstream."""
+"""Apply ESP Media reset and authenticated device-tool extensions."""
 
 from hashlib import sha256
 from pathlib import Path
 import shutil
 import sys
+
+DEVICE_TOOL_NAMES = (
+    "search_audio", "play_audio", "get_time", "get_wifi_status", "get_wifi_signal",
+    "get_sd_status", "get_mic_status", "get_battery_status", "get_volume",
+    "get_led_status", "open_battery_details", "set_volume", "set_led_enabled",
+    "set_led_color", "search_images", "open_image", "search_videos", "play_video",
+    "search_files", "show_file_info", "open_folder", "search_web",
+)
+DEVICE_TOOL_NAMES_LITERAL = repr(DEVICE_TOOL_NAMES)
 
 
 EXPECTED = {
@@ -112,7 +121,7 @@ def main() -> None:
                         "                    self.logger.bind(tag=TAG).debug(\n"
                         "                        f\"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}\"\n"
                         "                    )\n",
-                        "                    if tool_call_data['name'] in ('search_audio', 'play_audio'):\n"
+                        f"                    if tool_call_data['name'] in {DEVICE_TOOL_NAMES_LITERAL}:\n"
                         "                        self.logger.bind(tag=TAG).debug(\n"
                         "                            f\"device_audio function_name={tool_call_data['name']}, function_id={tool_call_data['id']}\"\n"
                         "                        )\n"
@@ -122,12 +131,12 @@ def main() -> None:
                         "                        )\n", relative)
     text = replace_once(text,
                         "                    enqueue_tool_report(self, tool_call_data['name'], tool_input)\n",
-                        "                    if tool_call_data['name'] in ('search_audio', 'play_audio'):\n"
+                        f"                    if tool_call_data['name'] in {DEVICE_TOOL_NAMES_LITERAL}:\n"
                         "                        tool_input = {}\n"
                         "                    enqueue_tool_report(self, tool_call_data['name'], tool_input)\n", relative)
     text = replace_once(text,
                         "                        enqueue_tool_report(self, tool_call_data['name'], tool_input, str(result.result) if result.result else None, report_tool_call=False)\n",
-                        "                        reported_result = None if tool_call_data['name'] in ('search_audio', 'play_audio') else (str(result.result) if result.result else None)\n"
+                        f"                        reported_result = None if tool_call_data['name'] in {DEVICE_TOOL_NAMES_LITERAL} else (str(result.result) if result.result else None)\n"
                         "                        enqueue_tool_report(self, tool_call_data['name'], tool_input, reported_result, report_tool_call=False)\n", relative)
     (root / relative).write_text(text, encoding="utf-8")
 
@@ -180,13 +189,13 @@ def main() -> None:
                         "        self.tool_manager.register_executor(\n            ToolType.MCP_ENDPOINT, self.mcp_endpoint_executor\n        )\n"
                         "        self.tool_manager.register_executor(\n            ToolType.DEVICE_AUDIO, self.device_audio_executor\n        )\n", relative)
     text = replace_once(text, "            self.logger.debug(f\"调用函数: {function_name}, 参数: {arguments}\")\n",
-                        "            if function_name in (\"search_audio\", \"play_audio\"):\n"
+                        f"            if function_name in {DEVICE_TOOL_NAMES_LITERAL}:\n"
                         "                self.logger.debug(f\"调用设备音频函数: {function_name}\")\n"
                         "            else:\n"
                         "                self.logger.debug(f\"调用函数: {function_name}, 参数: {arguments}\")\n", relative)
     text = replace_once(text,
                         "                await send_display_message(self.conn, f\"% {function_name}\")\n",
-                        "                if function_name not in (\"search_audio\", \"play_audio\"):\n"
+                        f"                if function_name not in {DEVICE_TOOL_NAMES_LITERAL}:\n"
                         "                    await send_display_message(self.conn, f\"% {function_name}\")\n",
                         relative)
     (root / relative).write_text(text, encoding="utf-8")

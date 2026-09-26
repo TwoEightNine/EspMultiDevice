@@ -19,6 +19,8 @@ if not _test_config.exists():
 from core.handle.textHandler.conversationMessageHandler import ConversationMessageHandler
 from core.providers.memory.mem_local_short import esp_media_memory_overlay as memory_overlay
 from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
+from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES
+from core.providers.tools.device_audio.device_audio_handler import _valid_result
 from core.providers.tools.base import ToolType
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
 from core.providers.tools.unified_tool_manager import ToolManager
@@ -122,8 +124,8 @@ class FakeWebSocket:
 
 
 class FakeDeviceConnection:
-    def __init__(self, enabled=True):
-        self.features = {"device_tools": enabled}
+    def __init__(self, enabled=True, version=1):
+        self.features = {"device_tools": enabled, "device_tools_version": version}
         self.session_id = "private-session"
         self.websocket = FakeWebSocket()
         self.esp_media_terminal_device_action = False
@@ -200,6 +202,57 @@ class ConversationHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
+    def test_v2_validates_every_command_result_shape(self):
+        examples = {
+            "search_audio": {"matches": [{"selection_id": 1, "name": "Song"}]},
+            "play_audio": {"accepted": True},
+            "get_time": {"available": False, "local_iso8601": None},
+            "get_wifi_status": {"state": "scanning"},
+            "get_wifi_signal": {"connected": False, "rssi_dbm": None},
+            "get_sd_status": {"present": True, "mounted": True, "owner": "device"},
+            "get_mic_status": {"ready": True, "powered": True, "power_sense_present": False},
+            "get_battery_status": {"voltage_mv": 3820, "percentage": 65},
+            "get_volume": {"level": 5},
+            "get_led_status": {"available": True, "enabled": False, "color": "Cyan"},
+            "open_battery_details": {"accepted": True},
+            "set_volume": {"level": 6},
+            "set_led_enabled": {"available": True, "enabled": True, "color": "Cyan"},
+            "set_led_color": {"available": True, "enabled": False, "color": "Blue"},
+            "search_images": {"matches": []},
+            "open_image": {"accepted": True},
+            "search_videos": {"matches": []},
+            "play_video": {"accepted": True},
+            "search_files": {"matches": [{"selection_id": 1, "name": "Photos", "kind": "folder"}]},
+            "show_file_info": {"name": "notes.txt", "type": "unknown", "size_bytes": 12,
+                               "modified_unix": None},
+            "open_folder": {"accepted": True},
+            "search_web": {"accepted": True},
+        }
+        self.assertEqual(set(examples), DEVICE_TOOL_NAMES)
+        for command, result in examples.items():
+            with self.subTest(command=command):
+                self.assertTrue(_valid_result(command, result))
+                self.assertFalse(_valid_result(command, {**result, "path": "/private"}))
+
+    async def test_v2_timeout_and_disconnect_do_not_leave_pending_request(self):
+        conn = FakeDeviceConnection(version=2)
+        executor = DeviceAudioExecutor(conn)
+        from core.providers.tools.device_audio.device_audio_executor import DeviceAudioRpc
+        with mock.patch.object(DeviceAudioRpc, "TIMEOUT_SECONDS", 0.001):
+            response = await executor.execute(conn, "get_time", {})
+        self.assertEqual(response.action, Action.ERROR)
+        self.assertIsNone(conn.esp_media_device_audio_rpc.pending_command)
+
+        class BrokenSocket:
+            async def send(self, _message):
+                raise ConnectionError("private transport detail")
+
+        conn.websocket = BrokenSocket()
+        response = await executor.execute(conn, "get_time", {})
+        self.assertEqual(response.action, Action.ERROR)
+        self.assertNotIn("private transport detail", response.response)
+        self.assertIsNone(conn.esp_media_device_audio_rpc.pending_command)
+
     async def test_any_song_query_uses_bounded_library_pick(self):
         conn = FakeDeviceConnection()
         task = asyncio.create_task(DeviceAudioExecutor(conn).execute(
@@ -268,6 +321,60 @@ class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(conn.esp_media_terminal_device_action)
         disabled = FakeDeviceConnection(enabled=False)
         self.assertEqual(DeviceAudioExecutor(disabled).get_tools(), {})
+
+    async def test_v2_advertises_exact_new_command_set(self):
+        conn = FakeDeviceConnection(version=2)
+        executor = DeviceAudioExecutor(conn)
+        self.assertEqual(set(executor.get_tools()), DEVICE_TOOL_NAMES)
+        for tool in executor.get_tools().values():
+            self.assertFalse(tool.description["function"]["parameters"]["additionalProperties"])
+        self.assertEqual(DeviceAudioExecutor(FakeDeviceConnection(version=False)).get_tools(), {})
+
+    async def test_v2_status_result_rejects_extra_or_wrong_fields(self):
+        conn = FakeDeviceConnection(version=2)
+        task = asyncio.create_task(DeviceAudioExecutor(conn).execute(conn, "get_battery_status", {}))
+        await asyncio.sleep(0)
+        base = {"type": "device_result", "session_id": conn.session_id,
+                "request_id": 1, "ok": True}
+        await handle_device_result(conn, {**base, "result": {
+            "voltage_mv": 3820, "percentage": 65, "path": "/private"}})
+        await handle_device_result(conn, {**base, "result": {
+            "voltage_mv": True, "percentage": 65}})
+        self.assertFalse(task.done())
+        await handle_device_result(conn, {**base, "result": {
+            "voltage_mv": 3820, "percentage": 65}})
+        self.assertIn('"voltage_mv":3820', (await task).result)
+
+    async def test_v2_typed_selection_and_terminal_handoff(self):
+        conn = FakeDeviceConnection(version=2)
+        executor = DeviceAudioExecutor(conn)
+        search = asyncio.create_task(executor.execute(conn, "search_files", {"query": "photo"}))
+        await asyncio.sleep(0)
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": conn.session_id,
+            "request_id": 1, "ok": True,
+            "result": {"matches": [{"selection_id": 1, "name": "Photos", "kind": "folder"}]},
+        })
+        self.assertEqual((await search).action, Action.REQLLM)
+        launch = asyncio.create_task(executor.execute(conn, "open_folder", {"selection_id": 1}))
+        await asyncio.sleep(0)
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": conn.session_id,
+            "request_id": 2, "ok": True, "result": {"accepted": True},
+        })
+        self.assertEqual((await launch).action, Action.REQLLM)
+        self.assertTrue(conn.esp_media_terminal_device_action)
+
+    async def test_v2_rejects_invalid_arguments_before_rpc(self):
+        conn = FakeDeviceConnection(version=2)
+        executor = DeviceAudioExecutor(conn)
+        invalid = (("set_volume", {"level": True}),
+                   ("set_led_color", {"color": "purple"}),
+                   ("search_web", {"query": "x" * 97}),
+                   ("open_image", {"selection_id": 0}))
+        for name, args in invalid:
+            self.assertEqual((await executor.execute(conn, name, args)).action, Action.ERROR)
+        self.assertEqual(conn.websocket.messages, [])
 
 
 class DeviceAudioToolIsolationTests(unittest.TestCase):

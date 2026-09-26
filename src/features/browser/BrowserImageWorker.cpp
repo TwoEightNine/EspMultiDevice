@@ -17,6 +17,7 @@ using File = fs::File;
 
 #include "BrowserPersistentState.h"
 #include "BrowserSessionCache.h"
+#include "BrowserLog.h"
 #include "../../core/SpiBusLock.h"
 
 static_assert(std::is_trivially_copyable<Browser::ImageJob>::value,
@@ -35,7 +36,7 @@ void imageLog(const __FlashStringHelper *message) {
 
 void imageLog(const String &message) {
   Serial.print(F("[Browser images] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 
 void freeImagePixels(uint16_t *pixels, const __FlashStringHelper *owner) {

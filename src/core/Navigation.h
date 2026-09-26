@@ -11,7 +11,9 @@ enum class ScreenDataKind : uint8_t {
   VideoPath,
   TextInput,
   SecretFiles,
-  ExternalApp
+  ExternalApp,
+  NormalFolder,
+  WebSearchQuery
 };
 
 enum class FileAccessMode : uint8_t { Normal, Secret };
@@ -110,6 +112,20 @@ struct ScreenData {
     ScreenData data;
     data.kind = ScreenDataKind::ExternalApp;
     data.text = id;
+    return data;
+  }
+
+  static ScreenData normalFolder(const String &path) {
+    ScreenData data;
+    data.kind = ScreenDataKind::NormalFolder;
+    data.text = path;
+    return data;
+  }
+
+  static ScreenData webSearchQuery(const String &query) {
+    ScreenData data;
+    data.kind = ScreenDataKind::WebSearchQuery;
+    data.text = query;
     return data;
   }
 };

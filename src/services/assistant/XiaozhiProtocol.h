@@ -44,27 +44,57 @@ enum class MessageType : uint8_t {
   Invalid
 };
 
-enum class DeviceCommandKind : uint8_t { None, SearchAudio, PlayAudio };
+enum class DeviceCommandKind : uint8_t {
+  None, SearchAudio, PlayAudio, GetTime, GetWifiStatus, GetWifiSignal,
+  GetSdStatus, GetMicStatus, GetBatteryStatus, GetVolume, GetLedStatus,
+  OpenBatteryDetails, SetVolume, SetLedEnabled, SetLedColor,
+  SearchImages, OpenImage, SearchVideos, PlayVideo, SearchFiles,
+  ShowFileInfo, OpenFolder, SearchWeb
+};
 enum class DeviceToolError : uint8_t {
   None,
   InvalidArguments,
   StorageUnavailable,
   Busy,
   SelectionUnavailable,
-  Protocol
+  Protocol,
+  Unavailable,
+  SettingsFailed
 };
 
 struct DeviceToolMatch {
   uint8_t selectionId;
   char name[MaxDeviceMatchNameBytes + 1];
+  bool directory;
 };
 
 struct DeviceToolResult {
+  DeviceCommandKind command;
   bool ok;
   bool accepted;
   DeviceToolError error;
   uint8_t matchCount;
   DeviceToolMatch matches[MaxDeviceMatches];
+  bool available;
+  bool connected;
+  bool present;
+  bool mounted;
+  bool ready;
+  bool powered;
+  bool powerSensePresent;
+  bool enabled;
+  bool modifiedKnown;
+  uint8_t level;
+  uint8_t percentage;
+  int32_t voltageMv;
+  int32_t rssiDbm;
+  uint32_t sizeBytes;
+  uint32_t modifiedUnix;
+  char state[24];
+  char color[12];
+  char localTime[32];
+  char name[MaxDeviceMatchNameBytes + 1];
+  char fileType[20];
 
   void clear();
 };
@@ -78,6 +108,8 @@ struct Message {
   uint32_t requestId;
   DeviceCommandKind deviceCommand;
   uint8_t selectionId;
+  uint8_t level;
+  bool enabled;
   char sessionId[MaxSessionIdBytes + 1];
   char text[AssistantSnapshot::CaptionBytes + 1];
   void clear();

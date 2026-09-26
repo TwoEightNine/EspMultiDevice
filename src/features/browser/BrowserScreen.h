@@ -28,6 +28,7 @@ public:
                 SdCardController &sdCard);
 
   void onEnter() override;
+  void onEnter(const ScreenData &data) override;
   void onResume() override;
   bool releaseResources() override;
   void onResult(const ScreenResult &result) override;

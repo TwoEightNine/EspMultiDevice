@@ -758,6 +758,12 @@ void FilesScreen::onEnter() {
 
 void FilesScreen::onEnter(const ScreenData &data) {
   onEnter();
+  if (data.kind == ScreenDataKind::NormalFolder && _sdMounted &&
+      data.text.startsWith("/") && data.text.indexOf("/.") < 0 &&
+      data.text.indexOf("..") < 0) {
+    openDirectory(data.text);
+    return;
+  }
   if (data.kind != ScreenDataKind::SecretFiles || !_sdMounted) return;
   String error;
   if (!_secretStorage.unlock(data.pin, error)) {

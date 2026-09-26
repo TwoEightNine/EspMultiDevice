@@ -75,10 +75,21 @@ bootstrap flow. Other recoverable failures retry after 2, 4, 8, then 15
 seconds. Tokens, Authorization, complete WSS URLs, session IDs, raw JSON,
 audio, captions, device-command payloads, and filenames are prohibited from
 logs and snapshots. Firmware-update, MQTT, system, MCP, alert, custom, and
-unknown instructions are ignored. The only actionable custom RPC messages are
-session-bound `search_audio` and `play_audio` commands from the authenticated
-local backend; their request IDs, arguments, result schemas, and result IDs
-are strictly validated on both sides.
+unknown instructions are ignored. Actionable custom RPC messages are
+session-bound `device_command` requests from the authenticated local backend;
+their request IDs, arguments, result schemas, and result IDs are strictly
+validated on both sides. Version 1 supports `search_audio` and `play_audio`.
+Capability version 2 also exposes
+`get_time`, `get_wifi_status`, `get_wifi_signal`, `get_sd_status`,
+`get_mic_status`, `get_battery_status`, `get_volume`, `get_led_status`,
+`open_battery_details`, `set_volume`, `set_led_enabled`, `set_led_color`,
+`search_images`, `open_image`, `search_videos`, `play_video`, `search_files`,
+`show_file_info`, `open_folder`, and `search_web`. Version-1 devices continue
+to receive only the audio tools. Status and setting actions run through the
+UI-owned Assistant controller; settings report success only after persistence.
+The battery command reports the most recent one-second raw measurement, whose
+percentage is estimated from voltage and does not indicate charging. An absent
+or invalid sample returns `unavailable`.
 
 While Ready, firmware sends an application ping every 60 seconds and requires
 a pong within 10 seconds. Any reconnect clears the screen transcript and shows
@@ -125,6 +136,16 @@ seconds and is erased on session close or reconnect.
 
 The SD scanner uses each directory entry's absolute VFS path for recursive
 lookup and playback; `File.name()` on Arduino-ESP32 contains only the basename.
+
+The other local searches share audio's bounded, latest-only selection set and
+normal-storage privacy filter. `search_files` includes ordinary files of any
+type and folders with their displayed filename extensions; internal cache
+formats remain excluded. `show_file_info` returns name/type/size/modified time for a
+selected file but never contents or path. Image, video, and folder launches
+deactivate Assistant before entering their existing screens. `search_web`
+passes search words, never a URL, to the Browser's fixed DuckDuckGo Lite
+entry; it is terminal and omitted from browser recents. The recorder writes
+one `/voice_last.wav`, which remains available through `search_audio`.
 
 ### Stage 0/1 validation history
 

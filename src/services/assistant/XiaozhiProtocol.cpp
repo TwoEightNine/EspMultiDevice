@@ -138,6 +138,42 @@ bool hasOnlyKeys(cJSON *object, const char *const *allowed, size_t allowedCount)
   return true;
 }
 
+struct CommandName { const char *name; XiaozhiProtocol::DeviceCommandKind kind; };
+constexpr CommandName DeviceCommands[] = {
+  {"search_audio", XiaozhiProtocol::DeviceCommandKind::SearchAudio},
+  {"play_audio", XiaozhiProtocol::DeviceCommandKind::PlayAudio},
+  {"get_time", XiaozhiProtocol::DeviceCommandKind::GetTime},
+  {"get_wifi_status", XiaozhiProtocol::DeviceCommandKind::GetWifiStatus},
+  {"get_wifi_signal", XiaozhiProtocol::DeviceCommandKind::GetWifiSignal},
+  {"get_sd_status", XiaozhiProtocol::DeviceCommandKind::GetSdStatus},
+  {"get_mic_status", XiaozhiProtocol::DeviceCommandKind::GetMicStatus},
+  {"get_battery_status", XiaozhiProtocol::DeviceCommandKind::GetBatteryStatus},
+  {"get_volume", XiaozhiProtocol::DeviceCommandKind::GetVolume},
+  {"get_led_status", XiaozhiProtocol::DeviceCommandKind::GetLedStatus},
+  {"open_battery_details", XiaozhiProtocol::DeviceCommandKind::OpenBatteryDetails},
+  {"set_volume", XiaozhiProtocol::DeviceCommandKind::SetVolume},
+  {"set_led_enabled", XiaozhiProtocol::DeviceCommandKind::SetLedEnabled},
+  {"set_led_color", XiaozhiProtocol::DeviceCommandKind::SetLedColor},
+  {"search_images", XiaozhiProtocol::DeviceCommandKind::SearchImages},
+  {"open_image", XiaozhiProtocol::DeviceCommandKind::OpenImage},
+  {"search_videos", XiaozhiProtocol::DeviceCommandKind::SearchVideos},
+  {"play_video", XiaozhiProtocol::DeviceCommandKind::PlayVideo},
+  {"search_files", XiaozhiProtocol::DeviceCommandKind::SearchFiles},
+  {"show_file_info", XiaozhiProtocol::DeviceCommandKind::ShowFileInfo},
+  {"open_folder", XiaozhiProtocol::DeviceCommandKind::OpenFolder},
+  {"search_web", XiaozhiProtocol::DeviceCommandKind::SearchWeb},
+};
+
+XiaozhiProtocol::DeviceCommandKind commandKind(const char *name) {
+  for (const auto &entry : DeviceCommands)
+    if (!strcmp(name, entry.name)) return entry.kind;
+  return XiaozhiProtocol::DeviceCommandKind::None;
+}
+
+void addBool(cJSON *body, const char *key, bool value) {
+  cJSON_AddBoolToObject(body, key, value);
+}
+
 bool validRequestId(cJSON *item, uint32_t &requestId) {
   if (!cJSON_IsNumber(item) || item->valuedouble < 1 || item->valuedouble > UINT32_MAX ||
       static_cast<double>(static_cast<uint32_t>(item->valuedouble)) != item->valuedouble)
@@ -268,6 +304,7 @@ bool buildClientHello(uint8_t version, char *output, size_t capacity) {
   cJSON *features = cJSON_AddObjectToObject(root, "features");
   cJSON_AddBoolToObject(features, "mcp", false);
   cJSON_AddBoolToObject(features, "device_tools", true);
+  cJSON_AddNumberToObject(features, "device_tools_version", 2);
   cJSON_AddStringToObject(root, "transport", "websocket");
   cJSON *audio = cJSON_AddObjectToObject(root, "audio_params");
   cJSON_AddStringToObject(audio, "format", "opus");
@@ -321,19 +358,76 @@ bool buildDeviceResult(const char *sessionId, uint32_t requestId,
   if (result.ok) {
     cJSON *body = cJSON_AddObjectToObject(root, "result");
     if (!body) { cJSON_Delete(root); return false; }
-    if (result.accepted) cJSON_AddBoolToObject(body, "accepted", true);
-    cJSON *matches = cJSON_AddArrayToObject(body, "matches");
-    if (!matches) { cJSON_Delete(root); return false; }
-    const uint8_t count = min<uint8_t>(result.matchCount, MaxDeviceMatches);
-    for (uint8_t index = 0; index < count; ++index) {
-      if (!result.matches[index].selectionId || !result.matches[index].name[0]) {
-        cJSON_Delete(root);
-        return false;
+    switch (result.command) {
+      case DeviceCommandKind::SearchAudio:
+      case DeviceCommandKind::SearchImages:
+      case DeviceCommandKind::SearchVideos:
+      case DeviceCommandKind::SearchFiles: {
+        cJSON *matches = cJSON_AddArrayToObject(body, "matches");
+        if (!matches) { cJSON_Delete(root); return false; }
+        const uint8_t count = min<uint8_t>(result.matchCount, MaxDeviceMatches);
+        for (uint8_t index = 0; index < count; ++index) {
+          if (!result.matches[index].selectionId || !result.matches[index].name[0]) {
+            cJSON_Delete(root);
+            return false;
+          }
+          cJSON *match = cJSON_CreateObject();
+          cJSON_AddNumberToObject(match, "selection_id", result.matches[index].selectionId);
+          cJSON_AddStringToObject(match, "name", result.matches[index].name);
+          if (result.command == DeviceCommandKind::SearchFiles)
+            cJSON_AddStringToObject(match, "kind", result.matches[index].directory ? "folder" : "file");
+          cJSON_AddItemToArray(matches, match);
+        }
+        break;
       }
-      cJSON *match = cJSON_CreateObject();
-      cJSON_AddNumberToObject(match, "selection_id", result.matches[index].selectionId);
-      cJSON_AddStringToObject(match, "name", result.matches[index].name);
-      cJSON_AddItemToArray(matches, match);
+      case DeviceCommandKind::GetTime:
+        addBool(body, "available", result.available);
+        if (result.available) cJSON_AddStringToObject(body, "local_iso8601", result.localTime);
+        else cJSON_AddNullToObject(body, "local_iso8601");
+        break;
+      case DeviceCommandKind::GetWifiStatus:
+        cJSON_AddStringToObject(body, "state", result.state);
+        break;
+      case DeviceCommandKind::GetWifiSignal:
+        addBool(body, "connected", result.connected);
+        if (result.connected) cJSON_AddNumberToObject(body, "rssi_dbm", result.rssiDbm);
+        else cJSON_AddNullToObject(body, "rssi_dbm");
+        break;
+      case DeviceCommandKind::GetSdStatus:
+        addBool(body, "present", result.present);
+        addBool(body, "mounted", result.mounted);
+        cJSON_AddStringToObject(body, "owner", result.state);
+        break;
+      case DeviceCommandKind::GetMicStatus:
+        addBool(body, "ready", result.ready);
+        addBool(body, "powered", result.powered);
+        addBool(body, "power_sense_present", result.powerSensePresent);
+        break;
+      case DeviceCommandKind::GetBatteryStatus:
+        cJSON_AddNumberToObject(body, "voltage_mv", result.voltageMv);
+        cJSON_AddNumberToObject(body, "percentage", result.percentage);
+        break;
+      case DeviceCommandKind::GetVolume:
+      case DeviceCommandKind::SetVolume:
+        cJSON_AddNumberToObject(body, "level", result.level);
+        break;
+      case DeviceCommandKind::GetLedStatus:
+      case DeviceCommandKind::SetLedEnabled:
+      case DeviceCommandKind::SetLedColor:
+        addBool(body, "available", result.available);
+        addBool(body, "enabled", result.enabled);
+        cJSON_AddStringToObject(body, "color", result.color);
+        break;
+      case DeviceCommandKind::ShowFileInfo:
+        cJSON_AddStringToObject(body, "name", result.name);
+        cJSON_AddStringToObject(body, "type", result.fileType);
+        cJSON_AddNumberToObject(body, "size_bytes", result.sizeBytes);
+        if (result.modifiedKnown) cJSON_AddNumberToObject(body, "modified_unix", result.modifiedUnix);
+        else cJSON_AddNullToObject(body, "modified_unix");
+        break;
+      default:
+        addBool(body, "accepted", result.accepted);
+        break;
     }
   } else {
     const char *code = "protocol";
@@ -342,6 +436,8 @@ bool buildDeviceResult(const char *sessionId, uint32_t requestId,
       case DeviceToolError::StorageUnavailable: code = "storage_unavailable"; break;
       case DeviceToolError::Busy: code = "busy"; break;
       case DeviceToolError::SelectionUnavailable: code = "selection_unavailable"; break;
+      case DeviceToolError::Unavailable: code = "unavailable"; break;
+      case DeviceToolError::SettingsFailed: code = "settings_failed"; break;
       case DeviceToolError::None:
       case DeviceToolError::Protocol: break;
     }
@@ -450,17 +546,29 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
       cJSON_Delete(root);
       return false;
     }
-    if (!strcmp(command->valuestring, "search_audio")) {
+    message.deviceCommand = commandKind(command->valuestring);
+    if (message.deviceCommand == DeviceCommandKind::None) {
+      cJSON_Delete(root);
+      return false;
+    }
+    if (message.deviceCommand == DeviceCommandKind::SearchAudio ||
+        message.deviceCommand == DeviceCommandKind::SearchImages ||
+        message.deviceCommand == DeviceCommandKind::SearchVideos ||
+        message.deviceCommand == DeviceCommandKind::SearchFiles ||
+        message.deviceCommand == DeviceCommandKind::SearchWeb) {
       static constexpr const char *SearchKeys[] = {"query"};
       cJSON *query = cJSON_GetObjectItemCaseSensitive(arguments, "query");
       if (!hasOnlyKeys(arguments, SearchKeys, 1) || !cJSON_IsString(query) || !query->valuestring ||
-          strnlen(query->valuestring, MaxDeviceQueryBytes + 1) > MaxDeviceQueryBytes ||
+          !query->valuestring[0] || strnlen(query->valuestring, MaxDeviceQueryBytes + 1) > MaxDeviceQueryBytes ||
           !copyUtf8Bounded(query->valuestring, message.text, sizeof(message.text))) {
         cJSON_Delete(root);
         return false;
       }
-      message.deviceCommand = DeviceCommandKind::SearchAudio;
-    } else if (!strcmp(command->valuestring, "play_audio")) {
+    } else if (message.deviceCommand == DeviceCommandKind::PlayAudio ||
+               message.deviceCommand == DeviceCommandKind::OpenImage ||
+               message.deviceCommand == DeviceCommandKind::PlayVideo ||
+               message.deviceCommand == DeviceCommandKind::ShowFileInfo ||
+               message.deviceCommand == DeviceCommandKind::OpenFolder) {
       static constexpr const char *PlayKeys[] = {"selection_id"};
       cJSON *selectionId = cJSON_GetObjectItemCaseSensitive(arguments, "selection_id");
       uint32_t parsed = 0;
@@ -469,11 +577,34 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
         cJSON_Delete(root);
         return false;
       }
-      message.deviceCommand = DeviceCommandKind::PlayAudio;
       message.selectionId = static_cast<uint8_t>(parsed);
+    } else if (message.deviceCommand == DeviceCommandKind::SetVolume) {
+      static constexpr const char *Keys[] = {"level"};
+      cJSON *level = cJSON_GetObjectItemCaseSensitive(arguments, "level");
+      if (!hasOnlyKeys(arguments, Keys, 1) || !cJSON_IsNumber(level) ||
+          level->valuedouble < 0 || level->valuedouble > 10 ||
+          level->valuedouble != level->valueint) { cJSON_Delete(root); return false; }
+      message.level = static_cast<uint8_t>(level->valueint);
+    } else if (message.deviceCommand == DeviceCommandKind::SetLedEnabled) {
+      static constexpr const char *Keys[] = {"enabled"};
+      cJSON *enabled = cJSON_GetObjectItemCaseSensitive(arguments, "enabled");
+      if (!hasOnlyKeys(arguments, Keys, 1) || !cJSON_IsBool(enabled)) {
+        cJSON_Delete(root); return false;
+      }
+      message.enabled = cJSON_IsTrue(enabled);
+    } else if (message.deviceCommand == DeviceCommandKind::SetLedColor) {
+      static constexpr const char *Keys[] = {"color"};
+      cJSON *color = cJSON_GetObjectItemCaseSensitive(arguments, "color");
+      if (!hasOnlyKeys(arguments, Keys, 1) || !cJSON_IsString(color) || !color->valuestring ||
+          strlen(color->valuestring) >= sizeof(message.text) ||
+          (strcmp(color->valuestring, "red") && strcmp(color->valuestring, "green") &&
+           strcmp(color->valuestring, "blue") && strcmp(color->valuestring, "yellow") &&
+           strcmp(color->valuestring, "cyan") && strcmp(color->valuestring, "magenta"))) {
+        cJSON_Delete(root); return false;
+      }
+      strcpy(message.text, color->valuestring);
     } else {
-      cJSON_Delete(root);
-      return false;
+      if (!hasOnlyKeys(arguments, nullptr, 0)) { cJSON_Delete(root); return false; }
     }
     message.type = MessageType::DeviceCommand;
   } else if (!strcmp(type->valuestring, "pong")) {

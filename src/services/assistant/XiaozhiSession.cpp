@@ -42,6 +42,8 @@ const char *deviceToolErrorName(XiaozhiProtocol::DeviceToolError error) {
     case XiaozhiProtocol::DeviceToolError::Busy: return "busy";
     case XiaozhiProtocol::DeviceToolError::SelectionUnavailable: return "selection_unavailable";
     case XiaozhiProtocol::DeviceToolError::Protocol: return "protocol";
+    case XiaozhiProtocol::DeviceToolError::Unavailable: return "unavailable";
+    case XiaozhiProtocol::DeviceToolError::SettingsFailed: return "settings_failed";
   }
   return "unknown";
 }
@@ -53,7 +55,7 @@ XiaozhiSession::XiaozhiSession(WiFiController &wifi, TimeController &time,
                                const AssistantBackendConfig &config)
     : _wifi(wifi), _time(time), _mic(mic), _speaker(speaker), _sdCard(sdCard), _identity(),
       _bootstrap(config), _config(config), _websocket(), _encoder(), _decoder(),
-      _bootstrapResponse(nullptr), _commands(nullptr), _events(nullptr),
+      _bootstrapResponse(nullptr), _commands(nullptr), _events(nullptr), _uiResults(nullptr),
       _commandStorage(nullptr), _eventStorage(nullptr), _commandQueueControl{},
       _eventQueueControl{}, _task(nullptr),
       _requestedGeneration(0), _cancelRequested(false), _deactivateRequested(false),
@@ -77,6 +79,7 @@ XiaozhiSession::~XiaozhiSession() {
   clearCredentials();
   if (_commands) vQueueDelete(_commands);
   if (_events) vQueueDelete(_events);
+  if (_uiResults) vQueueDelete(_uiResults);
   if (_commandStorage) {
     memset(_commandStorage, 0, sizeof(XiaozhiSessionCommand) * CommandQueueCapacity);
     free(_commandStorage);
@@ -110,6 +113,7 @@ bool XiaozhiSession::begin() {
       sizeof(XiaozhiSessionCommand), _commandStorage, &_commandQueueControl) : nullptr;
   _events = _eventStorage ? xQueueCreateStatic(EventQueueCapacity,
       sizeof(XiaozhiSessionEvent), _eventStorage, &_eventQueueControl) : nullptr;
+  _uiResults = xQueueCreate(1, sizeof(XiaozhiProtocol::DeviceToolResult));
   _uplink = static_cast<PcmFrame *>(heap_caps_calloc(
       UplinkQueueCapacity, sizeof(PcmFrame), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   _downlink = static_cast<OpusPacket *>(heap_caps_calloc(
@@ -117,7 +121,7 @@ bool XiaozhiSession::begin() {
   _decodedPcm = static_cast<int16_t *>(heap_caps_calloc(
       AssistantAudio::OpusDecoder::MaxFrameSamples, sizeof(int16_t),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (!_commands || !_events || !_bootstrapResponse || !_uplink || !_downlink || !_decodedPcm) return false;
+  if (!_commands || !_events || !_uiResults || !_bootstrapResponse || !_uplink || !_downlink || !_decodedPcm) return false;
   const BaseType_t core = xPortGetCoreID() == 0 ? 1 : 0;
   // Network code can disable the flash cache. Its caller's stack must remain
   // in internal RAM while that happens, so do not place this task stack in
@@ -138,6 +142,12 @@ bool XiaozhiSession::post(const XiaozhiSessionCommand &command) {
 
 bool XiaozhiSession::poll(XiaozhiSessionEvent &event) {
   return _events && xQueueReceive(_events, &event, 0) == pdTRUE;
+}
+
+bool XiaozhiSession::completeUiAction(uint32_t requestId,
+                                      const XiaozhiProtocol::DeviceToolResult &result) {
+  if (!_uiResults || !requestId || requestId != _lastDeviceCommandId) return false;
+  return xQueueSend(_uiResults, &result, 0) == pdTRUE;
 }
 
 bool XiaozhiSession::running() const {
@@ -720,26 +730,68 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
 
 bool XiaozhiSession::handleDeviceCommand(const XiaozhiProtocol::Message &message,
                                          uint32_t generation) {
-  if (!message.requestId || message.requestId == _lastDeviceCommandId || !_sessionId[0]) return false;
+  if (!message.requestId || message.requestId <= _lastDeviceCommandId || !_sessionId[0]) return false;
   _lastDeviceCommandId = message.requestId;
   Serial.print(F("Assistant device command generation="));
   Serial.print(generation);
   Serial.print(F(" name="));
-  Serial.print(message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::SearchAudio
-                   ? F("search_audio") : F("play_audio"));
+  Serial.print(static_cast<uint8_t>(message.deviceCommand));
   Serial.print(F(" mounted="));
   Serial.print(_sdCard.isMounted() ? 1 : 0);
   Serial.print(F(" owner="));
   Serial.println(static_cast<uint8_t>(_sdCard.owner()));
   XiaozhiProtocol::DeviceToolResult result = {};
   result.clear();
+  result.command = message.deviceCommand;
   String launchPath;
-  if (message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::SearchAudio) {
-    result = _deviceTools.searchAudio(message.text);
-  } else if (message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::PlayAudio) {
-    result = _deviceTools.playAudio(message.selectionId, launchPath);
-  } else {
-    result.error = XiaozhiProtocol::DeviceToolError::Protocol;
+  using Kind = XiaozhiProtocol::DeviceCommandKind;
+  switch (message.deviceCommand) {
+    case Kind::SearchAudio:
+    case Kind::SearchImages:
+    case Kind::SearchVideos:
+    case Kind::SearchFiles: {
+      struct SearchCancellation { XiaozhiSession *session; uint32_t generation; };
+      SearchCancellation cancellation = {this, generation};
+      result = _deviceTools.search(message.text, message.deviceCommand,
+                                   [](void *opaque) {
+                                     const auto *state = static_cast<SearchCancellation *>(opaque);
+                                     return state->session->interrupted(state->generation);
+                                   }, &cancellation);
+      break;
+    }
+    case Kind::PlayAudio:
+    case Kind::OpenImage:
+    case Kind::PlayVideo:
+    case Kind::ShowFileInfo:
+    case Kind::OpenFolder:
+      result = _deviceTools.selected(message.selectionId, message.deviceCommand, launchPath);
+      break;
+    case Kind::GetTime:
+    case Kind::GetWifiStatus:
+    case Kind::GetWifiSignal:
+    case Kind::GetSdStatus:
+    case Kind::GetMicStatus:
+    case Kind::GetBatteryStatus:
+    case Kind::GetVolume:
+    case Kind::GetLedStatus:
+    case Kind::SetVolume:
+    case Kind::SetLedEnabled:
+    case Kind::SetLedColor:
+      if (!requestUiAction(message, generation, result))
+        result.error = XiaozhiProtocol::DeviceToolError::Busy;
+      break;
+    case Kind::OpenBatteryDetails:
+      result.ok = true;
+      result.accepted = true;
+      break;
+    case Kind::SearchWeb:
+      result.ok = message.text[0] != 0;
+      result.accepted = result.ok;
+      if (!result.ok) result.error = XiaozhiProtocol::DeviceToolError::InvalidArguments;
+      break;
+    default:
+      result.error = XiaozhiProtocol::DeviceToolError::Protocol;
+      break;
   }
 
   Serial.print(F("Assistant device result generation="));
@@ -759,16 +811,43 @@ bool XiaozhiSession::handleDeviceCommand(const XiaozhiProtocol::Message &message
                     _websocket.sendText(json, strlen(json));
   memset(json, 0, sizeof(json));
   if (!sent) return false;
-  if (result.ok && result.accepted && launchPath.length() &&
-      launchPath.length() <= AssistantDeviceTools::MaxPathBytes) {
+  if (result.ok && result.accepted) {
     XiaozhiSessionEvent event = {};
-    event.type = XiaozhiSessionEventType::LaunchAudio;
+    event.type = message.deviceCommand == Kind::PlayAudio
+        ? XiaozhiSessionEventType::LaunchAudio : XiaozhiSessionEventType::LaunchDevice;
     event.generation = generation;
     event.micAvailable = _mic.isReady() && _mic.isPowered();
-    copyText(launchPath.c_str(), event.audioPath, sizeof(event.audioPath));
+    event.deviceCommand = message.deviceCommand;
+    const String value = message.deviceCommand == Kind::SearchWeb ? String(message.text) : launchPath;
+    if (value.length() > AssistantDeviceTools::MaxPathBytes) return false;
+    copyText(value.c_str(), event.launchValue, sizeof(event.launchValue));
+    if (event.type == XiaozhiSessionEventType::LaunchAudio)
+      copyText(value.c_str(), event.audioPath, sizeof(event.audioPath));
     if (!publish(event)) return false;
   }
   return true;
+}
+
+bool XiaozhiSession::requestUiAction(const XiaozhiProtocol::Message &message,
+                                     uint32_t generation,
+                                     XiaozhiProtocol::DeviceToolResult &result) {
+  if (!_uiResults) return false;
+  xQueueReset(_uiResults);
+  XiaozhiSessionEvent event = {};
+  event.type = XiaozhiSessionEventType::UiAction;
+  event.generation = generation;
+  event.deviceCommand = message.deviceCommand;
+  event.requestId = message.requestId;
+  event.level = message.level;
+  event.enabled = message.enabled;
+  copyText(message.text, event.text, sizeof(event.text));
+  if (!publish(event)) return false;
+  const uint32_t started = millis();
+  while (millis() - started < 2000 && !interrupted(generation)) {
+    if (xQueueReceive(_uiResults, &result, pdMS_TO_TICKS(20)) == pdTRUE)
+      return result.command == message.deviceCommand;
+  }
+  return false;
 }
 
 bool XiaozhiSession::resetConversation(uint32_t generation) {

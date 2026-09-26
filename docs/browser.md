@@ -2,6 +2,12 @@
 
 The Browser is a bounded compatibility-oriented HTTP/HTTPS reader, not a general-purpose secure browser. It needs Wi-Fi but can run without an SD card; persistence is simply unavailable in that case.
 
+Assistant `search_web` opens DuckDuckGo Lite results from a bounded search
+query. The Browser, not the backend, percent-encodes the query into its fixed
+HTTPS provider URL. This entry is omitted from recents. Browser Serial logs
+redact complete HTTP(S) URLs so search terms, form values, and URL tokens are
+not logged, while host and transfer metrics remain available.
+
 ## Navigation and persistence
 
 The Home Browser app holds up to 16 recents and 16 favorites, each with URL and title. A URL without a scheme becomes `https://`. The start page lists recents and has icon-only controls for add URL, recent/favorite mode, and eight-entry paging. Reopening a recent promotes it and refreshes its title after the page loads. Links, history navigation, and redirects do not modify recents.

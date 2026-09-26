@@ -11,6 +11,7 @@
 
 #include "../../core/SpiBusLock.h"
 #include "../../services/storage/SdCardController.h"
+#include "BrowserLog.h"
 
 namespace {
 using File = fs::File;
@@ -19,7 +20,7 @@ constexpr const char *StateTempPath = "/.system/browser_state.tmp";
 
 void stateLog(const String &message) {
   Serial.print(F("[Browser state] "));
-  Serial.println(message);
+  Serial.println(browserRedactUrls(message));
 }
 }  // namespace
 
