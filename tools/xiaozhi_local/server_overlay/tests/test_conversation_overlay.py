@@ -19,7 +19,7 @@ if not _test_config.exists():
 
 from core.handle.textHandler.conversationMessageHandler import ConversationMessageHandler
 from core.providers.memory.mem_local_short import esp_media_memory_overlay as memory_overlay
-from core.providers.llm.esp_media_openai_responses import LLMProvider as ResponsesProvider
+from core.providers.llm.esp_media_openai_responses.esp_media_openai_responses import LLMProvider as ResponsesProvider
 from core.providers.tts.esp_media_azure_multilingual import TTSProvider as AzureTtsProvider
 from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
 from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES
@@ -550,19 +550,21 @@ class AzureTtsProviderTests(unittest.IsolatedAsyncioTestCase):
 
     def _provider(self):
         return AzureTtsProvider({
-            "api_key": "not-logged", "region": "westeurope", "output_dir": "tmp/",
-            "fallback_locale": "en-US",
+            "api_key": "not-logged", "region": "southeastasia", "output_dir": "tmp/",
+            "fallback_locale": "en-GB",
             "voices": {
-                "en-US": "en-US-JennyMultilingualNeural",
-                "zh-CN": "zh-CN-XiaoxiaoMultilingualNeural",
-                "ru-RU": "ru-RU-SvetlanaNeural",
+                "en-GB": "en-GB-Ada:DragonHDLatestNeural",
+                "zh-CN": "zh-CN-Xiaoxiao:DragonHDFlashLatestNeural",
+                "ru-RU": "ru-RU-DariyaNeural",
             },
         }, True)
 
     async def test_routes_scripts_and_escapes_ssml_without_exposing_key(self):
         provider = self._provider()
-        self.assertEqual(provider._locale_for("hello"), "en-US")
+        self.assertEqual(provider._locale_for("hello"), "en-GB")
         self.assertEqual(provider._locale_for("你好"), "zh-CN")
+        self.assertEqual(provider._locale_for("Привет"), "ru-RU")
+        self.assertEqual(provider._locale_for("hello again"), "en-GB")
         self.assertEqual(provider._locale_for("Привет"), "ru-RU")
         self.assertEqual(provider._locale_for("123"), "ru-RU")
         captured = {}
@@ -572,7 +574,7 @@ class AzureTtsProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"a &lt; b &amp; c", captured["content"])
         self.assertEqual(captured["headers"]["X-Microsoft-OutputFormat"],
                          "audio-24khz-48kbitrate-mono-mp3")
-        self.assertNotIn("not-logged", str(provider._ssml("text", "en-US")))
+        self.assertNotIn("not-logged", str(provider._ssml("text", "en-GB")))
 
     async def test_http_failure_has_no_credential_or_text(self):
         provider = self._provider()

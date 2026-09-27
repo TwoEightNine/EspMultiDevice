@@ -11,7 +11,9 @@ from core.providers.tts.base import TTSProviderBase
 
 _CHINESE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _CYRILLIC = re.compile(r"[\u0400-\u052f]")
+_LATIN = re.compile(r"[A-Za-z\u00c0-\u024f]")
 _REGION = re.compile(r"^[a-z0-9-]+$")
+_HD_VOICE_REGIONS = {"eastus", "westeurope", "southeastasia"}
 
 
 class TTSProvider(TTSProviderBase):
@@ -22,7 +24,7 @@ class TTSProvider(TTSProviderBase):
         self.api_key = config.get("api_key")
         self.region = config.get("region")
         self.voices = config.get("voices") or {}
-        self.fallback_locale = config.get("fallback_locale", "en-US")
+        self.fallback_locale = config.get("fallback_locale", "en-GB")
         self.output_format = config.get(
             "output_format", "audio-24khz-48kbitrate-mono-mp3"
         )
@@ -30,9 +32,11 @@ class TTSProvider(TTSProviderBase):
             raise ValueError("Azure Speech API key is not configured")
         if not isinstance(self.region, str) or not _REGION.fullmatch(self.region):
             raise ValueError("Azure Speech region is invalid")
+        if self.region not in _HD_VOICE_REGIONS:
+            raise ValueError("Azure Speech region does not support the configured HD voices")
         if self.fallback_locale not in self.voices:
             raise ValueError("Azure Speech fallback locale has no configured voice")
-        for locale in ("en-US", "zh-CN", "ru-RU"):
+        for locale in ("en-GB", "zh-CN", "ru-RU"):
             if not isinstance(self.voices.get(locale), str) or not self.voices[locale]:
                 raise ValueError(f"Azure Speech voice is missing for {locale}")
         self.endpoint = (
@@ -50,6 +54,11 @@ class TTSProvider(TTSProviderBase):
             locale = "ru-RU"
         elif chinese or cyrillic:
             locale = self._last_locale
+        elif _LATIN.search(text):
+            # English is predominantly Latin script. Do not let a previous
+            # Russian or Chinese reply make a later English chunk inherit that
+            # voice; only script-less fragments remain in the active locale.
+            locale = self.fallback_locale
         else:
             locale = self._last_locale or self.fallback_locale
         if locale not in self.voices:

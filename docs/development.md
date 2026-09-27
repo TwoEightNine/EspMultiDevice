@@ -158,6 +158,9 @@ live in the private runtime YAML. The OpenAI API key is repeated only in the
 ASR and LLM sections of ignored `.runtime/data/.config.yaml`. Azure Speech's
 key and region are also private runtime YAML values. Never put provider
 secrets in Compose, firmware, tracked examples, logs, or command arguments.
+That YAML also pins `xiaozhi.audio_params.sample_rate` to 16 kHz: Azure's MP3
+output is resampled before Opus encoding so the backend sends the firmware's
+native 960-sample 60 ms downlink frames instead of the upstream 24 kHz default.
 The overlay uses the bundled OpenAI SDK and httpx; it adds no Python dependency
 or firmware protocol.
 

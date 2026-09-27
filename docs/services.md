@@ -112,8 +112,17 @@ The self-hosted assistant advertises `zh-CN` during bootstrap and uses a
 language-matching prompt for English, Simplified Chinese, and Russian. OpenAI
 `gpt-transcribe` performs automatic transcription and GPT-5.6 Luna at medium
 reasoning handles all chat, tool follow-up, and summary requests. Azure Speech
-routes English to `en-US-JennyMultilingualNeural`, Simplified Chinese to
-`zh-CN-XiaoxiaoMultilingualNeural`, and Russian to `ru-RU-SvetlanaNeural`.
+routes English to `en-GB-Ada:DragonHDLatestNeural`, Simplified Chinese to
+`zh-CN-Xiaoxiao:DragonHDFlashLatestNeural`, and Russian to
+`ru-RU-DariyaNeural`. The configured HD voices require the Speech resource to
+be in `eastus`, `westeurope`, or `southeastasia`.
+The backend resamples provider audio and pins its Opus downlink to mono 16 kHz
+(960 samples per 60 ms packet), matching the firmware's native assistant frame
+size rather than the upstream server's 24 kHz default.
+Chinese and Cyrillic scripts select their corresponding configured voices;
+Latin-script text selects the configured English fallback even after a Russian
+or Chinese turn. Script-less streamed fragments (such as punctuation) retain
+the preceding locale.
 The backend state is unencrypted at rest; confirmed New conversation removes
 both the summary and exact-turn memory for that device.
 Caption buffers preserve only complete UTF-8 code points and replace malformed

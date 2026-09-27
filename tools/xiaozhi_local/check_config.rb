@@ -61,6 +61,8 @@ fail_check("backend authentication must be enabled") unless
   fetch_path(config, "server", "auth", "enabled") == true
 fail_check("WebSocket ping handling must be enabled") unless
   config["enable_websocket_ping"] == true
+fail_check("server downlink audio must be pinned to the firmware's 16 kHz Opus rate") unless
+  fetch_path(config, "xiaozhi", "audio_params", "sample_rate") == 16_000
 fail_check("MQTT advertisement must remain disabled") unless
   fetch_path(config, "server", "mqtt_gateway").nil? &&
   fetch_path(config, "server", "mqtt_signature_key").nil?
@@ -84,16 +86,20 @@ azure_tts = fetch_path(config, "TTS", "AzureMultilingualTTS")
 fail_check("Azure multilingual TTS provider is incomplete") unless
   azure_tts.is_a?(Hash) &&
   azure_tts["type"] == "esp_media_azure_multilingual" &&
-  azure_tts["fallback_locale"] == "en-US" &&
+  azure_tts["fallback_locale"] == "en-GB" &&
   azure_tts["output_format"] == "audio-24khz-48kbitrate-mono-mp3" &&
-  fetch_path(azure_tts, "voices", "en-US") == "en-US-JennyMultilingualNeural" &&
-  fetch_path(azure_tts, "voices", "zh-CN") == "zh-CN-XiaoxiaoMultilingualNeural" &&
-  fetch_path(azure_tts, "voices", "ru-RU") == "ru-RU-SvetlanaNeural"
+  fetch_path(azure_tts, "voices", "en-GB") == "en-GB-Ada:DragonHDLatestNeural" &&
+  fetch_path(azure_tts, "voices", "zh-CN") == "zh-CN-Xiaoxiao:DragonHDFlashLatestNeural" &&
+  fetch_path(azure_tts, "voices", "ru-RU") == "ru-RU-DariyaNeural"
 [azure_tts["api_key"], azure_tts["region"]].each do |value|
   fail_check("Azure Speech credential or region is missing or still a placeholder") unless
     value.is_a?(String) && !value.empty? &&
     !value.match?(/replace|placeholder|your|你的/i)
 end
+fail_check("Azure Speech region must be a lowercase region slug, not a display name or URL") unless
+  azure_tts["region"].match?(/\A[a-z0-9-]+\z/)
+fail_check("Azure Speech region must support the configured Dragon HD voices") unless
+  %w[eastus westeurope southeastasia].include?(azure_tts["region"])
 fail_check("Silero VAD is not configured") unless
   fetch_path(config, "VAD", "SileroVAD", "type") == "silero"
 fail_check("function_call intent is not configured") unless

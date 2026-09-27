@@ -243,9 +243,11 @@ def main() -> None:
         overlay / "deviceAudioMessageHandler.py",
         root / "core/handle/textHandler/deviceAudioMessageHandler.py",
     )
+    responses_provider = root / "core/providers/llm/esp_media_openai_responses"
+    responses_provider.mkdir(exist_ok=True)
     shutil.copyfile(
         overlay / "esp_media_openai_responses.py",
-        root / "core/providers/llm/esp_media_openai_responses.py",
+        responses_provider / "esp_media_openai_responses.py",
     )
     shutil.copyfile(
         overlay / "esp_media_azure_multilingual.py",

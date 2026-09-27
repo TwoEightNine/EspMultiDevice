@@ -7,8 +7,12 @@ Caddy-managed HTTPS/WSS. The language-matching pipeline is `SileroVAD`, OpenAI
 `gpt-transcribe`, GPT-5.6 Luna through the Responses API, Azure multilingual
 TTS, `function_call`, and `mem_local_short`. Every chat, tool follow-up, and
 summary-memory request uses Luna at medium reasoning. Azure routes English,
-Simplified Chinese, and Russian segments to Jenny, Xiaoxiao, and Svetlana
-respectively. MQTT and public Xiaozhi fallback remain disabled.
+Simplified Chinese, and Russian segments to Ada HD, Xiaoxiao HD Flash, and
+Dariya respectively. These configured HD voices require an Azure Speech
+resource in `eastus`, `westeurope`, or `southeastasia`. The backend resamples
+synthesized audio and sends 16 kHz Opus
+downlink frames, matching the firmware's native 60 ms (960-sample) playback
+frames. MQTT and public Xiaozhi fallback remain disabled.
 WebSocket ping handling is enabled for the firmware's 60-second heartbeat.
 The backend also uses OpenAI function calling for the firmware's custom,
 authenticated `device_tools` RPC. MCP stays disabled: the only v1 tools search
