@@ -35,7 +35,7 @@ required_modules = {
   "VAD" => "SileroVAD",
   "ASR" => "OpenaiASR",
   "LLM" => "OpenAILLM",
-  "TTS" => "EdgeTTS",
+  "TTS" => "AzureMultilingualTTS",
   "Intent" => "function_call",
   "Memory" => "mem_local_short"
 }
@@ -70,19 +70,30 @@ llm = fetch_path(config, "LLM", "OpenAILLM")
 fail_check("OpenaiASR provider is incomplete") unless
   asr.is_a?(Hash) && asr["type"] == "openai" &&
   asr["base_url"] == "https://api.openai.com/v1/audio/transcriptions" &&
-  asr["model_name"] == "gpt-4o-mini-transcribe-2025-12-15"
+  asr["model_name"] == "gpt-transcribe"
 fail_check("OpenAILLM provider is incomplete") unless
-  llm.is_a?(Hash) && llm["type"] == "openai" &&
+  llm.is_a?(Hash) && llm["type"] == "esp_media_openai_responses" &&
   llm["base_url"] == "https://api.openai.com/v1" &&
-  llm["model_name"] == "gpt-5.4-mini-2026-03-17"
+  llm["model_name"] == "gpt-5.6-luna" &&
+  llm["reasoning_effort"] == "medium"
 [asr["api_key"], llm["api_key"]].each do |key|
   fail_check("OpenAI API key is missing or still a placeholder") unless
     key.is_a?(String) && !key.empty? && !key.match?(/replace|placeholder|your|你的/i)
 end
-fail_check("Simplified-Chinese EdgeTTS voice is not configured") unless
-  fetch_path(config, "TTS", "EdgeTTS", "type") == "edge" &&
-  fetch_path(config, "TTS", "EdgeTTS", "voice") == "zh-CN-XiaoxiaoNeural" &&
-  fetch_path(config, "TTS", "EdgeTTS", "language") == "中文"
+azure_tts = fetch_path(config, "TTS", "AzureMultilingualTTS")
+fail_check("Azure multilingual TTS provider is incomplete") unless
+  azure_tts.is_a?(Hash) &&
+  azure_tts["type"] == "esp_media_azure_multilingual" &&
+  azure_tts["fallback_locale"] == "en-US" &&
+  azure_tts["output_format"] == "audio-24khz-48kbitrate-mono-mp3" &&
+  fetch_path(azure_tts, "voices", "en-US") == "en-US-JennyMultilingualNeural" &&
+  fetch_path(azure_tts, "voices", "zh-CN") == "zh-CN-XiaoxiaoMultilingualNeural" &&
+  fetch_path(azure_tts, "voices", "ru-RU") == "ru-RU-SvetlanaNeural"
+[azure_tts["api_key"], azure_tts["region"]].each do |value|
+  fail_check("Azure Speech credential or region is missing or still a placeholder") unless
+    value.is_a?(String) && !value.empty? &&
+    !value.match?(/replace|placeholder|your|你的/i)
+end
 fail_check("Silero VAD is not configured") unless
   fetch_path(config, "VAD", "SileroVAD", "type") == "silero"
 fail_check("function_call intent is not configured") unless
@@ -91,8 +102,9 @@ fail_check("mem_local_short must use OpenAILLM") unless
   fetch_path(config, "Memory", "mem_local_short", "type") == "mem_local_short" &&
   fetch_path(config, "Memory", "mem_local_short", "llm") == "OpenAILLM"
 prompt = config["prompt"].to_s
-fail_check("language-matching bilingual prompt is missing") unless
-  prompt.match?(/Simplified Chinese/i) && prompt.match?(/same language/i)
+fail_check("multilingual spoken prompt is missing") unless
+  prompt.match?(/Simplified Chinese/i) && prompt.match?(/Russian/i) &&
+  prompt.match?(/structured/i) && prompt.include?("<memory></memory>")
 fail_check("agentic audio prompt is missing") unless
   prompt.match?(/search_audio/i) && prompt.match?(/play_audio/i) &&
   prompt.include?('query "*"')

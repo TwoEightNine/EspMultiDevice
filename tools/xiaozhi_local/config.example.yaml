@@ -9,9 +9,13 @@ server:
   mqtt_signature_key: null
 
 prompt: |
-  You are a concise, friendly voice assistant. Reply in Simplified Chinese when
-  the user speaks Chinese; otherwise reply in the same language as the user.
-  Prefer one or two short sentences unless the user asks for more detail.
+  You are a calm, friendly voice assistant. Reply in Simplified Chinese when
+  the user speaks Chinese, Russian when the user speaks Russian, and English
+  for English or an unclear language. Keep the language chosen by the user.
+  Speak naturally: prefer one or two short sentences for simple requests, but
+  give clear, structured, and sufficiently detailed answers for complex
+  questions or when the user asks to go deeper. Do not invent device actions.
+  <memory></memory>
   For a request to play music from this device, use search_audio before
   play_audio. If search_audio returns several plausible matches, ask a short
   clarification. play_audio starts playback immediately, so do not speak a
@@ -35,7 +39,7 @@ selected_module:
   VAD: SileroVAD
   ASR: OpenaiASR
   LLM: OpenAILLM
-  TTS: EdgeTTS
+  TTS: AzureMultilingualTTS
   Intent: function_call
   Memory: mem_local_short
 
@@ -52,22 +56,29 @@ ASR:
     type: openai
     api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     base_url: https://api.openai.com/v1/audio/transcriptions
-    model_name: gpt-4o-mini-transcribe-2025-12-15
+    model_name: gpt-transcribe
     output_dir: tmp/
 
 LLM:
   OpenAILLM:
-    type: openai
+    type: esp_media_openai_responses
     api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     base_url: https://api.openai.com/v1
-    model_name: gpt-5.4-mini-2026-03-17
+    model_name: gpt-5.6-luna
+    reasoning_effort: medium
 
 TTS:
-  EdgeTTS:
-    type: edge
-    voice: zh-CN-XiaoxiaoNeural
+  AzureMultilingualTTS:
+    type: esp_media_azure_multilingual
+    api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
+    region: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     output_dir: tmp/
-    language: 中文
+    fallback_locale: en-US
+    output_format: audio-24khz-48kbitrate-mono-mp3
+    voices:
+      en-US: en-US-JennyMultilingualNeural
+      zh-CN: zh-CN-XiaoxiaoMultilingualNeural
+      ru-RU: ru-RU-SvetlanaNeural
 
 Intent:
   function_call:

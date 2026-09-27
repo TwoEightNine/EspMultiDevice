@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import yaml
 
@@ -18,6 +19,8 @@ if not _test_config.exists():
 
 from core.handle.textHandler.conversationMessageHandler import ConversationMessageHandler
 from core.providers.memory.mem_local_short import esp_media_memory_overlay as memory_overlay
+from core.providers.llm.esp_media_openai_responses import LLMProvider as ResponsesProvider
+from core.providers.tts.esp_media_azure_multilingual import TTSProvider as AzureTtsProvider
 from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
 from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES
 from core.providers.tools.device_audio.device_audio_handler import _valid_result
@@ -96,6 +99,38 @@ class MemoryOverlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reopened.short_memory, "")
         with open(self.path, "r", encoding="utf-8") as stream:
             self.assertNotIn("device-a", yaml.safe_load(stream))
+
+    async def test_legacy_summary_migrates_and_retains_last_twelve_complete_turns(self):
+        provider = DummyProvider(self.path, "device-a")
+        messages = []
+        for index in range(13):
+            messages.extend([
+                SimpleNamespace(role="user", content=f"user-{index}", is_temporary=False),
+                SimpleNamespace(role="assistant", content=f"assistant-{index}", is_temporary=False),
+            ])
+        await provider.save_memory(messages, "session")
+        with open(self.path, "r", encoding="utf-8") as stream:
+            record = yaml.safe_load(stream)["device-a"]
+        self.assertEqual(record["version"], 2)
+        self.assertEqual(record["summary"], "stale-summary")
+        self.assertEqual(len(record["recent_turns"]), 12)
+        self.assertEqual(record["recent_turns"][0]["user"], "user-1")
+        self.assertEqual(record["recent_turns"][-1]["assistant"], "assistant-12")
+        self.assertIn("Recent conversation", await provider.query_memory("ignored"))
+
+    async def test_recent_turns_are_utf8_safe_and_ignore_incomplete_turns(self):
+        provider = DummyProvider(self.path, "device-a")
+        messages = [
+            SimpleNamespace(role="user", content="你" * 400, is_temporary=False),
+            SimpleNamespace(role="assistant", content="ответ" * 500, is_temporary=False),
+            SimpleNamespace(role="user", content="unfinished", is_temporary=False),
+        ]
+        await provider.save_memory(messages, "session")
+        with open(self.path, "r", encoding="utf-8") as stream:
+            turns = yaml.safe_load(stream)["device-a"]["recent_turns"]
+        self.assertEqual(len(turns), 1)
+        self.assertLessEqual(len(turns[0]["user"].encode("utf-8")), 512)
+        self.assertLessEqual(len(turns[0]["assistant"].encode("utf-8")), 1536)
 
 
 class FakeLogger:
@@ -417,6 +452,136 @@ class DeviceAudioDisplayTests(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(result.action, Action.REQLLM)
         display.assert_not_awaited()
+
+
+class ResponsesProviderTests(unittest.TestCase):
+    class FakeStream:
+        def __init__(self, events):
+            self.events = events
+            self.closed = False
+
+        def __iter__(self):
+            return iter(self.events)
+
+        def close(self):
+            self.closed = True
+
+    class FakeResponses:
+        def __init__(self, stream):
+            self.stream = stream
+            self.request = None
+
+        def create(self, **request):
+            self.request = request
+            return self.stream
+
+    def _provider(self, events):
+        provider = ResponsesProvider.__new__(ResponsesProvider)
+        provider.model_name = "gpt-5.6-luna"
+        provider.reasoning_effort = "medium"
+        provider.client = SimpleNamespace(
+            responses=self.FakeResponses(self.FakeStream(events))
+        )
+        return provider
+
+    def test_streams_text_and_normalizes_function_argument_deltas(self):
+        function = SimpleNamespace(
+            type="function_call", id="item-1", call_id="call-1",
+            name="direct_answer", arguments='{"response":"Hello"}',
+        )
+        events = [
+            SimpleNamespace(type="response.output_text.delta", delta="Hi "),
+            SimpleNamespace(type="response.output_item.added", item_id="item-1", output_index=0, item=function),
+            SimpleNamespace(type="response.function_call_arguments.delta", item_id="item-1", output_index=0, delta='{"response":"Hel'),
+            SimpleNamespace(type="response.output_item.done", item_id="item-1", output_index=0, item=function),
+        ]
+        provider = self._provider(events)
+        result = list(provider.response_with_functions("session", [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "hello"},
+        ], functions=[{"type": "function", "function": {
+            "name": "direct_answer", "parameters": {"type": "object"},
+        }}]))
+        self.assertEqual(result[0][0], "Hi ")
+        calls = [call for _, call_list in result if call_list for call in call_list]
+        self.assertEqual(calls[0].function.name, "direct_answer")
+        self.assertEqual("".join(call.function.arguments for call in calls), '{"response":"Hello"}')
+        request = provider.client.responses.request
+        self.assertEqual(request["reasoning"], {"effort": "medium"})
+        self.assertEqual(request["instructions"], "policy")
+        self.assertEqual(request["tools"][0]["name"], "direct_answer")
+
+    def test_converts_stored_chat_tool_history_to_responses_items(self):
+        instructions, items = ResponsesProvider._to_responses_input([
+            {"role": "system", "content": "policy"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "call-2", "function": {"name": "search_audio", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": "call-2", "content": "matches"},
+        ])
+        self.assertEqual(instructions, "policy")
+        self.assertEqual(items[0]["type"], "function_call")
+        self.assertEqual(items[1], {
+            "type": "function_call_output", "call_id": "call-2", "output": "matches",
+        })
+
+
+class AzureTtsProviderTests(unittest.IsolatedAsyncioTestCase):
+    class FakeResponse:
+        def __init__(self, status_code=200, content=b"mp3"):
+            self.status_code = status_code
+            self.content = content
+
+    class FakeClient:
+        def __init__(self, response, captured):
+            self.response = response
+            self.captured = captured
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, endpoint, **kwargs):
+            self.captured["endpoint"] = endpoint
+            self.captured.update(kwargs)
+            return self.response
+
+    def _provider(self):
+        return AzureTtsProvider({
+            "api_key": "not-logged", "region": "westeurope", "output_dir": "tmp/",
+            "fallback_locale": "en-US",
+            "voices": {
+                "en-US": "en-US-JennyMultilingualNeural",
+                "zh-CN": "zh-CN-XiaoxiaoMultilingualNeural",
+                "ru-RU": "ru-RU-SvetlanaNeural",
+            },
+        }, True)
+
+    async def test_routes_scripts_and_escapes_ssml_without_exposing_key(self):
+        provider = self._provider()
+        self.assertEqual(provider._locale_for("hello"), "en-US")
+        self.assertEqual(provider._locale_for("你好"), "zh-CN")
+        self.assertEqual(provider._locale_for("Привет"), "ru-RU")
+        self.assertEqual(provider._locale_for("123"), "ru-RU")
+        captured = {}
+        with mock.patch("core.providers.tts.esp_media_azure_multilingual.httpx.AsyncClient",
+                        return_value=self.FakeClient(self.FakeResponse(), captured)):
+            self.assertEqual(await provider.text_to_speak("a < b & c", None), b"mp3")
+        self.assertIn(b"a &lt; b &amp; c", captured["content"])
+        self.assertEqual(captured["headers"]["X-Microsoft-OutputFormat"],
+                         "audio-24khz-48kbitrate-mono-mp3")
+        self.assertNotIn("not-logged", str(provider._ssml("text", "en-US")))
+
+    async def test_http_failure_has_no_credential_or_text(self):
+        provider = self._provider()
+        with mock.patch("core.providers.tts.esp_media_azure_multilingual.httpx.AsyncClient",
+                        return_value=self.FakeClient(self.FakeResponse(401), {})):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401") as error:
+                await provider.text_to_speak("private words", None)
+        self.assertNotIn("not-logged", str(error.exception))
+        self.assertNotIn("private words", str(error.exception))
 
 
 if __name__ == "__main__":

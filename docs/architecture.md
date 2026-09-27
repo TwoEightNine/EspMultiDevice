@@ -255,7 +255,11 @@ the next turn, while disabling it cancels Listening but lets Thinking/Speaking
 finish. Idle Ready sends a heartbeat every 60 seconds and requires pong within
 10 seconds. Recoverable reconnects retain the 2/4/8/15-second backoff, clear the
 local transcript, and show `Connection restored; captions reset` because the
-exact server Dialogue was replaced.
+exact server Dialogue was replaced. The server retains its own per-device,
+versioned memory record: a summary plus at most 12 completed user/assistant
+exchanges. It re-injects that bounded context into a later connection, while
+New conversation atomically removes both fields. This backend state is not
+encrypted at rest; it is never copied to firmware or its UI transcript.
 
 The injected AssistantBackendConfig borrows a bootstrap URL, activation URL,
 and PEM trust anchor. Production accepts HTTPS bootstrap/activation and WSS

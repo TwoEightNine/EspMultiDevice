@@ -150,23 +150,24 @@ SNI. Deleting tools/xiaozhi_local/.runtime/caddy-data rotates Caddy's private
 CA; copy the replacement root into the ignored firmware configuration and
 rebuild before the device can connect again.
 
-The Mac pipeline selects SileroVAD, OpenaiASR, OpenAILLM, EdgeTTS, nointent,
-and `mem_local_short` with OpenAILLM. The ASR snapshot is
-[gpt-4o-mini-transcribe-2025-12-15](https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe);
-the chat snapshot is
-[gpt-5.4-mini-2026-03-17](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
-The OpenAI base URLs, language-matching prompt, and supported Mandarin Edge
-voice live in the private runtime YAML.
-The API key is repeated only in the ASR and LLM sections of ignored
-.runtime/data/.config.yaml. Never put it in Compose, firmware, tracked
-examples, logs, or command arguments.
+The Mac pipeline selects SileroVAD, OpenaiASR using `gpt-transcribe`, an
+ESP Media Responses API adapter using `gpt-5.6-luna` at medium reasoning,
+Azure multilingual TTS, `function_call`, and `mem_local_short` with that same
+Luna adapter. The OpenAI base URLs, multilingual prompt, and Azure voice map
+live in the private runtime YAML. The OpenAI API key is repeated only in the
+ASR and LLM sections of ignored `.runtime/data/.config.yaml`. Azure Speech's
+key and region are also private runtime YAML values. Never put provider
+secrets in Compose, firmware, tracked examples, logs, or command arguments.
+The overlay uses the bundled OpenAI SDK and httpx; it adds no Python dependency
+or firmware protocol.
 
 The Xiaozhi service is a custom overlay built from the pinned arm64 digest and
 upstream commit already listed above. Checksum guards cover each patched
 handler/registry/memory/tool file; any upstream layout mismatch fails the Docker
 build. The overlay adds authenticated idempotent reset, per-device serialized
-summary load/save/reset, atomic temporary-file-and-rename YAML updates, and the
-custom device-audio structured tool bridge. It
+summary/exact-turn load/save/reset, atomic temporary-file-and-rename YAML
+updates, the GPT-5.6 Responses adapter, Azure multilingual TTS provider, and
+the custom device-audio structured tool bridge. It
 retains the upstream MIT notice at
 `tools/xiaozhi_local/server_overlay/XIAOZHI_MIT_LICENSE.txt` and in the image.
 

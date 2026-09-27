@@ -243,6 +243,14 @@ def main() -> None:
         overlay / "deviceAudioMessageHandler.py",
         root / "core/handle/textHandler/deviceAudioMessageHandler.py",
     )
+    shutil.copyfile(
+        overlay / "esp_media_openai_responses.py",
+        root / "core/providers/llm/esp_media_openai_responses.py",
+    )
+    shutil.copyfile(
+        overlay / "esp_media_azure_multilingual.py",
+        root / "core/providers/tts/esp_media_azure_multilingual.py",
+    )
 
 
 if __name__ == "__main__":

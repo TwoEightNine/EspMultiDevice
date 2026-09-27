@@ -3,12 +3,12 @@
 This pinned arm64 Compose stack is the production target for ESP Media.
 It builds a small checksum-guarded reset overlay on the digest-pinned Xiaozhi
 image, then runs authenticated bootstrap and voice WebSocket service behind
-Caddy-managed HTTPS/WSS. The language-matching pipeline is `SileroVAD`, `OpenaiASR`,
-`OpenAILLM`, `EdgeTTS`, `nointent`, and `mem_local_short` using `OpenAILLM`; it uses
-`zh-CN-XiaoxiaoNeural`, the Edge TTS voice supported by the local service, so
-Chinese input receives Simplified-Chinese speech. The prompt still makes replies
-match other input languages, although the fixed Mandarin voice may give non-Chinese
-speech a Mandarin accent. MQTT and public Xiaozhi fallback remain disabled.
+Caddy-managed HTTPS/WSS. The language-matching pipeline is `SileroVAD`, OpenAI
+`gpt-transcribe`, GPT-5.6 Luna through the Responses API, Azure multilingual
+TTS, `function_call`, and `mem_local_short`. Every chat, tool follow-up, and
+summary-memory request uses Luna at medium reasoning. Azure routes English,
+Simplified Chinese, and Russian segments to Jenny, Xiaoxiao, and Svetlana
+respectively. MQTT and public Xiaozhi fallback remain disabled.
 WebSocket ping handling is enabled for the firmware's 60-second heartbeat.
 The backend also uses OpenAI function calling for the firmware's custom,
 authenticated `device_tools` RPC. MCP stays disabled: the only v1 tools search
@@ -21,8 +21,10 @@ file path or URL to firmware.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
-in `.runtime/data/.config.yaml`, separately in the ASR and LLM sections. Never
-put it in Compose, firmware configuration, tracked examples, logs, or commands.
+in `.runtime/data/.config.yaml`, separately in the ASR and LLM sections. Azure
+Speech's resource key and region also belong only in that ignored YAML. Never put
+any provider secret in Compose, firmware configuration, tracked examples, logs,
+or commands.
 
 ## Configure and start
 
@@ -35,8 +37,9 @@ put it in Compose, firmware configuration, tracked examples, logs, or commands.
 2. Copy `endpoint.example.env` to `.runtime/endpoint.env` and
    `config.example.yaml` to `.runtime/data/.config.yaml`. Replace the example
    LAN host with this Mac's current `sslip.io` DNS hostname in both files. Keep
-   the advertised endpoint on WSS and enter the OpenAI key only in the two
-   private `api_key` fields. Existing installations must also change
+   the advertised endpoint on WSS, enter the OpenAI key in the ASR and LLM
+   `api_key` fields, and enter a valid Azure Speech key plus region in the TTS
+   block. Existing installations must also change
    `selected_module.Memory` from `nomem` to `mem_local_short`, select
    `Intent: function_call` with the matching `Intent.function_call` block, add the matching
    `Memory.mem_local_short` block, and enable the root-level
@@ -94,15 +97,17 @@ certificate verification or replace the DNS hostname with a bare LAN IP.
 
 ## Conversation memory and reset overlay
 
-Exact dialogue remains inside one WSS connection. On close, `mem_local_short`
-stores a summarized per-device memory in `.runtime/data/.memory.yaml`; it is
-personalization, not a transcript. New conversation sends
+Exact dialogue remains inside one WSS connection, while the backend persists
+the most recent 12 completed user/assistant exchanges plus a summarized
+per-device memory in `.runtime/data/.memory.yaml`. This local backend state is
+not encrypted at rest. New conversation sends
 `{"type":"conversation","action":"reset","request_id":N}` over the already
 authenticated WSS. The server aborts outstanding dialogue work, atomically
-deletes only that device's YAML entry, clears the provider summary and live
-Dialogue, restores the system prompt, and returns an `ok` or bounded error
-category. Duplicate requests are safe. Per-device epochs and locks prevent a
-late summary from a closing connection from resurrecting reset memory.
+deletes only that device's versioned YAML entry, clears its summary, exact
+turns, and live Dialogue, restores the system prompt, and returns an `ok` or
+bounded error category. Duplicate requests are safe. Per-device epochs and
+locks prevent a late closer from resurrecting reset memory. Legacy scalar
+summary entries migrate on their next local write.
 
 `server_overlay/Dockerfile` retains upstream commit
 `6afc54a17def47578a4b3efc4680873689d3168b` and base manifest

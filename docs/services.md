@@ -94,23 +94,28 @@ or invalid sample returns `unavailable`.
 While Ready, firmware sends an application ping every 60 seconds and requires
 a pong within 10 seconds. Any reconnect clears the screen transcript and shows
 the bounded reset notice because exact WSS dialogue context was lost; the
-backend summary may still influence future replies. A five-exchange PSRAM ring
+backend injects its persisted summary and up to 12 completed exact exchanges
+into future replies. A five-exchange PSRAM ring
 stores completed local captions (192 user bytes and 384 assistant bytes per
 exchange), appends multi-sentence TTS captions, and discards cancelled drafts.
 It remains the source of the newest live pair, but Assistant renders no
 conversation history: user text is two-line ellipsized and assistant text pages
 through three spoken lines every two seconds. The ring and Auto-listen setting
 are screen-scoped and are wiped on exit; holding the Assistant voice control
-for 800 ms enables Auto-listen, and its next tap disables it. `mem_local_short` persists summarized,
-per-device context in the backend. Confirmed New conversation aborts active
+for 800 ms enables Auto-listen, and its next tap disables it. `mem_local_short`
+persists a summary plus 12 completed exact exchanges per device in the backend.
+Confirmed New conversation aborts active
 work, sends the authenticated idempotent reset request, and clears local text
 only after an `ok` acknowledgement.
 
-The self-hosted assistant advertises `zh-CN` during bootstrap and its local
-configuration uses a language-matching prompt plus the Edge-TTS-supported
-`zh-CN-XiaoxiaoNeural` voice. Chinese speech receives Simplified-Chinese replies;
-other speech is answered in its source language, but may have a Mandarin accent
-because this backend uses one fixed voice.
+The self-hosted assistant advertises `zh-CN` during bootstrap and uses a
+language-matching prompt for English, Simplified Chinese, and Russian. OpenAI
+`gpt-transcribe` performs automatic transcription and GPT-5.6 Luna at medium
+reasoning handles all chat, tool follow-up, and summary requests. Azure Speech
+routes English to `en-US-JennyMultilingualNeural`, Simplified Chinese to
+`zh-CN-XiaoxiaoMultilingualNeural`, and Russian to `ru-RU-SvetlanaNeural`.
+The backend state is unencrypted at rest; confirmed New conversation removes
+both the summary and exact-turn memory for that device.
 Caption buffers preserve only complete UTF-8 code points and replace malformed
 input with `?` before the UI renders it.
 
