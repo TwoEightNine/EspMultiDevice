@@ -101,42 +101,42 @@ static volatile bool RUN_ASSISTANT_CONTRACT = true;
 #endif
 
 // Battery-divider midpoint. A 100 kΩ / 100 kΩ divider halves the cell voltage.
-static const int BATTERY_ADC_PIN = 3;
+static const int BATTERY_ADC_PIN = 1;
 
-// SD uses the higher allowed GPIO range so the TFT parallel bus stays on fast low GPIOs.
-static const int SD_SCK_PIN = 40;
-static const int SD_MISO_PIN = 39;
-static const int SD_MOSI_PIN = 41;
-static const int SD_CS_PIN = 42;
+// Keep the shared SD/touch SPI lines beside the TFT parallel wiring. GPIO 3 is
+// a JTAG-selection strap, so use it for MOSI where attached peripherals remain
+// inputs during reset rather than driving the strap.
+static const int SD_SCK_PIN = 18;
+static const int SD_MISO_PIN = 17;
+static const int SD_MOSI_PIN = 3;
+static const int SD_CS_PIN = 47;
 
 // XPT2046 touch shares the SD SPI clock/data lines and uses its own chip-select.
 static const int TOUCH_SCK_PIN = SD_SCK_PIN;
 static const int TOUCH_MISO_PIN = SD_MISO_PIN;
 static const int TOUCH_MOSI_PIN = SD_MOSI_PIN;
-static const int TOUCH_CS_PIN = 38;
+static const int TOUCH_CS_PIN = 21;
 static const int TOUCH_IRQ_PIN = TouchController::NoIrqPin;
 
 // Optional card-detect pin. Leave as -1 when the socket/module has no CD pin.
 static const int SD_CARD_DETECT_PIN = -1;
 
 // INMP441 I2S microphone. Power sense is optional but recommended with the physical mic switch.
-static const int MIC_BCLK_PIN = 18;
-static const int MIC_WS_PIN = 21;
-static const int MIC_DATA_PIN = 17;
-// GPIO 47 is unused by the display, shared SD/touch SPI, audio, USB, and
-// boot-memory interfaces.
-static const int MIC_POWER_SENSE_PIN = 47;
+static const int MIC_BCLK_PIN = 41;
+static const int MIC_WS_PIN = 40;
+static const int MIC_DATA_PIN = 38;
+static const int MIC_POWER_SENSE_PIN = 39;
 
 // Initial ESP32-S3-DevKitC-1 boards place their WS2812-compatible RGB LED on
-// GPIO 48. DevKitC-1 v1.1 instead uses GPIO 38, which this project reserves
-// for touch chip-select and therefore does not support as an LED GPIO.
+// GPIO 48. DevKitC-1 v1.1 instead uses GPIO 38, which this project uses for
+// microphone data and therefore does not support as an LED GPIO.
 static const int BUILTIN_RGB_LED_PIN = 48;
 
 // MAX98357A I2S speaker amplifier.
 static const int SPEAKER_BCLK_PIN = MIC_BCLK_PIN;
 static const int SPEAKER_WS_PIN = MIC_WS_PIN;
-static const int SPEAKER_DATA_PIN = 1;
-static const int SPEAKER_ENABLE_PIN = 2;
+static const int SPEAKER_DATA_PIN = 2;
+static const int SPEAKER_ENABLE_PIN = 42;
 
 DisplayController *display = nullptr;
 SdCardController *sdCard = nullptr;

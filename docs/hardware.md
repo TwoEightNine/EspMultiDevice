@@ -6,7 +6,7 @@ Use **ESP32S3 Dev Module** with 16 MiB flash, 8 MiB OPI PSRAM, a 240 MHz CPU, an
 
 The NVS partition remains at offset `0x9000` with size `0x5000`, and OTA data remains at `0xe000`. Existing Arduino Preferences/NVS values are therefore compatible with the new layout. Changing from the former 3 MB/9.9 MB FATFS layout still requires flashing the partition table; data in the old internal FATFS region is not preserved. ESP Media stores user media on SD and does not use that internal FATFS.
 
-Keep normal peripherals within GPIO 0–21 and 38–44, 47–48. On ESP32-S3 modules with octal flash/PSRAM, GPIO 26–37 are connected to the internal memory bus and are not available for external peripherals. Avoid GPIO 0, 3, 19/20, and 45/46 unless the exact board documents them as safe; they commonly affect bootstrapping, USB, or flash-voltage selection.
+Keep normal peripherals within GPIO 0–21 and 38–44, 47–48. On ESP32-S3 modules with octal flash/PSRAM, GPIO 26–37 are connected to the internal memory bus and are not available for external peripherals. Avoid GPIO 0, 19/20, and 45/46 unless the exact board documents them as safe; they commonly affect bootstrapping, USB, or flash-voltage selection. This profile deliberately uses the GPIO 3 JTAG-selection strap for SPI MOSI as documented below.
 
 ## Native USB connection
 
@@ -22,14 +22,16 @@ For the first upload, select the serial device belonging to the USB-to-UART brid
 | --- | --- | --- |
 | ILI9488 data | 4–11 | 8-bit parallel `D0` through `D7` |
 | ILI9488 control | WR 12, DC 13, RD 14, CS 15, RST 16 | Do not define `TFT_BL` for this module |
-| SD SPI | MISO 39, SCK 40, MOSI 41, CS 42 | Shared with touch clock/data |
-| XPT2046 touch | MISO 39, SCK 40, MOSI 41, CS 38 | `TP_IRQ` unconnected and polled |
-| INMP441 | DOUT 17, BCLK 18, WS 21, power sense 47 | `L/R` to GND for left channel |
-| MAX98357A | DIN 1, BCLK 18, LRC 21, enable 2 | 100k pulldown on enable recommended |
-| Battery divider | ADC 3 | 100k/100k divider and 100nF midpoint capacitor |
+| SD SPI | MISO 17, SCK 18, MOSI 3, CS 47 | Shared with touch clock/data |
+| XPT2046 touch | MISO 17, SCK 18, MOSI 3, CS 21 | `TP_IRQ` unconnected and polled |
+| INMP441 | DOUT 38, BCLK 41, WS 40, power sense 39 | `L/R` to GND for left channel |
+| MAX98357A | DIN 2, BCLK 41, LRC 40, enable 42 | 100k pulldown on enable required for boot-time muting |
+| Battery divider | ADC 1 | ADC1 input; 100k/100k divider and 100nF midpoint capacitor |
 | Built-in RGB LED | 48 | Initial ESP32-S3-DevKitC-1 only; WS2812-compatible, controlled in Settings |
 
 The TFT is preferred on GPIO 4–16 because TFT_eSPI’s fast parallel path uses low GPIOs. Do **not** connect the TFT module `SDO`/`MISO` to the SD SPI bus: many ILI9488 modules fail to release it when deselected.
+
+GPIO 1 is an ADC1 input and retains the battery divider's existing sampling and attenuation behavior. GPIO 3 controls only the JTAG signal source during reset on the supported profile; assigning it to MOSI means the SD and touch devices connected to that line are inputs and do not actively drive the strap. GPIO 39–42 are all assigned to audio peripherals, so external pad JTAG is unavailable with this wiring. The MAX98357A enable connection on GPIO 42 must retain its 100k pulldown so the amplifier remains muted before firmware configures the output.
 
 ### SD SPI rate and throughput testing
 
@@ -68,9 +70,9 @@ Supply the display and SD module according to their module documentation. A pin 
 
 ## Audio connections
 
-The INMP441 receives switched 3.3V through a physical mic-power switch; the same switched node connects to GPIO 47 for sensing. GPIO 48 drives the addressable RGB LED fitted to the initial ESP32-S3-DevKitC-1 revision. `LedSettings` sends its WS2812-compatible GRB frame through the Arduino core RMT peripheral; do not attach another peripheral to GPIO 48. If no sense wire exists, set `MIC_POWER_SENSE_PIN` to `MicController::NoPowerSensePin`.
+The INMP441 receives switched 3.3V through a physical mic-power switch; the same switched node connects to GPIO 39 for sensing. The input uses the ESP32-S3's internal pulldown and the sense signal must remain within the 3.3V GPIO range. GPIO 48 drives the addressable RGB LED fitted to the initial ESP32-S3-DevKitC-1 revision. `LedSettings` sends its WS2812-compatible GRB frame through the Arduino core RMT peripheral; do not attach another peripheral to GPIO 48. If no sense wire exists, set `MIC_POWER_SENSE_PIN` to `MicController::NoPowerSensePin`.
 
-The ESP32-S3-DevKitC-1 v1.1 moves its addressable RGB LED from GPIO 48 to GPIO 38. This project uses GPIO 38 as the XPT2046 touch chip-select, so `LedSettings` supports the initial GPIO 48 board only; v1.1 boards need a board-specific LED/touch pin remap before their onboard LED can be used. Do not connect the mic sense wire to GPIO 38.
+The ESP32-S3-DevKitC-1 v1.1 moves its addressable RGB LED from GPIO 48 to GPIO 38. This project uses GPIO 38 for microphone DOUT, so `LedSettings` supports the initial GPIO 48 board only; v1.1 boards need a board-specific LED/audio pin remap before their onboard LED can be used.
 
 Use 5V for MAX98357A `VIN` when the module and power budget allow it, otherwise 3.3V. `GAIN` uses a 100k resistor to ground for 15dB gain. The speaker output is differential: connect both terminals only to the speaker, never to ground. Do not tie `SD`/`EN` to VIN because the firmware mutes it at boot/recording.
 
