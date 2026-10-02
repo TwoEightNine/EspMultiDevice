@@ -18,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 20 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
+`Navigator` registers the 21 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -124,6 +124,12 @@ UI never reaches into a live client object.
 LRU accounting, and cache mutex. Its disposable files remain under
 `/.system/browser_session/`; the Browser lifecycle decides when to begin or
 end a session, while cache state is never duplicated in the screen.
+
+`WiFiSpeedTestScreen` owns a one-shot opposite-core worker while a test is
+active. The worker alone owns its Cloudflare TLS connection and bounded
+transfer buffer and publishes fixed copied snapshots; only the UI task draws
+or navigates. Back navigation generation-cancels the transfer and remains on
+the screen until the task, client, mutex, and buffer have been released.
 
 `BrowserLifecycleWorker` owns the Browser's one-entry lifecycle queue, worker
 task, generation invalidation, and completion signal. It invokes a narrow

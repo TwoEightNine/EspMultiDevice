@@ -1,56 +1,45 @@
 #include "SplashScreen.h"
 #include "../../app/Navigator.h"
 #include "../../services/network/WiFiController.h"
+#include "../../ui/UiKit.h"
 #include "../../ui/logo.h"
 
-#define SPLASH_DURATION_MS 3000
+namespace {
+constexpr uint32_t SplashDurationMs = 3000;
+}
 
 SplashScreen::SplashScreen(Navigator &navigator,
-                       TouchController &touch,
-                       DisplayController &display,
-                       WiFiController &wifi)
+                           TouchController &touch,
+                           DisplayController &display,
+                           WiFiController &wifi)
   : Screen(navigator, touch, display),
     _wifi(wifi) {
 }
 
 void SplashScreen::onEnter() {
-    enteredMillis = millis();
-    uint16_t startX = (_display.width() - logo_WIDTH) / 2;
-    uint16_t startY = (_display.height() - logo_HEIGHT) / 2;
-    _display.tft().pushImage(startX, startY, logo_WIDTH, logo_HEIGHT, logo);
+  _transitioned = false;
+  _display.clear(TFT_BLACK);
+  const int16_t startX = static_cast<int16_t>(
+    (static_cast<int32_t>(_display.width()) - logo_width) / 2);
+  const int16_t startY = static_cast<int16_t>(
+    (static_cast<int32_t>(_display.height()) - logo_height) / 2);
+  UiKit::drawRgba565Image(_display.tft(), startX, startY,
+                          logo_width, logo_height, logo_colors, logo_alpha,
+                          TFT_BLACK);
+
+  // Reconnect saved credentials while the splash remains visible. Avoid an
+  // unsolicited scan on devices that have not been configured yet.
+  _wifi.setEnabled(true, false);
+  _enteredMs = millis();
 }
 
 void SplashScreen::handleTouch(const TouchPoint &point) {
-
+  (void)point;
 }
 
 void SplashScreen::tick(uint32_t nowMs) {
-    // animations
-    // bool updateFrame = false;
-    // if (currentFrame == -1) {
-    //     currentFrame = 0;
-    //     updateFrame = true;
-    // }
-    // if (millis() - currentFrameStartedMillis >= 100) {
-    //     if (currentFrame == ANIMATIONS_FRAME_COUNT - 1) {
-    //         _navigator.replace(ScreenId::Home);
-    //     } else {
-    //         currentFrame++;
-    //         updateFrame = true;
-    //     }
-    // }
-    // if (updateFrame) {
-    //     _display.tft().pushImage(0, 0, TFT_ANIMATION_WIDTH, TFT_ANIMATION_HEIGHT, animations_frames[currentFrame]);
-    // }
+  if (_transitioned || nowMs - _enteredMs < SplashDurationMs) return;
 
-    // static logo
-    if (millis() - enteredMillis < SPLASH_DURATION_MS) {
-
-    } else if (enteredMillis != 0) {
-        enteredMillis = 0;
-        _navigator.replace(ScreenId::Home);
-        // Reconnect to saved credentials after Home/SD startup, without an
-        // unsolicited scan on an unconfigured device.
-        _wifi.setEnabled(true, false);
-    }
+  _transitioned = true;
+  _navigator.replace(ScreenId::Home);
 }

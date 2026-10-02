@@ -47,6 +47,12 @@ arrays with `tools/png_to_rgba565_icon.py` and draw them through
 colour; the helper alpha-blends every edge pixel without an SD card or display
 readback. Its maximum width is `UiKit::MaxRgba565IconWidth` (64 px).
 
+Wide full-colour compile-time artwork uses `UiKit::drawRgba565Image()` with the
+same generated colour and alpha arrays. The helper processes each row in
+bounded 64-pixel chunks, so assets such as the splash logo do not require a
+width-sized stack or heap allocation. As with icons, pass the actual solid
+background colour and clear or redraw that background before drawing.
+
 For a monochrome icon that needs runtime tinting, use its 8-bit alpha array
 with `UiKit::drawAlphaIcon()` and pass the desired foreground and immediate
 background colours. This retains antialiased edges without retaining a colour

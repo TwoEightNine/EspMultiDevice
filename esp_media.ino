@@ -68,6 +68,7 @@ USBMSC usbMsc;
 #include "src/services/storage/UsbDriveBoot.h"
 #include "src/services/storage/UsbMassStorageController.h"
 #include "src/features/settings/WiFiScreen.h"
+#include "src/features/settings/WiFiSpeedTestScreen.h"
 #include "src/features/workout/WorkoutScreen.h"
 #include "src/media/MediaCache.h"
 
@@ -169,6 +170,7 @@ AudioPlayerScreen *audioPlayerScreen = nullptr;
 VideoPlayerScreen *videoPlayerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
+WiFiSpeedTestScreen *wifiSpeedTestScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
 WorkoutScreen *workoutScreen = nullptr;
 UsbDriveScreen *usbDriveScreen = nullptr;
@@ -411,6 +413,8 @@ void setup() {
   videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
+  wifiSpeedTestScreen = new WiFiSpeedTestScreen(*navigator, *touch, *display,
+                                                *wifiController);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
   usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
@@ -447,6 +451,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::WiFi, *wifiScreen)) {
     Serial.println(F("Navigator failed to register Wi-Fi screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::WiFiSpeedTest, *wifiSpeedTestScreen)) {
+    Serial.println(F("Navigator failed to register Wi-Fi Speed Test screen."));
   }
   if (!navigator->registerScreen(ScreenId::TouchCalibration, *touchCalibrationScreen)) {
     Serial.println(F("Navigator failed to register Touch Calibration screen."));

@@ -37,12 +37,14 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
     if (option == 0) {
       _navigator.push(ScreenId::WiFi);
     } else if (option == 1) {
-      _navigator.push(ScreenId::AudioSettings);
+      _navigator.push(ScreenId::WiFiSpeedTest);
     } else if (option == 2) {
-      _navigator.push(ScreenId::Led);
+      _navigator.push(ScreenId::AudioSettings);
     } else if (option == 3) {
-      _navigator.push(ScreenId::BatteryInfo);
+      _navigator.push(ScreenId::Led);
     } else if (option == 4) {
+      _navigator.push(ScreenId::BatteryInfo);
+    } else if (option == 5) {
       _navigator.push(ScreenId::TouchCalibration);
     }
     return;
@@ -69,7 +71,7 @@ void SettingsScreen::drawTopBar() {
 
 void SettingsScreen::drawOptions() {
   const char *labels[OptionCount] = {
-    "Wi-Fi", "Audio", "LED", "Battery", "Touch screen", "About"
+    "Wi-Fi", "Speed test", "Audio", "LED", "Battery", "Touch screen", "About"
   };
 
   for (uint8_t i = 0; i < OptionCount; i++) {

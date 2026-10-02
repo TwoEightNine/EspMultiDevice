@@ -145,6 +145,19 @@ void drawRgba565Icon(TFT_eSPI &tft,
                      const uint8_t *alpha,
                      uint16_t backgroundColor);
 
+// Draws a flash-resident, straight-alpha RGB565 image of any uint16_t
+// dimensions over a solid immediate background. Wide rows are processed in
+// MaxRgba565IconWidth chunks so drawing remains allocation-free. Fully
+// transparent pixels are left untouched.
+void drawRgba565Image(TFT_eSPI &tft,
+                      int16_t x,
+                      int16_t y,
+                      uint16_t width,
+                      uint16_t height,
+                      const uint16_t *colors,
+                      const uint8_t *alpha,
+                      uint16_t backgroundColor);
+
 // Draws a flash-resident alpha mask with a caller-selected foreground colour.
 // Fully transparent pixels are left untouched. `alpha` contains width * height
 // 8-bit opacity entries. Icons wider than MaxRgba565IconWidth are rejected so

@@ -30,7 +30,26 @@ The boot request is consumed before transfer setup, so pressing reset or power-c
 
 ## Wi-Fi and time
 
-`WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. Before Wi-Fi's first initialization it selects Arduino-ESP32 static RX/TX buffers: this uses fixed driver memory instead of fragmenting the internal heap required for TLS. Do not change this mode after Wi-Fi has started; Arduino requires the radio to be off first. The Settings flow owns the UI; Home reflects connection state.
+`WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. Normal boot enables station mode when the splash appears and reconnects saved credentials without scanning an unconfigured device; the fixed three-second splash never waits for the connection. Before Wi-Fi's first initialization the controller selects Arduino-ESP32 static RX/TX buffers: this uses fixed driver memory instead of fragmenting the internal heap required for TLS. Do not change this mode after Wi-Fi has started; Arduino requires the radio to be off first. The Settings flow owns the UI; Home reflects connection state.
+
+`Settings → Speed test` performs an explicit, user-started internet estimate
+over the current Wi-Fi connection. It uses Cloudflare's public
+`speed.cloudflare.com/__down` and `/__up` endpoints for five HTTP
+time-to-first-byte probes followed by adaptive 256 KiB, 1 MiB, and 4 MiB
+download and upload stages. A direction stops escalating after a three-second
+stage or six seconds of completed transfers, and a complete fast run moves no
+more than 10.5 MiB of payload. Reported latency is the median HTTP TTFB;
+throughput is total completed payload bits divided by measured payload time.
+Results are screen-session-only and never touch Preferences or SD.
+
+The test reuses an 8 KiB PSRAM buffer, falls back to 1 KiB of internal RAM,
+overwrites it with zeroes before upload, and runs blocking network work on a
+screen-owned opposite-core task. Closing the screen cancels by generation and
+waits for the task and TLS client to stop.
+The Cloudflare connection uses the same compatibility-mode unverified HTTPS
+policy as Browser because it sends only synthetic bytes and no credentials or
+user data. This does not make the measurement trustworthy against an active
+network interceptor: interception can falsify the displayed result.
 
 `TimeController` begins SNTP only while Wi-Fi is connected, marks time available after a valid epoch, and reports a fixed UTC+4 local clock. Change `UtcOffsetSeconds` if the product’s local-time requirement changes.
 
