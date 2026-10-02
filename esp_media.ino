@@ -399,7 +399,8 @@ void setup() {
     Serial.println(F("Assistant worker unavailable."));
   }
 
-  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController, *timeController, *batteryController);
+  homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController,
+                              *timeController, *batteryHistory);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
@@ -423,7 +424,7 @@ void setup() {
   );
   appLauncherScreen = new AppLauncherScreen(*navigator, *touch, *display, *sdCard);
   appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
-                                    *wifiController, *batteryController);
+                                    *wifiController, *batteryHistory);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));

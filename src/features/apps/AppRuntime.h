@@ -24,7 +24,7 @@ public:
     Row rows[MaxRows];
   };
   struct Status {
-    uint8_t batteryPercent;
+    uint16_t batteryVoltageMv;
     bool wifiConnected;
     bool sdMounted;
     int64_t epochSeconds;

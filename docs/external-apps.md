@@ -15,7 +15,7 @@ SDK 1 provides:
 | `esp.ui.show(rows)` | Replace the whole page. Supply up to ten array rows, each `{kind="text", text="..."}` or `{kind="button", id="...", text="..."}`. Text is 1–96 bytes; button IDs are 1–32 bytes. Optional `rows.title` is at most 40 bytes. The host draws the app bar, 40px rows, and button cells with `UiKit`; touches on buttons call `on_action(id)`. |
 | `esp.storage.read(name)` | Return file bytes, or `nil, error`. Reads at most 16 KiB. |
 | `esp.storage.write(name, bytes)` | Return `true`, or `false, error`. Writes at most 16 KiB through a `.tmp` file and rename. |
-| `esp.device.status()` | Return `battery_percent`, `wifi_connected`, `sd_mounted`, and `epoch_seconds` (zero until time is valid). |
+| `esp.device.status()` | Return smooth `battery_voltage_mv`, `wifi_connected`, `sd_mounted`, and `epoch_seconds` (zero until time is valid). Voltage alone does not establish state of charge or charging state. |
 | `esp.time.millis()` | Return the device's monotonic millisecond counter. |
 
 Storage names are 1–64 ASCII bytes using letters, digits, `_`, `-`, or `.`; `.` and `..` are rejected. They address only `/.system/appdata/<id>/<name>`. An app cannot access package source files, other apps' data, the general SD filesystem, or `SecretStorage` through SDK 1. The host loads selected safe Lua libraries (`table`, `string`, `math`, and `utf8`); Lua file, OS, package, debug, dynamic load, and native-module interfaces are unavailable. These limits are for personal or trusted apps in the firmware process, not hostile-code isolation.

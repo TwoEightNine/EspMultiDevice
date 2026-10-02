@@ -2,8 +2,8 @@
 
 #include <Arduino.h>
 
-#include "../../core/BatteryController.h"
 #include "../../services/storage/SdCardController.h"
+#include "../../services/storage/BatteryHistoryService.h"
 #include "../../core/Screen.h"
 #include "../../services/network/TimeController.h"
 #include "../../services/network/WiFiController.h"
@@ -16,7 +16,7 @@ public:
              SdCardController &sdCard,
              WiFiController &wifi,
              TimeController &time,
-             BatteryController &battery);
+             BatteryHistoryService &batteryHistory);
 
   void onEnter() override;
   void onResult(const ScreenResult &result) override;
@@ -29,7 +29,6 @@ private:
   static const uint8_t FilesAppIndex = 2;
   static const int16_t StatusBarHeight = 24;
   static const int16_t IconDiameter = 80;
-  static const uint32_t BatteryRefreshIntervalMs = 5000UL;
 
   enum class AppAction : uint8_t {
     AiAssistant,
@@ -55,17 +54,16 @@ private:
   SdCardController &_sdCard;
   WiFiController &_wifi;
   TimeController &_time;
-  BatteryController &_battery;
+  BatteryHistoryService &_batteryHistory;
   bool _sdMounted;
   bool _wifiConnected;
   float _batteryVoltage;
-  uint8_t _batteryPercent;
   bool _lastTouchDown;
   bool _filesPressPending;
   bool _filesHoldTriggered;
   uint32_t _filesPressedMs;
   uint32_t _lastClockCheckMs;
-  uint32_t _lastBatteryCheckMs;
+  uint32_t _lastBatteryGeneration;
   String _lastClockText;
   AppTile _apps[AppCount];
 
@@ -78,13 +76,11 @@ private:
   void drawBattery();
   void drawApps();
   void drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY);
-  uint16_t batteryFillColor(uint8_t percentage) const;
-  String batteryPercentageText(uint8_t percentage) const;
   String clockText(const struct tm &localTime) const;
   String truncateLabel(const String &label, int16_t maxWidth);
   void setSdState(bool mounted);
   void setWifiState(bool connected);
-  void setBatteryReading(const BatteryReading &reading);
+  void setBatteryVoltage(float voltage);
   void refreshSdState();
   void handleSdCardEvent(SdCardEvent event);
 };

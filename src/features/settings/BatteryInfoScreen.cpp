@@ -5,11 +5,9 @@
 
 namespace {
 constexpr uint16_t VoltageColor = TFT_GREEN;
-constexpr uint16_t PercentageColor = TFT_RED;
 constexpr uint16_t AxisColor = TFT_DARKGREY;
 constexpr float GridPaddingFraction = 0.1f;
 constexpr float MinimumVoltageRange = 0.05f;
-constexpr float MinimumPercentageRange = 4.0f;
 
 struct PlotRange {
   float minimum;
@@ -56,9 +54,6 @@ float pointVoltage(const BatteryHistoryPoint &point) {
   return point.sampleCount == 0 ? 0.0f : point.smoothVoltageTotal / point.sampleCount;
 }
 
-float pointPercentage(const BatteryHistoryPoint &point) {
-  return point.sampleCount == 0 ? 0.0f : point.smoothPercentageTotal / point.sampleCount;
-}
 }  // namespace
 
 BatteryInfoScreen::BatteryInfoScreen(Navigator &navigator,
@@ -108,49 +103,33 @@ void BatteryInfoScreen::draw() {
 void BatteryInfoScreen::drawReading() {
   if (!_display.isReady()) return;
   const BatteryTelemetryReading &reading = _history.latest();
-  String rawVoltage(reading.raw.voltage, 3);
+  String rawVoltage(reading.rawVoltage, 3);
   rawVoltage += F(" V");
-  String smoothVoltage(reading.smooth.voltage, 3);
+  String smoothVoltage(reading.smoothVoltage, 3);
   smoothVoltage += F(" V");
-  String rawPercentage(reading.raw.percentage);
-  rawPercentage += '%';
-  String smoothPercentage(reading.smooth.percentage);
-  smoothPercentage += '%';
 
   TFT_eSPI &tft = _display.tft();
   const int16_t rowHeight = UiKit::ListCellHeight;
   UiKit::drawListCell(tft, _display.width(), ReadingTop, F("Raw voltage"), rawVoltage);
   UiKit::drawListCell(tft, _display.width(), ReadingTop + rowHeight,
                       F("Smooth voltage"), smoothVoltage);
-  UiKit::drawListCell(tft, _display.width(), ReadingTop + rowHeight * 2,
-                      F("Raw charge"), rawPercentage);
-  UiKit::drawListCell(tft, _display.width(), ReadingTop + rowHeight * 3,
-                      F("Smooth charge"), smoothPercentage);
 }
 
 void BatteryInfoScreen::drawPlot() {
   if (!_display.isReady()) return;
   const uint16_t count = _history.historyCount();
   const BatteryTelemetryReading &latest = _history.latest();
-  float minimumVoltage = latest.smooth.voltage;
-  float maximumVoltage = latest.smooth.voltage;
-  float minimumPercentage = latest.smooth.percentage;
-  float maximumPercentage = latest.smooth.percentage;
+  float minimumVoltage = latest.smoothVoltage;
+  float maximumVoltage = latest.smoothVoltage;
   for (uint16_t index = 0; index < count; ++index) {
     const BatteryHistoryPoint &point = _history.historyPoint(index);
     const float voltage = pointVoltage(point);
-    const float percentage = pointPercentage(point);
     if (voltage < minimumVoltage) minimumVoltage = voltage;
     if (voltage > maximumVoltage) maximumVoltage = voltage;
-    if (percentage < minimumPercentage) minimumPercentage = percentage;
-    if (percentage > maximumPercentage) maximumPercentage = percentage;
   }
 
   PlotRange voltageRange = paddedRange(minimumVoltage, maximumVoltage, MinimumVoltageRange);
-  PlotRange percentageRange = paddedRange(minimumPercentage, maximumPercentage,
-                                          MinimumPercentageRange);
   if (voltageRange.minimum < 0.0f) voltageRange.minimum = 0.0f;
-  if (percentageRange.minimum < 0.0f) percentageRange.minimum = 0.0f;
 
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(0, PlotTop - 20, _display.width(),
@@ -163,16 +142,10 @@ void BatteryInfoScreen::drawPlot() {
     tft.drawWideLine(PlotLeft, y, right, y, 1.0f, AxisColor, TFT_BLACK);
     const float voltageValue = voltageRange.minimum +
                                (voltageRange.maximum - voltageRange.minimum) * position;
-    const float percentageValue = percentageRange.minimum +
-                                  (percentageRange.maximum - percentageRange.minimum) * position;
     String voltageLabel(voltageValue, 2);
     voltageLabel += F("V");
-    String percentageLabel(percentageValue, 1);
-    percentageLabel += '%';
     UiText::draw(tft, voltageLabel, 0, y, VoltageColor, TFT_BLACK,
                  UiText::Size::Compact, ML_DATUM);
-    UiText::draw(tft, percentageLabel, _display.width(), y, PercentageColor, TFT_BLACK,
-                 UiText::Size::Compact, MR_DATUM);
   }
 
   const uint32_t durationMs = _history.historyDurationMs();
@@ -187,19 +160,16 @@ void BatteryInfoScreen::drawPlot() {
   }
 
   tft.drawWideLine(PlotLeft, PlotTop, PlotLeft, PlotBottom, 1.0f, VoltageColor, TFT_BLACK);
-  tft.drawWideLine(right, PlotTop, right, PlotBottom, 1.0f, PercentageColor, TFT_BLACK);
   tft.drawWideLine(PlotLeft, PlotBottom, right, PlotBottom, 1.0f, AxisColor, TFT_BLACK);
   UiText::draw(tft, F("boot"), PlotLeft, PlotBottom + 12, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact, TL_DATUM);
   UiText::draw(tft, F("now"), right, PlotBottom + 12, TFT_LIGHTGREY, TFT_BLACK,
                UiText::Size::Compact, TR_DATUM);
 
-  drawTrace(voltageRange.minimum, voltageRange.maximum, true);
-  drawTrace(percentageRange.minimum, percentageRange.maximum, false);
+  drawTrace(voltageRange.minimum, voltageRange.maximum);
 }
 
-void BatteryInfoScreen::drawTrace(float scaleMinimum, float scaleMaximum, bool voltage) {
-  const uint16_t color = voltage ? VoltageColor : PercentageColor;
+void BatteryInfoScreen::drawTrace(float scaleMinimum, float scaleMaximum) {
   const uint32_t durationMs = _history.historyDurationMs();
   bool hasPrevious = false;
   int16_t previousX = 0;
@@ -208,11 +178,12 @@ void BatteryInfoScreen::drawTrace(float scaleMinimum, float scaleMaximum, bool v
   int16_t latestY = 0;
   for (uint16_t index = 0; index < _history.historyCount(); ++index) {
     const BatteryHistoryPoint &point = _history.historyPoint(index);
-    const float value = voltage ? pointVoltage(point) : pointPercentage(point);
+    const float value = pointVoltage(point);
     const int16_t x = sampleX(point, durationMs);
     const int16_t y = sampleY(value, scaleMinimum, scaleMaximum);
     if (hasPrevious) {
-      _display.tft().drawWideLine(previousX, previousY, x, y, 1.5f, color, TFT_BLACK);
+      _display.tft().drawWideLine(previousX, previousY, x, y, 1.5f,
+                                  VoltageColor, TFT_BLACK);
     }
     hasPrevious = true;
     previousX = x;
@@ -220,7 +191,9 @@ void BatteryInfoScreen::drawTrace(float scaleMinimum, float scaleMaximum, bool v
     latestX = x;
     latestY = y;
   }
-  if (hasPrevious) _display.tft().fillSmoothCircle(latestX, latestY, 2, color, TFT_BLACK);
+  if (hasPrevious) {
+    _display.tft().fillSmoothCircle(latestX, latestY, 2, VoltageColor, TFT_BLACK);
+  }
 }
 
 int16_t BatteryInfoScreen::plotRight() const {

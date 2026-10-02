@@ -85,7 +85,6 @@ struct DeviceToolResult {
   bool enabled;
   bool modifiedKnown;
   uint8_t level;
-  uint8_t percentage;
   int32_t voltageMv;
   int32_t rssiDbm;
   uint32_t sizeBytes;

@@ -64,7 +64,7 @@ DESCRIPTIONS = {
     "get_wifi_signal": "Read Wi-Fi signal strength in dBm when connected.",
     "get_sd_status": "Read SD-card presence, mount state, and ownership.",
     "get_mic_status": "Read microphone readiness and power-switch state.",
-    "get_battery_status": "Read latest cell voltage in millivolts and voltage-derived percentage; do not infer charging.",
+    "get_battery_status": "Read latest smoothed cell voltage in millivolts; voltage alone does not prove state of charge or charging state.",
     "get_volume": "Read saved speaker volume from 0 to 10.",
     "get_led_status": "Read built-in LED availability, enabled state, and selected color.",
     "open_battery_details": "Open the Battery Details screen. Terminal action; do not speak confirmation.",

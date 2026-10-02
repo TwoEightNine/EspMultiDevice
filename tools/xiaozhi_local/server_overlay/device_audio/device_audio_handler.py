@@ -67,8 +67,8 @@ def _valid_result(command: str, result: Any) -> bool:
         return set(result) == {"ready", "powered", "power_sense_present"} and \
             all(type(value) is bool for value in result.values())
     if command == "get_battery_status":
-        return set(result) == {"voltage_mv", "percentage"} and \
-            _integer(result["voltage_mv"], 0, 6000) and _integer(result["percentage"], 0, 100)
+        return set(result) == {"voltage_mv"} and \
+            _integer(result["voltage_mv"], 0, 6000)
     if command in ("get_volume", "set_volume"):
         return set(result) == {"level"} and _integer(result["level"], 0, 10)
     if command in ("get_led_status", "set_led_enabled", "set_led_color"):

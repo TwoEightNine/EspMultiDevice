@@ -405,7 +405,6 @@ bool buildDeviceResult(const char *sessionId, uint32_t requestId,
         break;
       case DeviceCommandKind::GetBatteryStatus:
         cJSON_AddNumberToObject(body, "voltage_mv", result.voltageMv);
-        cJSON_AddNumberToObject(body, "percentage", result.percentage);
         break;
       case DeviceCommandKind::GetVolume:
       case DeviceCommandKind::SetVolume:

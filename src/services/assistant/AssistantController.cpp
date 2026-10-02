@@ -338,10 +338,9 @@ void AssistantController::handleUiAction(const XiaozhiSessionEvent &event) {
       result.powerSensePresent = _mic.hasPowerSense();
       break;
     case Kind::GetBatteryStatus: {
-      const BatteryReading reading = _batteryHistory.latest().raw;
-      if (isfinite(reading.voltage) && reading.voltage > 0.0f && reading.voltage <= 6.0f) {
-        result.voltageMv = static_cast<int32_t>(lroundf(reading.voltage * 1000.0f));
-        result.percentage = reading.percentage;
+      const float voltage = _batteryHistory.latest().smoothVoltage;
+      if (isfinite(voltage) && voltage > 0.0f && voltage <= 6.0f) {
+        result.voltageMv = static_cast<int32_t>(lroundf(voltage * 1000.0f));
       } else {
         result.ok = false;
         result.error = XiaozhiProtocol::DeviceToolError::Unavailable;

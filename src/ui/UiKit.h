@@ -16,6 +16,9 @@ constexpr int16_t ListActionIconSize = 16;
 constexpr int16_t ContentPadding = 16;
 constexpr int16_t ListCellHeight = 40;
 constexpr int16_t ListIconSize = 32;
+constexpr int16_t BatteryGlyphWidth = 46;
+constexpr int16_t BatteryGlyphHeight = 16;
+constexpr int16_t BatteryGlyphTextWidth = 38;
 // Compile-time full-colour icon rows are blended on the UI task. Keeping the
 // buffer bounded avoids a heap allocation for each redraw.
 constexpr uint16_t MaxRgba565IconWidth = 64;
@@ -88,6 +91,12 @@ void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                               bool listening, bool available,
                               uint16_t color, uint16_t backgroundColor);
+// Compact status-bar battery glyph. Voltage text is one decimal place with no
+// separating space (for example, 3.7V) and is centered in the 38px body.
+String batteryVoltageText(float voltage);
+uint16_t batteryVoltageColor(float voltage);
+void drawBatteryVoltage(TFT_eSPI &tft, int16_t x, int16_t y, float voltage,
+                        uint16_t backgroundColor = TFT_BLACK);
 void drawVoiceActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                          VoiceActionIcon icon, uint16_t color,
                          uint16_t backgroundColor);

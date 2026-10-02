@@ -41,6 +41,11 @@ For a cross-screen shape, add one documented `UiKit` function and use it everywh
 
 Home's Apps tile uses `UiKit::drawAppsIcon()`, a four-cell smooth icon drawn over the tile's solid circle fill.
 
+Home's status bar uses `UiKit::drawBatteryVoltage()` for the 46×16 battery
+glyph. The helper centers Compact `#.#V` text inside its 38px body and uses
+smooth rounded fills. `batteryVoltageColor()` returns green above 3.66 V, red
+below 3.33 V, and yellow at both boundary values and throughout the interval.
+
 For full-colour compile-time icons, generate straight RGB565 plus 8-bit alpha
 arrays with `tools/png_to_rgba565_icon.py` and draw them through
 `UiKit::drawRgba565Icon()`. Pass the icon's actual solid immediate background

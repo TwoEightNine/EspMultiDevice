@@ -3,7 +3,7 @@
 #include "../../core/Screen.h"
 #include "AppRuntime.h"
 
-class BatteryController;
+class BatteryHistoryService;
 class SdCardController;
 class WiFiController;
 
@@ -11,7 +11,7 @@ class AppHostScreen : public Screen {
 public:
   AppHostScreen(Navigator &navigator, TouchController &touch,
                 DisplayController &display, SdCardController &card,
-                WiFiController &wifi, BatteryController &battery);
+                WiFiController &wifi, BatteryHistoryService &batteryHistory);
   void onEnter(const ScreenData &data) override;
   void onExit() override;
   bool releaseResources() override;
@@ -22,7 +22,7 @@ private:
   static constexpr int16_t RowTop = 56;
   SdCardController &_card;
   WiFiController &_wifi;
-  BatteryController &_battery;
+  BatteryHistoryService &_batteryHistory;
   AppRuntime _runtime;
   AppRuntime::Scene _scene{};
   uint32_t _revision = 0;

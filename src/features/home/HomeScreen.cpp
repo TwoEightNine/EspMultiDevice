@@ -5,10 +5,6 @@
 #include "../../ui/UiText.h"
 #include "../../ui/icons.h"
 
-#define COLOR_BATTERY_GREEN 0x2c89
-#define COLOR_BATTERY_YELLOW 0xa54a
-#define COLOR_BATTERY_RED 0xa1e5
-
 namespace {
 const uint16_t StatusActiveColor = TFT_WHITE;
 const uint16_t StatusInactiveColor = TFT_DARKGREY;
@@ -20,22 +16,21 @@ HomeScreen::HomeScreen(Navigator &navigator,
                        SdCardController &sdCard,
                        WiFiController &wifi,
                        TimeController &time,
-                       BatteryController &battery)
+                       BatteryHistoryService &batteryHistory)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _wifi(wifi),
     _time(time),
-    _battery(battery),
+    _batteryHistory(batteryHistory),
     _sdMounted(false),
     _wifiConnected(false),
     _batteryVoltage(0.0f),
-    _batteryPercent(0),
     _lastTouchDown(false),
     _filesPressPending(false),
     _filesHoldTriggered(false),
     _filesPressedMs(0),
     _lastClockCheckMs(0xffffffffUL),
-    _lastBatteryCheckMs(0),
+    _lastBatteryGeneration(0),
     _lastClockText("") {
   _apps[0] = { "AI Assistant", AppAction::AiAssistant, 0xfe67, 0, 0, 0, 0 };
   _apps[1] = { "Browser", AppAction::Browser, 0xfb17, 0, 0, 0, 0 };
@@ -50,10 +45,8 @@ HomeScreen::HomeScreen(Navigator &navigator,
 void HomeScreen::onEnter() {
   refreshSdState();
   _wifiConnected = _wifi.isConnected();
-  const BatteryReading batteryReading = _battery.read();
-  _batteryVoltage = batteryReading.voltage;
-  _batteryPercent = batteryReading.percentage;
-  _lastBatteryCheckMs = millis();
+  _batteryVoltage = _batteryHistory.latest().smoothVoltage;
+  _lastBatteryGeneration = _batteryHistory.generation();
   _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
   _filesPressPending = false;
@@ -130,9 +123,10 @@ void HomeScreen::tick(uint32_t nowMs) {
     _lastClockCheckMs = nowMs;
   }
 
-  if (nowMs - _lastBatteryCheckMs >= BatteryRefreshIntervalMs) {
-    setBatteryReading(_battery.read());
-    _lastBatteryCheckMs = nowMs;
+  const uint32_t batteryGeneration = _batteryHistory.generation();
+  if (batteryGeneration != _lastBatteryGeneration) {
+    setBatteryVoltage(_batteryHistory.latest().smoothVoltage);
+    _lastBatteryGeneration = batteryGeneration;
   }
 
   handleSdCardEvent(_sdCard.takeEvent());
@@ -214,16 +208,9 @@ void HomeScreen::drawWifiIcon() {
 }
 
 void HomeScreen::drawBattery() {
-  TFT_eSPI &tft = _display.tft();
   const int16_t x = _display.width() - 46;
   const int16_t y = 4;
-  const uint16_t fill = batteryFillColor(_batteryPercent);
-  tft.fillRect(x, y, 46, 16, TFT_BLACK);
-  tft.drawRect(x, y, 40, 16, TFT_WHITE);
-  tft.fillRect(x + 40, y + 5, 3, 6, TFT_WHITE);
-  tft.fillRect(x + 1, y + 1, 38, 14, fill);
-  UiText::draw(tft, String(_batteryPercent), x + 20, y + 8, TFT_WHITE, fill,
-               UiText::Size::Compact, MC_DATUM);
+  UiKit::drawBatteryVoltage(_display.tft(), x, y, _batteryVoltage, TFT_BLACK);
 }
 
 void HomeScreen::drawApps() {
@@ -301,15 +288,6 @@ String HomeScreen::clockText(const struct tm &localTime) const {
   return String(buffer);
 }
 
-uint16_t HomeScreen::batteryFillColor(uint8_t percentage) const {
-  return percentage >= 66 ? COLOR_BATTERY_GREEN :
-         (percentage >= 33 ? COLOR_BATTERY_YELLOW : COLOR_BATTERY_RED);
-}
-
-String HomeScreen::batteryPercentageText(uint8_t percentage) const {
-  return String(percentage);
-}
-
 String HomeScreen::truncateLabel(const String &label, int16_t maxWidth) {
   return UiText::ellipsize(label, maxWidth, UiText::Size::Compact);
 }
@@ -330,16 +308,16 @@ void HomeScreen::setWifiState(bool connected) {
   drawWifiIcon();
 }
 
-void HomeScreen::setBatteryReading(const BatteryReading &reading) {
-  const String previousPercentageText = batteryPercentageText(_batteryPercent);
-  const uint16_t previousFill = batteryFillColor(_batteryPercent);
-  const String nextPercentageText = batteryPercentageText(reading.percentage);
-  const uint16_t nextFill = batteryFillColor(reading.percentage);
-  if (previousPercentageText == nextPercentageText && previousFill == nextFill) {
+void HomeScreen::setBatteryVoltage(float voltage) {
+  const String previousText = UiKit::batteryVoltageText(_batteryVoltage);
+  const uint16_t previousFill = UiKit::batteryVoltageColor(_batteryVoltage);
+  const String nextText = UiKit::batteryVoltageText(voltage);
+  const uint16_t nextFill = UiKit::batteryVoltageColor(voltage);
+  if (previousText == nextText && previousFill == nextFill) {
+    _batteryVoltage = voltage;
     return;
   }
-  _batteryVoltage = reading.voltage;
-  _batteryPercent = reading.percentage;
+  _batteryVoltage = voltage;
   drawBattery();
 }
 

@@ -12,7 +12,7 @@ constexpr const char *SystemDirectory = "/.system";
 constexpr const char *HistoryPath = "/.system/battery_history.bin";
 constexpr const char *HistoryTempPath = "/.system/battery_history.bin.tmp";
 constexpr uint32_t HistoryMagic = 0x42544831UL;  // BTH1
-constexpr uint16_t HistoryVersion = 1;
+constexpr uint16_t HistoryVersion = 2;
 const TickType_t StorageLockTimeout = pdMS_TO_TICKS(20);
 
 struct __attribute__((packed)) HistoryHeader {
@@ -28,10 +28,10 @@ struct __attribute__((packed)) HistoryRecord {
   uint32_t elapsedMs;
   uint16_t rawMillivolts;
   uint16_t smoothMillivolts;
-  uint8_t rawPercentage;
-  uint8_t smoothPercentage;
   uint16_t checksum;
 };
+
+static_assert(sizeof(HistoryRecord) == 10, "Battery history v2 record size changed");
 
 uint16_t millivoltsFor(float voltage) {
   if (voltage <= 0.0f) return 0;
@@ -55,11 +55,7 @@ BatteryHistoryService::BatteryHistoryService(BatteryController &battery,
                                              SdCardController &sdCard)
   : _battery(battery),
     _sdCard(sdCard),
-    _latest{{0.0f, 0}, {0.0f, 0}, 0},
-    _smoothingSamples{},
-    _smoothingStart(0),
-    _smoothingCount(0),
-    _smoothingTotal(0.0f),
+    _latest{0.0f, 0.0f, 0},
     _history{},
     _historyCount(0),
     _bootStartedMs(0),
@@ -71,9 +67,6 @@ BatteryHistoryService::BatteryHistoryService(BatteryController &battery,
 }
 
 void BatteryHistoryService::begin(uint32_t nowMs) {
-  _smoothingStart = 0;
-  _smoothingCount = 0;
-  _smoothingTotal = 0.0f;
   _historyCount = 0;
   _bootStartedMs = nowMs;
   _lastSampleMs = nowMs;
@@ -116,18 +109,8 @@ uint32_t BatteryHistoryService::generation() const {
 }
 
 void BatteryHistoryService::sample(uint32_t nowMs) {
-  const BatteryReading raw = _battery.readLive();
-  if (_smoothingCount == SmoothingWindowSamples) {
-    _smoothingTotal -= _smoothingSamples[_smoothingStart];
-  } else {
-    _smoothingCount++;
-  }
-  _smoothingSamples[_smoothingStart] = raw.voltage;
-  _smoothingTotal += raw.voltage;
-  _smoothingStart = (_smoothingStart + 1) % SmoothingWindowSamples;
-
-  const float smoothVoltage = _smoothingTotal / _smoothingCount;
-  _latest = {raw, _battery.readingForVoltage(smoothVoltage), nowMs - _bootStartedMs};
+  const BatteryReading reading = _battery.read();
+  _latest = {reading.rawVoltage, reading.smoothVoltage, nowMs - _bootStartedMs};
   appendHistory(_latest);
   _generation++;
   if (ensureLog()) {
@@ -142,8 +125,7 @@ void BatteryHistoryService::appendHistory(const BatteryTelemetryReading &reading
   point.firstElapsedMs = reading.elapsedMs;
   point.lastElapsedMs = reading.elapsedMs;
   point.sampleCount = 1;
-  point.smoothVoltageTotal = reading.smooth.voltage;
-  point.smoothPercentageTotal = reading.smooth.percentage;
+  point.smoothVoltageTotal = reading.smoothVoltage;
 }
 
 void BatteryHistoryService::compactHistory() {
@@ -161,7 +143,6 @@ void BatteryHistoryService::compactHistory() {
     merged.lastElapsedMs = second.lastElapsedMs;
     merged.sampleCount = first.sampleCount + second.sampleCount;
     merged.smoothVoltageTotal = first.smoothVoltageTotal + second.smoothVoltageTotal;
-    merged.smoothPercentageTotal = first.smoothPercentageTotal + second.smoothPercentageTotal;
   }
   _historyCount = output;
 }
@@ -247,10 +228,8 @@ bool BatteryHistoryService::appendLogRecord(const BatteryTelemetryReading &readi
 
   HistoryRecord record = {
     reading.elapsedMs,
-    millivoltsFor(reading.raw.voltage),
-    millivoltsFor(reading.smooth.voltage),
-    reading.raw.percentage,
-    reading.smooth.percentage,
+    millivoltsFor(reading.rawVoltage),
+    millivoltsFor(reading.smoothVoltage),
     0,
   };
   record.checksum = recordChecksum(record);

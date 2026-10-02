@@ -3,17 +3,17 @@
 #include <time.h>
 
 #include "../../app/Navigator.h"
-#include "../../core/BatteryController.h"
 #include "../../services/network/WiFiController.h"
+#include "../../services/storage/BatteryHistoryService.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../ui/UiKit.h"
 #include "../../ui/UiText.h"
 
 AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
                              DisplayController &display, SdCardController &card,
-                             WiFiController &wifi, BatteryController &battery)
+                             WiFiController &wifi, BatteryHistoryService &batteryHistory)
   : Screen(navigator, touch, display), _card(card), _wifi(wifi),
-    _battery(battery), _runtime(card) {}
+    _batteryHistory(batteryHistory), _runtime(card) {}
 
 void AppHostScreen::onEnter(const ScreenData &data) {
   _lastTouchDown = false;
@@ -77,7 +77,10 @@ void AppHostScreen::publishStatus() {
 
 AppRuntime::Status AppHostScreen::statusSnapshot() {
   AppRuntime::Status status{};
-  status.batteryPercent = _battery.readLive().percentage;
+  const float voltage = _batteryHistory.latest().smoothVoltage;
+  const float millivolts = voltage > 0.0f ? voltage * 1000.0f + 0.5f : 0.0f;
+  status.batteryVoltageMv = millivolts >= 65535.0f
+      ? 65535 : static_cast<uint16_t>(millivolts);
   status.wifiConnected = _wifi.isConnected();
   status.sdMounted = _card.isMounted();
   const time_t epoch = time(nullptr);

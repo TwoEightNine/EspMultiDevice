@@ -246,7 +246,7 @@ class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
             "get_wifi_signal": {"connected": False, "rssi_dbm": None},
             "get_sd_status": {"present": True, "mounted": True, "owner": "device"},
             "get_mic_status": {"ready": True, "powered": True, "power_sense_present": False},
-            "get_battery_status": {"voltage_mv": 3820, "percentage": 65},
+            "get_battery_status": {"voltage_mv": 3820},
             "get_volume": {"level": 5},
             "get_led_status": {"available": True, "enabled": False, "color": "Cyan"},
             "open_battery_details": {"accepted": True},
@@ -372,12 +372,14 @@ class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
         base = {"type": "device_result", "session_id": conn.session_id,
                 "request_id": 1, "ok": True}
         await handle_device_result(conn, {**base, "result": {
-            "voltage_mv": 3820, "percentage": 65, "path": "/private"}})
+            "voltage_mv": 3820, "path": "/private"}})
         await handle_device_result(conn, {**base, "result": {
-            "voltage_mv": True, "percentage": 65}})
-        self.assertFalse(task.done())
+            "voltage_mv": True}})
         await handle_device_result(conn, {**base, "result": {
             "voltage_mv": 3820, "percentage": 65}})
+        self.assertFalse(task.done())
+        await handle_device_result(conn, {**base, "result": {
+            "voltage_mv": 3820}})
         self.assertIn('"voltage_mv":3820', (await task).result)
 
     async def test_v2_typed_selection_and_terminal_handoff(self):

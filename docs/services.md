@@ -106,9 +106,9 @@ Capability version 2 also exposes
 `show_file_info`, `open_folder`, and `search_web`. Version-1 devices continue
 to receive only the audio tools. Status and setting actions run through the
 UI-owned Assistant controller; settings report success only after persistence.
-The battery command reports the most recent one-second raw measurement, whose
-percentage is estimated from voltage and does not indicate charging. An absent
-or invalid sample returns `unavailable`.
+The battery command reports the most recent one-second smoothed measurement as
+`voltage_mv`. Voltage alone does not establish state of charge or whether the
+cell is charging. An absent or invalid sample returns `unavailable`.
 
 While Ready, firmware sends an application ping every 60 seconds and requires
 a pong within 10 seconds. Any reconnect clears the screen transcript and shows
@@ -234,27 +234,14 @@ the probe.
 
 The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; the calibration target view is full-screen, has no app bar or footer overlay, and places its targets on the absolute display corners and edges so those coordinates can be sampled. Before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
 
-The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. Home refreshes the controller every five seconds. Each refresh takes the median of exactly three ADC samples. `BatteryController::read()` retains the lowest median voltage seen during its in-memory session, so Home's voltage and percentage never increase until the controller is recreated (normally at restart). `readLive()` returns a new divider-corrected median without changing that retained Home reading, while `readingForVoltage()` applies the same discharge curve to an already calibrated value.
+The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. `BatteryHistoryService` asks `BatteryController` for one sample at normal boot and every second afterward; Home, Battery Info, Assistant, and Lua apps consume that cached sample and do not trigger additional ADC reads. Each sample is the median of exactly three calibrated ADC readings.
 
-`BatteryHistoryService` takes one `readLive()` sample at normal boot and every second afterward. It exposes the raw median voltage/percentage plus a smooth voltage formed from the most recent 30 raw samples (using the available shorter window during the first 29 seconds); smooth percentage is calculated from that smooth voltage through the same discharge curve. Settings → Battery renders all four values to three decimal places for voltage and whole percentages for charge. Its chart plots only the smooth voltage in green against the left V axis and smooth percentage in red against the right % axis. The chart summarizes the complete current boot, maps `boot` to the left edge and `now` to the right edge, and chooses readable major time-grid intervals as the duration grows. Its five paired horizontal labels retain per-series observed minimum-to-maximum ranges with 10% padding above and below; a small fallback range keeps a flat trace drawable. The in-memory chart summary progressively merges older samples into time-weighted points, so it stays bounded while preserving the full boot span.
+`BatteryController` returns the raw median voltage and a smooth voltage formed from the most recent 30 raw samples, using the available shorter window during the first 29 seconds. The first smooth value, every decrease, and every rise of at least 0.15 V from the previously accepted smooth value are accepted. A smaller rise is held unless the newest raw sample is above 3.9 V. Held samples still enter the moving window, so sustained growth can eventually clear the 0.15 V threshold. The high-voltage exception permits charging-like growth but is not exposed as proof that the device is charging.
 
-At the first mounted-card sample of each boot, the service atomically creates `/.system/battery_history.bin` from `/.system/battery_history.bin.tmp`, replacing the previous boot's file. It then appends one fixed-size, versioned record per sample: elapsed boot milliseconds, raw/smooth millivolts, raw/smooth percentage, and a record checksum. The header identifies the format version, record size, sample interval, and boot start tick. Consumers validate the header and process only complete records, so a trailing interrupted write is ignored. Every directory, header, and append operation locks the shared SD/touch SPI bus briefly. Sampling and the chart continue in RAM when the card is unavailable; persistence resumes once it is mounted, although samples collected while no card is mounted are not backfilled into the file.
+Settings → Battery renders raw and smooth voltage to three decimal places. Its chart plots only smooth voltage in green against a single left V axis, summarizes the complete current boot, maps `boot` to the left edge and `now` to the right edge, and chooses readable major time-grid intervals as the duration grows. Five horizontal labels retain the observed minimum-to-maximum range with 10% padding; a small fallback range keeps a flat trace drawable. The bounded in-memory summary progressively merges older samples into time-weighted points while preserving the full boot span.
 
-Home displays the percentage, without a `%` suffix, inside the battery glyph. Its battery fill is green at 66% and above, yellow from 33% through 65%, and red below 33%.
+At the first mounted-card sample of each boot, the service atomically creates `/.system/battery_history.bin` from `/.system/battery_history.bin.tmp`, replacing the previous boot's file. Version 2 appends one fixed-size record per sample containing elapsed boot milliseconds, raw millivolts, smooth millivolts, and a checksum. A version-1 file is rejected and replaced rather than migrated. The header identifies the format version, record size, sample interval, and boot start tick. Consumers process only complete records, so a trailing interrupted write is ignored. Every directory, header, and append operation locks the shared SD/touch SPI bus briefly. Sampling and the chart continue in RAM when the card is unavailable; persistence resumes once mounted, although missing samples are not backfilled.
 
-| Voltage | Percentage |
-| ---: | ---: |
-| 4.000 V | 100% |
-| 3.900 V | 91% |
-| 3.810 V | 82% |
-| 3.750 V | 73% |
-| 3.7025 V | 64% |
-| 3.680 V | 55% |
-| 3.640 V | 45% |
-| 3.600 V | 36% |
-| 3.550 V | 27% |
-| 3.450 V | 18% |
-| 3.350 V | 9% |
-| 3.300 V | 0% |
+Home displays the cached smooth voltage as `#.#V` inside the battery glyph. The fill is green above 3.66 V, red below 3.33 V, and yellow otherwise, including exactly 3.33 V and 3.66 V. No battery percentage is calculated or displayed because cell voltage varies with load and charging and is not a reliable state-of-charge measurement.
 
 At boot the serial log (115200 baud) prints reset cause, CPU frequency, flash bytes, and total/free/largest PSRAM block. A reported brownout reset indicates supply sag rather than an application exception.

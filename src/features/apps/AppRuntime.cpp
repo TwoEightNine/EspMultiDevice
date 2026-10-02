@@ -302,7 +302,7 @@ int AppRuntime::luaStatus(lua_State *state) {
     xSemaphoreGive(runtime->_mutex);
   }
   lua_createtable(state, 0, 4);
-  lua_pushinteger(state, status.batteryPercent); lua_setfield(state, -2, "battery_percent");
+  lua_pushinteger(state, status.batteryVoltageMv); lua_setfield(state, -2, "battery_voltage_mv");
   lua_pushboolean(state, status.wifiConnected); lua_setfield(state, -2, "wifi_connected");
   lua_pushboolean(state, status.sdMounted); lua_setfield(state, -2, "sd_mounted");
   lua_pushinteger(state, status.epochSeconds); lua_setfield(state, -2, "epoch_seconds");

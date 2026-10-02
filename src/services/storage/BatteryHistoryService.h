@@ -7,8 +7,8 @@
 class SdCardController;
 
 struct BatteryTelemetryReading {
-  BatteryReading raw;
-  BatteryReading smooth;
+  float rawVoltage;
+  float smoothVoltage;
   uint32_t elapsedMs;
 };
 
@@ -19,7 +19,6 @@ struct BatteryHistoryPoint {
   uint32_t lastElapsedMs;
   uint32_t sampleCount;
   float smoothVoltageTotal;
-  float smoothPercentageTotal;
 };
 
 class BatteryHistoryService {
@@ -41,16 +40,11 @@ public:
   uint32_t generation() const;
 
 private:
-  static const uint8_t SmoothingWindowSamples = 30;
   static const uint32_t SampleIntervalMs = 1000UL;
 
   BatteryController &_battery;
   SdCardController &_sdCard;
   BatteryTelemetryReading _latest;
-  float _smoothingSamples[SmoothingWindowSamples];
-  uint8_t _smoothingStart;
-  uint8_t _smoothingCount;
-  float _smoothingTotal;
   BatteryHistoryPoint _history[MaxChartPoints];
   uint16_t _historyCount;
   uint32_t _bootStartedMs;

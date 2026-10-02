@@ -216,9 +216,8 @@ void testJson() {
   toolResult.command = XiaozhiProtocol::DeviceCommandKind::GetBatteryStatus;
   toolResult.ok = true;
   toolResult.voltageMv = 3850;
-  toolResult.percentage = 60;
   check(XiaozhiProtocol::buildDeviceResult("s1", 12, toolResult, json, sizeof(json)) &&
-        strstr(json, "\"voltage_mv\":3850") && strstr(json, "\"percentage\":60"),
+        strstr(json, "\"voltage_mv\":3850") && !strstr(json, "percentage"),
         "build typed battery result");
   toolResult.clear();
   toolResult.command = XiaozhiProtocol::DeviceCommandKind::SearchFiles;
@@ -515,6 +514,57 @@ void testAvatarAssets() {
                                                 path, sizeof(path)),
         "build selected avatar path");
 }
+
+bool voltageNear(float actual, float expected) {
+  return fabsf(actual - expected) < 0.0005f;
+}
+
+void testBatteryVoltageContract() {
+  BatteryVoltageSmoother smoother;
+  check(voltageNear(smoother.add(3.50f), 3.50f),
+        "battery smoother accepts first sample");
+  check(voltageNear(smoother.add(3.30f), 3.40f),
+        "battery smoother accepts any decrease");
+
+  smoother.reset();
+  smoother.add(3.30f);
+  check(voltageNear(smoother.add(3.598f), 3.30f),
+        "battery smoother holds rise below 0.15V");
+
+  smoother.reset();
+  smoother.add(3.30f);
+  check(voltageNear(smoother.add(3.60f), 3.45f),
+        "battery smoother accepts 0.15V rise");
+
+  smoother.reset();
+  smoother.add(3.85f);
+  check(voltageNear(smoother.add(3.90f), 3.85f),
+        "battery smoother does not treat exactly 3.9V as high voltage");
+
+  smoother.reset();
+  smoother.add(3.85f);
+  check(voltageNear(smoother.add(3.91f), 3.88f),
+        "battery smoother accepts small rise above 3.9V");
+
+  smoother.reset();
+  smoother.add(3.30f);
+  const float held = smoother.add(3.50f);
+  smoother.add(3.50f);
+  const float sustained = smoother.add(3.50f);
+  check(voltageNear(held, 3.30f) && sustained >= 3.45f,
+        "battery smoother retains held samples for sustained rise");
+
+  const uint16_t red = UiKit::batteryVoltageColor(3.32f);
+  const uint16_t yellowLow = UiKit::batteryVoltageColor(3.33f);
+  const uint16_t yellowHigh = UiKit::batteryVoltageColor(3.66f);
+  const uint16_t green = UiKit::batteryVoltageColor(3.67f);
+  check(red != yellowLow && yellowLow == yellowHigh && yellowHigh != green,
+        "battery voltage color boundaries");
+  check(UiKit::batteryVoltageText(3.74f) == "3.7V" &&
+        UiText::measure(UiKit::batteryVoltageText(9.9f), UiText::Size::Compact) <=
+            UiKit::BatteryGlyphTextWidth,
+        "battery voltage text format and fit");
+}
 }  // namespace
 
 void assistantContractSetup() {
@@ -529,6 +579,7 @@ void assistantContractSetup() {
   testFixedCaptionPanel();
   testAutoListenHoldGesture();
   testAvatarAssets();
+  testBatteryVoltageContract();
   Serial.print(F("ASSISTANT_CONTRACT "));
   Serial.print(failed == 0 ? F("PASS ") : F("FAIL "));
   Serial.print(passed);

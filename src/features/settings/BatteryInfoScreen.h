@@ -17,10 +17,10 @@ public:
 
 private:
   static const int16_t ReadingTop = UiKit::AppBarHeight + 16;
-  static const int16_t PlotTop = 250;
+  static const int16_t PlotTop = 170;
   static const int16_t PlotBottom = 426;
   static const int16_t PlotLeft = 44;
-  static const int16_t PlotRightGutter = 44;
+  static const int16_t PlotRightGutter = 16;
   static const uint8_t HorizontalGridSteps = 4;
 
   BatteryHistoryService &_history;
@@ -30,7 +30,7 @@ private:
   void draw();
   void drawReading();
   void drawPlot();
-  void drawTrace(float scaleMinimum, float scaleMaximum, bool voltage);
+  void drawTrace(float scaleMinimum, float scaleMaximum);
   int16_t plotRight() const;
   int16_t sampleX(const BatteryHistoryPoint &point, uint32_t durationMs) const;
   int16_t sampleY(float value, float scaleMinimum, float scaleMaximum) const;

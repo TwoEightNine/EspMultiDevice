@@ -22,6 +22,9 @@ constexpr int16_t TitleX = NavigationIconLeft + NavigationIconSize + AppBarIconP
 constexpr int16_t TitleCenterY = AppBarHeight / 2 + 1;
 constexpr int16_t ListIconX = 8;
 constexpr int16_t ListTextWithIconX = ListIconX + ListIconSize + ContentPadding;
+constexpr uint16_t BatteryGreen = 0x2c89;
+constexpr uint16_t BatteryYellow = 0xa54a;
+constexpr uint16_t BatteryRed = 0xa1e5;
 
 uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
   if (alpha == 0) return background;
@@ -207,6 +210,34 @@ void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
     tft.drawWideLine(centerX - 9, centerY - 9, centerX + 9, centerY + 10,
                      2.5f, slashColor, backgroundColor);
   }
+}
+
+String batteryVoltageText(float voltage) {
+  String text(voltage, 1);
+  text += 'V';
+  return text;
+}
+
+uint16_t batteryVoltageColor(float voltage) {
+  if (voltage > 3.66f) return BatteryGreen;
+  if (voltage < 3.33f) return BatteryRed;
+  return BatteryYellow;
+}
+
+void drawBatteryVoltage(TFT_eSPI &tft, int16_t x, int16_t y, float voltage,
+                        uint16_t backgroundColor) {
+  const uint16_t fill = batteryVoltageColor(voltage);
+  const String text = batteryVoltageText(voltage);
+
+  tft.fillRect(x, y, BatteryGlyphWidth, BatteryGlyphHeight, backgroundColor);
+  tft.fillSmoothRoundRect(x, y, 40, BatteryGlyphHeight, 3, TFT_WHITE,
+                          backgroundColor);
+  tft.fillSmoothRoundRect(x + 1, y + 1, BatteryGlyphTextWidth,
+                          BatteryGlyphHeight - 2, 2, fill, TFT_WHITE);
+  tft.fillSmoothRoundRect(x + 40, y + 5, 3, 6, 1, TFT_WHITE,
+                          backgroundColor);
+  UiText::draw(tft, text, x + 20, y + BatteryGlyphHeight / 2,
+               TFT_WHITE, fill, UiText::Size::Compact, MC_DATUM);
 }
 
 void drawVoiceActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
