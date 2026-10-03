@@ -2,7 +2,7 @@
 
 ## Required board profile
 
-Use **ESP32S3 Dev Module** with 16 MiB flash, 8 MiB OPI PSRAM, a 240 MHz CPU, and the project **Custom** partition scheme. The ILI9488 panel is used in 320×480 portrait orientation. `partitions.csv` provides two 6.25 MiB (`0x640000`) OTA application slots, 3.375 MiB (`0x360000`) SPIFFS, and a 64 KiB core-dump partition. GIF playback needs at least three 480×320 RGB565 PSRAM frames plus a 512 KiB reserve.
+Use **ESP32S3 Dev Module** with 16 MiB flash, 8 MiB OPI PSRAM, a 240 MHz CPU, and the project **Custom** partition scheme. The complete ILI9488/XPT2046 module is mounted 180 degrees from the panel's native orientation; firmware rotation 2 keeps the UX in upright 320×480 portrait orientation. `partitions.csv` provides two 6.25 MiB (`0x640000`) OTA application slots, 3.375 MiB (`0x360000`) SPIFFS, and a 64 KiB core-dump partition. GIF playback needs at least three 480×320 RGB565 PSRAM frames plus a 512 KiB reserve.
 
 The NVS partition remains at offset `0x9000` with size `0x5000`, and OTA data remains at `0xe000`. Existing Arduino Preferences/NVS values are therefore compatible with the new layout. Changing from the former 3 MB/9.9 MB FATFS layout still requires flashing the partition table; data in the old internal FATFS region is not preserved. ESP Media stores user media on SD and does not use that internal FATFS.
 

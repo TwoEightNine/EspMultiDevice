@@ -32,6 +32,33 @@ uint32_t calibrationChecksum(const CalibrationFile &file) {
   }
   return checksum;
 }
+
+void canonicalCalibrationIndex(uint8_t rotation,
+                               uint8_t logicalX,
+                               uint8_t logicalY,
+                               uint8_t &canonicalX,
+                               uint8_t &canonicalY) {
+  const uint8_t last = 3;
+  switch (rotation % 4) {
+    case 1:
+      canonicalX = logicalY;
+      canonicalY = last - logicalX;
+      break;
+    case 2:
+      canonicalX = last - logicalX;
+      canonicalY = last - logicalY;
+      break;
+    case 3:
+      canonicalX = last - logicalY;
+      canonicalY = logicalX;
+      break;
+    case 0:
+    default:
+      canonicalX = logicalX;
+      canonicalY = logicalY;
+      break;
+  }
+}
 }
 
 TouchController::TouchController(int sckPin,
@@ -46,7 +73,7 @@ TouchController::TouchController(int sckPin,
     _irqPin(irqPin),
     _screenWidth(0),
     _screenHeight(0),
-    _rotation(1),
+    _rotation(DisplayOrientation::Portrait),
     _rawMinX(200),
     _rawMaxX(3900),
     _rawMinY(200),
@@ -134,11 +161,24 @@ void TouchController::setCalibration(uint16_t rawMinX,
 }
 
 bool TouchController::setCalibration(const TouchCalibrationGrid &grid, bool persist) {
-  if (!validateGrid(grid)) {
+  TouchCalibrationGrid canonical;
+  memset(&canonical, 0, sizeof(canonical));
+  for (uint8_t logicalY = 0; logicalY < 4; logicalY++) {
+    for (uint8_t logicalX = 0; logicalX < 4; logicalX++) {
+      uint8_t canonicalX;
+      uint8_t canonicalY;
+      canonicalCalibrationIndex(_rotation, logicalX, logicalY, canonicalX, canonicalY);
+      canonical.rawX[canonicalY][canonicalX] = grid.rawX[logicalY][logicalX];
+      canonical.rawY[canonicalY][canonicalX] = grid.rawY[logicalY][logicalX];
+      canonical.rawZ[canonicalY][canonicalX] = grid.rawZ[logicalY][logicalX];
+    }
+  }
+
+  if (!validateGrid(canonical)) {
     return false;
   }
 
-  memcpy(&_calibration, &grid, sizeof(_calibration));
+  memcpy(&_calibration, &canonical, sizeof(_calibration));
   _hasMeshCalibration = true;
   return !persist || saveCalibration();
 }

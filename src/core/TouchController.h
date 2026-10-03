@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 
+#include "DisplayOrientation.h"
+
 struct TouchPoint {
   bool touched = false;
   uint16_t x = 0;
@@ -28,7 +30,9 @@ public:
                   int csPin,
                   int irqPin = NoIrqPin);
 
-  bool begin(uint16_t screenWidth, uint16_t screenHeight, uint8_t rotation = 1);
+  bool begin(uint16_t screenWidth,
+             uint16_t screenHeight,
+             uint8_t rotation = DisplayOrientation::Portrait);
   bool update();
 
   bool isTouched() const;
@@ -38,6 +42,8 @@ public:
   void setRotation(uint8_t rotation);
   void setScreenSize(uint16_t screenWidth, uint16_t screenHeight);
   void setCalibration(uint16_t rawMinX, uint16_t rawMaxX, uint16_t rawMinY, uint16_t rawMaxY);
+  // Samples are ordered in the current logical display orientation. They are
+  // normalized to the panel-native rotation-0 order before use or persistence.
   bool setCalibration(const TouchCalibrationGrid &grid, bool persist = true);
   bool loadCalibration();
   void setCalibrationCapture(bool enabled);

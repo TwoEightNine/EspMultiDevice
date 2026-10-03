@@ -3,11 +3,13 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
+#include "DisplayOrientation.h"
+
 class DisplayController {
 public:
   static const int NoBacklightPin = -1;
 
-  bool begin(uint8_t rotation = 1,
+  bool begin(uint8_t rotation = DisplayOrientation::Portrait,
              int backlightPin = NoBacklightPin,
              bool backlightActiveHigh = true);
 

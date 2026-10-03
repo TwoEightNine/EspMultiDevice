@@ -1831,7 +1831,8 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
 void VideoPlayerScreen::setOrientation(Orientation orientation, bool configureStream) {
   if (_orientation == orientation) return;
   _orientation = orientation;
-  const uint8_t rotation = landscape() ? LandscapeRotation : PortraitRotation;
+  const uint8_t rotation = landscape() ? DisplayOrientation::Landscape
+                                       : DisplayOrientation::Portrait;
   _display.setRotation(rotation);
   _touch.setScreenSize(_display.width(), _display.height());
   _touch.setRotation(rotation);

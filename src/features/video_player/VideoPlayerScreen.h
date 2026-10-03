@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "../../core/DisplayOrientation.h"
 #include "../../core/Screen.h"
 #include "../../services/audio/SpeakerController.h"
 #include "../../services/storage/SdCardController.h"
@@ -36,9 +37,6 @@ private:
   static constexpr uint16_t PlaybackControlSize = 40;
   static constexpr uint16_t PlaybackControlUnderlaySize = PlaybackControlSize + 4;
   static constexpr uint32_t AutoFullScreenDelayMs = 2000;
-  static constexpr uint8_t PortraitRotation = 0;
-  static constexpr uint8_t LandscapeRotation = 1;
-
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   SecretStorage &_secretStorage;

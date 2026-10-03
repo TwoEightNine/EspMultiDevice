@@ -34,6 +34,7 @@ USBMSC usbMsc;
 #include "src/core/BatteryController.h"
 #include "src/services/storage/BatteryHistoryService.h"
 #include "src/core/DisplayController.h"
+#include "src/core/DisplayOrientation.h"
 #include "src/services/audio/AudioSettings.h"
 #include "src/services/led/LedSettings.h"
 #include "src/services/assistant/AssistantBackendConfigLoader.h"
@@ -83,8 +84,6 @@ USBMSC usbMsc;
 #endif
 
 static const uint32_t SERIAL_BAUD = 115200;
-// ILI9488 native portrait frame: 320 x 480. (TFT_eSPI rotations are 0..3.)
-static const uint8_t DISPLAY_ROTATION = 0;
 // Development-only diagnostic. Enable for three cold boots with a target card,
 // then restore false before normal use.
 static const bool RUN_SD_THROUGHPUT_BENCHMARK = false;
@@ -286,7 +285,7 @@ void setup() {
   }
 
   display = new DisplayController();
-  display->begin(DISPLAY_ROTATION);
+  display->begin(DisplayOrientation::Portrait);
   Serial.print(F("TFT size: "));
   Serial.print(display->width());
   Serial.print(F("x"));
@@ -299,7 +298,7 @@ void setup() {
     TOUCH_CS_PIN,
     TOUCH_IRQ_PIN
   );
-  touch->begin(display->width(), display->height(), DISPLAY_ROTATION);
+  touch->begin(display->width(), display->height(), DisplayOrientation::Portrait);
   Serial.println(F("XPT2046 touch ready."));
 
   sdCard = new SdCardController(

@@ -245,7 +245,7 @@ the probe.
 
 ## Touch, battery, and startup diagnostics
 
-The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; the calibration target view is full-screen, has no app bar or footer overlay, and places its targets on the absolute display corners and edges so those coordinates can be sampled. Before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
+The XPT2046 is polled without IRQ. Calibration learns a 4×4 mesh and stores it under `/.system/touch`; the calibration target view is full-screen, has no app bar or footer overlay, and places its targets on the absolute display corners and edges so those coordinates can be sampled. Captured samples are normalized from the current logical rotation into panel-native rotation-0 order before validation and persistence. The version-1 file format remains unchanged, so calibration created before the module's 180-degree physical rotation remains valid and newly captured calibration survives portrait/landscape changes. Before calibration, the controller uses a conservative noise floor. Its press/release debounce is 25/40 ms and normal event delivery happens only on state transitions.
 
 The battery input expects a single Li-ion cell through a 100 kΩ / 100 kΩ divider. `BatteryHistoryService` asks `BatteryController` for one sample at normal boot and every second afterward; Home, Battery Info, Assistant, and Lua apps consume that cached sample and do not trigger additional ADC reads. Each sample is the median of exactly three calibrated ADC readings.
 
