@@ -125,11 +125,15 @@ LRU accounting, and cache mutex. Its disposable files remain under
 `/.system/browser_session/`; the Browser lifecycle decides when to begin or
 end a session, while cache state is never duplicated in the screen.
 
-`WiFiSpeedTestScreen` owns a one-shot opposite-core worker while a test is
-active. The worker alone owns its Cloudflare TLS connection and bounded
-transfer buffer and publishes fixed copied snapshots; only the UI task draws
-or navigates. Back navigation generation-cancels the transfer and remains on
-the screen until the task, client, mutex, and buffer have been released.
+`WiFiSpeedTestScreen` owns separate one-shot opposite-core workers for its
+Wi-Fi and SD modes. The Wi-Fi worker alone owns its Cloudflare TLS connection
+and bounded transfer buffer. The SD worker invokes the cancellable,
+verification-preserving `SdCardController` benchmark, which releases
+`SpiBusLock` between 4 KiB transactions. Both publish fixed copied snapshots;
+only the UI task draws or navigates, and mode switching is disabled while a
+worker is active. Back navigation generation-cancels the active work and
+remains on the screen until the task, mutex, TLS/buffer resources when present,
+and SD temporary-file cleanup have finished.
 
 `BrowserLifecycleWorker` owns the Browser's one-entry lifecycle queue, worker
 task, generation invalidation, and completion signal. It invokes a narrow

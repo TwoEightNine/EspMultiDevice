@@ -32,15 +32,19 @@ The boot request is consumed before transfer setup, so pressing reset or power-c
 
 `WiFiController` runs station mode and exposes `Disabled`, `Disconnected`, `Scanning`, `Connecting`, `Connected`, and `Failed`. It scans, stores/sorts up to 12 networks, connects with a 15-second timeout, disconnects, forgets credentials, and reconnects to saved ESP32 Wi-Fi credentials when allowed. Normal boot enables station mode when the splash appears and reconnects saved credentials without scanning an unconfigured device; the fixed three-second splash never waits for the connection. Before Wi-Fi's first initialization the controller selects Arduino-ESP32 static RX/TX buffers: this uses fixed driver memory instead of fragmenting the internal heap required for TLS. Do not change this mode after Wi-Fi has started; Arduino requires the radio to be off first. The Settings flow owns the UI; Home reflects connection state.
 
-`Settings → Speed test` performs an explicit, user-started internet estimate
-over the current Wi-Fi connection. It uses Cloudflare's public
-`speed.cloudflare.com/__down` and `/__up` endpoints for five HTTP
+`Settings → Speed test` offers separate Wi-Fi and SD tests and keeps both
+results only for the current screen visit. The Wi-Fi option performs an
+explicit, user-started internet estimate over the current connection. It uses
+Cloudflare's public `speed.cloudflare.com/__down` and `/__up` endpoints for five HTTP
 time-to-first-byte probes followed by adaptive 256 KiB, 1 MiB, and 4 MiB
 download and upload stages. A direction stops escalating after a three-second
 stage or six seconds of completed transfers, and a complete fast run moves no
 more than 10.5 MiB of payload. Reported latency is the median HTTP TTFB;
 throughput is total completed payload bits divided by measured payload time.
-Results are screen-session-only and never touch Preferences or SD.
+Wi-Fi results never touch Preferences or SD.
+During a run, the screen repaints only the changed signal, metric row, progress
+region, status text, or action button; progress snapshots never redraw the
+complete screen.
 
 The test reuses an 8 KiB PSRAM buffer, falls back to 1 KiB of internal RAM,
 overwrites it with zeroes before upload, and runs blocking network work on a
@@ -50,6 +54,15 @@ The Cloudflare connection uses the same compatibility-mode unverified HTTPS
 policy as Browser because it sends only synthetic bytes and no credentials or
 user data. This does not make the measurement trustworthy against an active
 network interceptor: interception can falsify the displayed result.
+
+The SD option reuses `SdCardController`'s verified throughput benchmark on a
+screen-owned opposite-core task. It writes 4 MiB of deterministic synthetic
+data to `/.system/sd_benchmark.tmp` in 4 KiB SPI-locked transactions, reads and
+verifies the same 4 MiB, reports write and read MiB/s, and removes the temporary
+file. Progress is published no more often than every 125 ms. Cancellation is
+checked between transactions, Back waits for cleanup and worker shutdown, and
+an incomplete cleanup is reported instead of hidden. No result or test payload
+is retained after the screen visit.
 
 `TimeController` begins SNTP only while Wi-Fi is connected, marks time available after a valid epoch, and reports a fixed UTC+4 local clock. Change `UtcOffsetSeconds` if the product’s local-time requirement changes.
 

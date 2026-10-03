@@ -312,8 +312,18 @@ bool SdCardController::runReadWriteTest(const char *path) {
 }
 
 bool SdCardController::runThroughputBenchmark() {
+  SdThroughputBenchmarkResult result;
+  return runThroughputBenchmark(result, nullptr);
+}
+
+bool SdCardController::runThroughputBenchmark(
+    SdThroughputBenchmarkResult &result,
+    SdThroughputBenchmarkObserver *observer) {
+  result = {};
+  result.transferBytes = BenchmarkBytes;
   if (!_mounted) {
     Serial.println(F("SD throughput benchmark skipped: card is not mounted."));
+    strlcpy(result.error, "SD card is not mounted", sizeof(result.error));
     return false;
   }
 
@@ -330,7 +340,22 @@ bool SdCardController::runThroughputBenchmark() {
   uint32_t readStartedMs = 0;
   const __FlashStringHelper *failure = nullptr;
 
+  auto cancelled = [&]() {
+    return observer && observer->sdBenchmarkCancelled();
+  };
+  auto reportProgress = [&](SdThroughputBenchmarkPhase phase,
+                            uint32_t completedBytes) {
+    if (observer) observer->sdBenchmarkProgress(phase, completedBytes,
+                                                BenchmarkBytes);
+  };
+
   Serial.println(F("SD throughput benchmark: 4 MiB, 4 KiB SPI transactions."));
+
+  if (cancelled()) {
+    result.cancelled = true;
+    failure = F("cancelled");
+    goto cleanup;
+  }
 
   if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
     failure = F("SPI bus busy while checking benchmark directory");
@@ -366,6 +391,11 @@ bool SdCardController::runThroughputBenchmark() {
 
   writeStartedMs = millis();
   for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
+    if (cancelled()) {
+      result.cancelled = true;
+      failure = F("cancelled");
+      goto cleanup;
+    }
     for (size_t i = 0; i < BenchmarkChunkBytes; i++) {
       buffer[i] = benchmarkByte(offset + i);
     }
@@ -381,6 +411,8 @@ bool SdCardController::runThroughputBenchmark() {
       failure = F("short write during benchmark");
       goto cleanup;
     }
+    reportProgress(SdThroughputBenchmarkPhase::Write,
+                   offset + BenchmarkChunkBytes);
     yield();
   }
   if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
@@ -405,6 +437,11 @@ bool SdCardController::runThroughputBenchmark() {
 
   readStartedMs = millis();
   for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
+    if (cancelled()) {
+      result.cancelled = true;
+      failure = F("cancelled");
+      goto cleanup;
+    }
     if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
       failure = F("SPI bus busy during benchmark read");
       goto cleanup;
@@ -422,6 +459,8 @@ bool SdCardController::runThroughputBenchmark() {
       }
     }
     readChecksum = updateBenchmarkChecksum(readChecksum, buffer, BenchmarkChunkBytes);
+    reportProgress(SdThroughputBenchmarkPhase::Read,
+                   offset + BenchmarkChunkBytes);
     yield();
   }
   if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
@@ -437,6 +476,7 @@ bool SdCardController::runThroughputBenchmark() {
     goto cleanup;
   }
   success = true;
+  result.verified = true;
 
 cleanup:
   if (file) {
@@ -452,6 +492,17 @@ cleanup:
     bool removedDirectory = !createdDirectory || SD.rmdir(BenchmarkDirectoryPath);
     cleanupComplete = removedFile && removedDirectory;
     SpiBusLock::unlock();
+  }
+
+  result.cleanupComplete = cleanupComplete;
+  result.writeElapsedMs = writeElapsedMs;
+  result.readElapsedMs = readElapsedMs;
+  result.success = success && cleanupComplete;
+  if (failure) {
+    String error(failure);
+    strlcpy(result.error, error.c_str(), sizeof(result.error));
+  } else if (!cleanupComplete) {
+    strlcpy(result.error, "Temporary-file cleanup failed", sizeof(result.error));
   }
 
   if (!success) {
@@ -471,7 +522,7 @@ cleanup:
   Serial.println(mebibytesPerSecond(BenchmarkBytes, readElapsedMs), 2);
   Serial.println(cleanupComplete ? F("SD throughput benchmark passed; temporary file removed.")
                                  : F("SD throughput benchmark passed, but temporary-file cleanup was incomplete."));
-  return cleanupComplete;
+  return result.success;
 }
 
 bool SdCardController::writeTextFile(const char *path, const char *content) {

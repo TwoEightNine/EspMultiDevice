@@ -15,6 +15,31 @@ enum class SdCardOwner : uint8_t {
   UsbHost
 };
 
+enum class SdThroughputBenchmarkPhase : uint8_t {
+  Write,
+  Read
+};
+
+struct SdThroughputBenchmarkResult {
+  bool success = false;
+  bool cancelled = false;
+  bool cleanupComplete = false;
+  bool verified = false;
+  uint32_t transferBytes = 0;
+  uint32_t writeElapsedMs = 0;
+  uint32_t readElapsedMs = 0;
+  char error[96] = {};
+};
+
+class SdThroughputBenchmarkObserver {
+public:
+  virtual ~SdThroughputBenchmarkObserver() = default;
+  virtual bool sdBenchmarkCancelled() const = 0;
+  virtual void sdBenchmarkProgress(SdThroughputBenchmarkPhase phase,
+                                   uint32_t completedBytes,
+                                   uint32_t totalBytes) = 0;
+};
+
 class SdCardController {
 public:
   SdCardController(int sckPin,
@@ -51,6 +76,10 @@ public:
   // Development-only diagnostic. It creates, verifies, and removes a
   // temporary file while reporting serial read/write throughput.
   bool runThroughputBenchmark();
+  // Cancellable form used by worker-backed UI. The same verified 4 MiB test
+  // and temporary-file cleanup contract applies; callbacks run on the caller.
+  bool runThroughputBenchmark(SdThroughputBenchmarkResult &result,
+                              SdThroughputBenchmarkObserver *observer);
 
 private:
   // Arduino-ESP32's SPI SD backend clamps non-UHS cards to 25 MHz. Request

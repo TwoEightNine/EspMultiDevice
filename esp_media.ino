@@ -415,7 +415,7 @@ void setup() {
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   wifiSpeedTestScreen = new WiFiSpeedTestScreen(*navigator, *touch, *display,
-                                                *wifiController);
+                                                *wifiController, *sdCard);
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
   usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
