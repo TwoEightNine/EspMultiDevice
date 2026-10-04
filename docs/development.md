@@ -153,9 +153,12 @@ rebuild before the device can connect again.
 The Mac pipeline selects SileroVAD, OpenaiASR using `gpt-transcribe`, an
 ESP Media Responses API adapter using `gpt-5.6-luna` at medium reasoning,
 Azure multilingual TTS, `function_call`, and `mem_local_short` with that same
-Luna adapter. The OpenAI base URLs, multilingual prompt, and Azure voice map
-live in the private runtime YAML. The OpenAI API key is repeated only in the
-ASR and LLM sections of ignored `.runtime/data/.config.yaml`. Azure Speech's
+Luna adapter. The OpenAI base URLs, multilingual prompt, Azure voice map, and
+dynamic TTS `language` directive live in the private runtime YAML. The
+directive must be preserved because the upstream prompt enhancer otherwise
+defaults to Chinese and overrides the multilingual prompt. The OpenAI API key
+is repeated only in the ASR and LLM sections of ignored
+`.runtime/data/.config.yaml`. Azure Speech's
 key and region are also private runtime YAML values. Never put provider
 secrets in Compose, firmware, tracked examples, logs, or command arguments.
 That YAML also pins `xiaozhi.audio_params.sample_rate` to 16 kHz: Azure's MP3

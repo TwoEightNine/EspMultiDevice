@@ -80,6 +80,11 @@ TTS:
     api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     region: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     output_dir: tmp/
+    # The upstream prompt enhancer treats this field as a mandatory output
+    # language. Keep it dynamic; omitting it silently forces Chinese.
+    language: >-
+      the language of the user's latest utterance: English for English or
+      unclear input, Russian for Russian, and Simplified Chinese for Chinese
     fallback_locale: en-GB
     output_format: audio-24khz-48kbitrate-mono-mp3
     voices:

@@ -140,10 +140,13 @@ Confirmed New conversation aborts active
 work, sends the authenticated idempotent reset request, and clears local text
 only after an `ok` acknowledgement.
 
-The self-hosted assistant advertises `zh-CN` during bootstrap and uses a
-language-matching prompt for English, Simplified Chinese, and Russian. OpenAI
-`gpt-transcribe` performs automatic transcription and GPT-5.6 Luna at medium
-reasoning handles all chat, tool follow-up, and summary requests. Azure Speech
+The self-hosted assistant advertises `zh-CN` during protocol bootstrap for
+upstream compatibility, but its TTS configuration explicitly tells the
+upstream prompt enhancer to answer in the language of the latest utterance;
+without that directive the enhancer silently forces Chinese. The assistant
+uses a language-matching prompt for English, Simplified Chinese, and Russian.
+OpenAI `gpt-transcribe` performs automatic transcription and GPT-5.6 Luna at
+medium reasoning handles all chat, tool follow-up, and summary requests. Azure Speech
 routes English to `en-GB-Ada:DragonHDLatestNeural`, Simplified Chinese to
 `zh-CN-Xiaoxiao:DragonHDFlashLatestNeural`, and Russian to
 `ru-RU-DariyaNeural`. The configured HD voices require the Speech resource to

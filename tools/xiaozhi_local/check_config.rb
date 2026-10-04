@@ -83,6 +83,11 @@ fail_check("OpenAILLM provider is incomplete") unless
     key.is_a?(String) && !key.empty? && !key.match?(/replace|placeholder|your|你的/i)
 end
 azure_tts = fetch_path(config, "TTS", "AzureMultilingualTTS")
+expected_spoken_language =
+  "the language of the user's latest utterance: English for English or " \
+  "unclear input, Russian for Russian, and Simplified Chinese for Chinese"
+fail_check("Azure TTS must follow the latest user utterance instead of defaulting to Chinese") unless
+  azure_tts.is_a?(Hash) && azure_tts["language"] == expected_spoken_language
 fail_check("Azure multilingual TTS provider is incomplete") unless
   azure_tts.is_a?(Hash) &&
   azure_tts["type"] == "esp_media_azure_multilingual" &&

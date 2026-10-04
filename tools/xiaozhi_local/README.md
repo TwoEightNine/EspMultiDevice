@@ -43,7 +43,9 @@ or commands.
    LAN host with this Mac's current `sslip.io` DNS hostname in both files. Keep
    the advertised endpoint on WSS, enter the OpenAI key in the ASR and LLM
    `api_key` fields, and enter a valid Azure Speech key plus region in the TTS
-   block. Existing installations must also change
+   block. Preserve the TTS `language` directive from the example: the upstream
+   prompt enhancer otherwise defaults it to Chinese and overrides the
+   multilingual system prompt. Existing installations must also change
    `selected_module.Memory` from `nomem` to `mem_local_short`, select
    `Intent: function_call` with the matching `Intent.function_call` block, add the matching
    `Memory.mem_local_short` block, and enable the root-level
