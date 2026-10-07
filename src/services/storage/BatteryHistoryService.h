@@ -27,10 +27,12 @@ public:
 
   BatteryHistoryService(BatteryController &battery, SdCardController &sdCard);
 
-  // Starts a new in-memory and on-card boot session and records its first
-  // live sample. Calling code must have initialized BatteryController first.
+  // Starts a new in-memory and on-card boot session and synchronously records
+  // its first live sample. Calling code must have initialized
+  // BatteryController first.
   void begin(uint32_t nowMs);
-  // Samples once per elapsed second without blocking the UI loop.
+  // Samples once per elapsed second after begin(). Calls made before begin()
+  // are ignored so startup code can defer the first ADC read.
   void update(uint32_t nowMs);
 
   const BatteryTelemetryReading &latest() const;

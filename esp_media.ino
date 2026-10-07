@@ -338,8 +338,7 @@ void setup() {
   batteryController->begin();
   Serial.println(F("Battery controller ready."));
   batteryHistory = new BatteryHistoryService(*batteryController, *sdCard);
-  batteryHistory->begin(millis());
-  Serial.println(F("Battery history ready."));
+  Serial.println(F("Battery history ready; first sample deferred until splash exit."));
 
   mic = new MicController(
     MIC_BCLK_PIN,
@@ -398,7 +397,8 @@ void setup() {
 
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController,
                               *timeController, *batteryHistory);
-  splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController);
+  splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController,
+                                  *batteryHistory);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);

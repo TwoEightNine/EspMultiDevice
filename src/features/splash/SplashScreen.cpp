@@ -1,6 +1,7 @@
 #include "SplashScreen.h"
 #include "../../app/Navigator.h"
 #include "../../services/network/WiFiController.h"
+#include "../../services/storage/BatteryHistoryService.h"
 #include "../../ui/UiKit.h"
 #include "../../ui/logo.h"
 
@@ -11,9 +12,11 @@ constexpr uint32_t SplashDurationMs = 3000;
 SplashScreen::SplashScreen(Navigator &navigator,
                            TouchController &touch,
                            DisplayController &display,
-                           WiFiController &wifi)
+                           WiFiController &wifi,
+                           BatteryHistoryService &batteryHistory)
   : Screen(navigator, touch, display),
-    _wifi(wifi) {
+    _wifi(wifi),
+    _batteryHistory(batteryHistory) {
 }
 
 void SplashScreen::onEnter() {
@@ -41,5 +44,8 @@ void SplashScreen::tick(uint32_t nowMs) {
   if (_transitioned || nowMs - _enteredMs < SplashDurationMs) return;
 
   _transitioned = true;
+  // Keep the splash visible through the first ADC read and history-log write.
+  // Home is entered and drawn only after this synchronous operation returns.
+  _batteryHistory.begin(nowMs);
   _navigator.replace(ScreenId::Home);
 }

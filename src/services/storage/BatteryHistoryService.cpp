@@ -78,10 +78,7 @@ void BatteryHistoryService::begin(uint32_t nowMs) {
 }
 
 void BatteryHistoryService::update(uint32_t nowMs) {
-  if (!_started) {
-    begin(nowMs);
-    return;
-  }
+  if (!_started) return;
   if (nowMs - _lastSampleMs < SampleIntervalMs) return;
 
   _lastSampleMs = nowMs;

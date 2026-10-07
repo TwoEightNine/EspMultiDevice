@@ -6,13 +6,15 @@
 #include "../../core/Screen.h"
 
 class WiFiController;
+class BatteryHistoryService;
 
 class SplashScreen : public Screen {
 public:
   SplashScreen(Navigator &navigator,
                TouchController &touch,
                DisplayController &display,
-               WiFiController &wifi);
+               WiFiController &wifi,
+               BatteryHistoryService &batteryHistory);
 
   void onEnter() override;
   void handleTouch(const TouchPoint &point) override;
@@ -22,4 +24,5 @@ private:
   uint32_t _enteredMs = 0;
   bool _transitioned = false;
   WiFiController &_wifi;
+  BatteryHistoryService &_batteryHistory;
 };
