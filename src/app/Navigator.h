@@ -47,6 +47,7 @@ public:
   bool replace(ScreenId id, const ScreenData &data);
   bool pop();
   bool pop(const ScreenResult &result);
+  void tick(uint32_t nowMs);
 
   Screen *activeScreen();
   ScreenId activeScreenId() const;

@@ -56,6 +56,14 @@ public:
     (void)nowMs;
   }
 
+  // Called for a screen that remains on Navigator's stack underneath the
+  // active screen. Most screens have no suspended work. A screen that owns a
+  // persistent background service may override this, but it must not draw,
+  // handle touch, consume shared one-recipient events, or navigate.
+  virtual void tickSuspended(uint32_t nowMs) {
+    (void)nowMs;
+  }
+
 protected:
   Navigator &_navigator;
   TouchController &_touch;

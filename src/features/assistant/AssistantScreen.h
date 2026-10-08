@@ -22,6 +22,7 @@ public:
   bool releaseResources() override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
+  void tickSuspended(uint32_t nowMs) override;
 
 private:
   static constexpr uint16_t ScreenBackground = TFT_BLACK;
@@ -48,7 +49,6 @@ private:
   AssistantSnapshot _snapshot;
   bool _lastTouchDown;
   bool _closePending;
-  bool _openingWiFi;
   String _pendingAudioPath;
   XiaozhiProtocol::DeviceCommandKind _pendingLaunchKind;
   String _pendingLaunchValue;
@@ -73,7 +73,8 @@ private:
   uint16_t _assistantPageStart;
 
   void enter(bool resetAvatarSelection);
-  void requestClose(bool openWiFi);
+  void requestClose();
+  bool openPendingScreen();
   void draw(bool full);
   void drawBackground();
   void restoreBackground(const Rect &rect);

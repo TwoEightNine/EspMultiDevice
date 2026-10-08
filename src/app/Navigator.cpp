@@ -122,6 +122,16 @@ bool Navigator::pop(const ScreenResult &result) {
   return true;
 }
 
+void Navigator::tick(uint32_t nowMs) {
+  if (_stackDepth == 0) return;
+  for (uint8_t index = 0; index + 1 < _stackDepth; ++index) {
+    Screen *screen = screenFor(_stack[index].id);
+    if (screen) screen->tickSuspended(nowMs);
+  }
+  Screen *screen = activeScreen();
+  if (screen) screen->tick(nowMs);
+}
+
 Screen *Navigator::activeScreen() {
   if (!hasActiveScreen()) {
     return nullptr;

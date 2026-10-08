@@ -560,9 +560,6 @@ void loop() {
   }
 
   if (navigator) {
-    Screen *screen = navigator->activeScreen();
-    if (screen) {
-      screen->tick(millis());
-    }
+    navigator->tick(millis());
   }
 }

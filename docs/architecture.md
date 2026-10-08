@@ -6,12 +6,13 @@
 
 The one-shot USB Drive flag selects an isolated alternate composition. Transfer boot constructs only UART Serial, display, touch, SD/raw-block storage, Navigator, `USBMSC`, and `UsbDriveScreen`; it does not construct HID, network, browser, cache, decoder, recording, or playback components. Normal boot disconnects the ROM USB-Serial/JTAG pad. `MacRemoteController` is constructed only in the normal composition, but reconnects the pad and starts the HID-only TinyUSB device lazily when the Mac Remote screen first opens. TinyUSB has no supported runtime stop in the pinned Arduino core, so HID remains enumerated until reset while only the Mac Remote screen can send actions. The transfer flag is cleared as it is consumed, so the next reset returns to normal composition with native USB inactive until Mac Remote is opened again.
 
-The loop forwards touch **state edges** only, updates SD hot-swap state, boot-scoped battery telemetry, Wi-Fi, and time, then calls `tick(millis())` on the active `Screen`. The state-edge rule prevents a held press that opened a screen from also activating a control in that screen.
+The loop forwards touch **state edges** only, updates SD hot-swap state, boot-scoped battery telemetry, Wi-Fi, and time, then asks `Navigator` to tick the stack. The active screen receives `tick(millis())`; covered entries receive the no-op-by-default `tickSuspended(millis())`. The state-edge rule prevents a held press that opened a screen from also activating a control in that screen.
 
 ```text
 setup: services -> Navigator -> screens -> register -> Splash
 loop:  touch edge -> active Screen::handleTouch()
-       SD update -> Battery telemetry -> Wi-Fi update -> Time update -> active Screen::tick()
+       SD update -> Battery telemetry -> Wi-Fi update -> Time update -> Navigator::tick()
+       Navigator: covered Screen::tickSuspended() -> active Screen::tick()
 ```
 
 ## Screens and navigation
@@ -31,6 +32,9 @@ All screens inherit `Screen`, which receives shared references to `Navigator`, `
 - `onResume()` runs when a stacked screen becomes active again; its default redraws through `onEnter()`.
 - `onResult(const ScreenResult&)` receives a result from `pop(result)`.
 - `handleTouch()` receives a changed `TouchPoint`; `tick()` must stay non-blocking.
+- `tickSuspended()` is only for lightweight servicing of a persistent owner
+  while its stack entry is covered. It must not draw, consume shared
+  one-recipient events, handle touch, or navigate; the default does nothing.
 
 Use `ScreenData` for image, audio, video, text-viewer, text-input, and secret-files flows. Image payloads can carry adjacent image paths for edge navigation and the full-screen state to retain during an adjacent-image replacement; image zoom never transfers. Text-viewer payloads carry the source path plus normal/secret access mode. `ScreenResult::withText()` returns keyboard text to the caller. Do not introduce direct cross-screen calls for new navigation flows.
 
@@ -186,7 +190,7 @@ page and preview HTTP transfers.
 Stage 2 registers AssistantScreen only in normal composition. The Home AI tile
 opens it; USB Drive composition never creates assistant services.
 AssistantScreen owns drawing, touch, navigation, snapshot polling, and the
-safe-close handshake. AssistantAvatar owns the lower 320×240 avatar pane,
+X-only safe-close handshake. AssistantAvatar owns the lower 320×240 avatar pane,
 including clearing it before a new asset set is available, and paints one
 prepared 320×240 RGB565 frame. AssistantAvatarLoader is a screen-scoped worker that
 decodes the five exact PNG assets from the selected `/.system/ai_avatars/<dir>/` into
@@ -221,19 +225,27 @@ the next tap disables it without applying that tap's normal action.
 
 AssistantController is the UI-facing boundary. Its commands include manual
 turn start/cancel, Auto-listen, authenticated conversation reset, retry, and
-screen activation/deactivation. Callers receive a value copy of the
+stack-entry activation/final deactivation. Covering Assistant with a screen it
+opened does not deactivate the controller: its suspended tick continues to
+drain worker events and reconcile connectivity without drawing, navigating, or
+consuming SD events. Covering the screen disarms Auto-listen so the retained
+session stays idle. Returning to Assistant reuses the authenticated WSS,
+transcript, and controller generation. Only tapping the Assistant app-bar X
+starts the safe deactivation handshake and permanently pops its stack entry.
+Callers receive a value copy of the
 mutex-protected AssistantSnapshot and copy transcript entries through the same
-mutex. While its screen is active, the controller also reconciles the physical
-microphone power-sense line into that snapshot on every UI tick; loss of power
+mutex. While its stack entry exists, the controller also reconciles the physical
+microphone power-sense line into that snapshot on every visible or suspended UI tick; loss of power
 disarms Auto-listen and generation-cancels pending or active capture without
-tearing down the authenticated session. The screen-scoped PSRAM ring retains
+tearing down the authenticated session. The stack-scoped PSRAM ring retains
 five completed exchanges plus one draft: user text is UTF-8-safe at 192 bytes
 and assistant text at 384 bytes.
 Completion of a sixth exchange evicts only the oldest; cancellation discards
 the draft. Snapshots and events never contain credentials, Authorization
 headers, complete WSS URLs, device/session IDs, or raw JSON.
 
-XiaozhiSession is created only while the Assistant screen is active; it owns
+XiaozhiSession is created only while the Assistant stack entry exists, whether
+visible or covered by a screen that it opened; it owns
 the opposite-core 48 KiB worker with an internal-RAM stack (required while network code disables the flash cache), bootstrap lifecycle, verified WebSocket,
 protocol and codec adapters, sensitive buffers, and every microphone/speaker
 operation. Its command/event queues hold 4/8 records. Their payload storage,
@@ -313,17 +325,20 @@ file searches additionally expose exact user-facing SD-relative paths while
 never accepting a path back as authority. Selections expire after 120 seconds
 and are revalidated before play.
 An accepted play request is first returned to the backend, then published as a
-generation-tagged `LaunchAudio` event. `AssistantScreen` deactivates the
-session before pushing `AudioPlayer` with the retained local path, preventing
-assistant and player I2S overlap.
+generation-tagged `LaunchAudio` event. `AssistantScreen` retains the launch
+until the terminal turn reaches Ready, which proves both assistant I2S paths
+are stopped, then pushes `AudioPlayer` with the retained local path. The
+authenticated session remains idle underneath the player and is reused when
+the player closes.
 
 Version-2 device tools reuse the same bounded scanner for images, videos, and
 ordinary files/folders; every search invalidates the preceding selection set.
 The worker forwards status and persisted-setting requests through a correlated
 UI action handled by `AssistantController`. Accepted media, folder, Battery
 Details, and web-search launches publish generation-tagged events only after
-their device result was sent; `AssistantScreen` safely deactivates the session
-and pushes the selected screen with a `Navigator` payload. Files accepts a
+their device result was sent; `AssistantScreen` waits for the terminal turn to
+reach Ready and pushes the selected screen with a `Navigator` payload without
+deactivating the session. Files accepts a
 normal-folder payload, while Browser accepts only a search-query payload and
 builds its fixed provider URL internally. Neither worker nor backend receives
 navigation authority.

@@ -92,8 +92,11 @@ not depend on `Navigator`, a screen, or drawing code.
 
 If a command changes screens or starts another audio owner, publish a
 generation-tagged `XiaozhiSessionEvent`. `AssistantController` consumes that
-event and `AssistantScreen` performs the safe deactivation and Navigator push.
-No worker, backend message handler, or service may navigate directly.
+event and `AssistantScreen` waits for the terminal turn to reach Ready before
+performing the Navigator push. This Ready barrier ensures assistant I2S is
+stopped; the authenticated session remains idle under the destination and is
+closed only by the Assistant app-bar X. No worker, backend message handler, or
+service may navigate directly.
 Status and persisted-setting requests use a separate generation-tagged UI
 request and correlated reply, so NVS, LED hardware, and UI-owned telemetry
 are read or changed on the UI task before a device result is sent.

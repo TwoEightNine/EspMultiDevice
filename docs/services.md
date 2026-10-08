@@ -82,12 +82,16 @@ Recording and speaker playback never run concurrently because they share I2S clo
 
 ### Production assistant
 
-The assistant exists only while its screen is active. The lightweight
-controller is registered at boot, but it creates the worker/session only on
-screen entry and releases its WebSocket/codec buffers after safe screen exit.
+The assistant exists while its screen entry remains on the navigation stack.
+The lightweight controller is registered at boot, but it creates the
+worker/session only on fresh screen entry. Screens opened by Assistant cover
+that entry without ending the authenticated session; a suspended UI tick keeps
+the controller current while the worker maintains the idle WSS. Only the
+Assistant app-bar X begins safe session exit and releases the WebSocket/codec
+buffers.
 Its controller publishes fixed-size immutable snapshots; the session worker alone performs
 bootstrap, activation polling, WebSocket I/O, Opus conversion, microphone
-capture, and speaker playback. Closing the screen waits for a worker
+capture, and speaker playback. Closing with X waits for a worker
 acknowledgement after capture/playback are stopped, WSS and codecs are closed,
 and credentials are wiped. Normal answer completion stops only the turn's I2S
 paths and leaves the authenticated WSS and codecs alive for follow-up turns.
@@ -98,8 +102,8 @@ OpusCodec binding; the decoder accepts only 16 or 24 kHz mono output. The
 speaker starts only after microphone shutdown. Normal TTS completion drains
 the bounded downlink ring and I2S DMA before mute/stop; cancellation discards
 queued audio immediately. The persisted global speaker volume remains
-authoritative. While the Assistant screen is active, its controller samples the
-optional microphone power-sense line on every UI tick. Turning the switch on
+authoritative. While the Assistant stack entry exists, its controller samples
+the optional microphone power-sense line on every visible or suspended UI tick. Turning the switch on
 immediately restores the Ready microphone action without restarting; turning it
 off updates the action, disarms Auto-listen, and safely cancels a pending or
 active listening turn. Thinking and playback may finish because they no longer
@@ -148,8 +152,10 @@ stores completed local captions (192 user bytes and 384 assistant bytes per
 exchange), appends multi-sentence TTS captions, and discards cancelled drafts.
 It remains the source of the newest live pair, but Assistant renders no
 conversation history: user text is two-line ellipsized and assistant text pages
-through three spoken lines every two seconds. The ring and Auto-listen setting
-are screen-scoped and are wiped on exit; holding the Assistant voice control
+through three spoken lines every two seconds. The caption ring belongs to the
+Assistant stack entry and survives screens opened by Assistant; it is wiped
+only after X-close teardown. Covering the screen disarms Auto-listen so the
+retained session stays idle. Holding the Assistant voice control
 for 800 ms enables Auto-listen, and its next tap disables it. `mem_local_short`
 persists a summary plus 12 completed exact exchanges per device in the backend.
 Confirmed New conversation aborts active
@@ -194,9 +200,9 @@ For "play any song", the backend searches with `*`; the device returns up to
 five files in deterministic path order, and the backend plays the first one.
 
 `play_audio` accepts only an unexpired selection ID from that session's latest
-search. It rechecks the mounted source before returning acceptance, after which
-the device ends the assistant session and opens the existing auto-playing Audio
-Player without TTS confirmation. The bounded selection set expires after 120
+search. It rechecks the mounted source before returning acceptance, waits for
+the terminal turn to reach Ready, and opens the existing auto-playing Audio
+Player without TTS confirmation or ending the assistant session. The bounded selection set expires after 120
 seconds and is erased on session close or reconnect.
 
 The SD scanner uses each directory entry's absolute VFS path for recursive
@@ -216,8 +222,10 @@ Page order is the SD filesystem's iterator order rather than an alphabetical
 sort.
 Listings preserve the same hidden/system/cache/secret filter and never read
 file contents. `show_file_info` returns name/type/size/modified time for a
-selected file but never contents or path. Image, video, and folder launches
-deactivate Assistant before entering their existing screens. `search_web`
+selected file but never contents or path. Audio, image, video, folder, Battery
+Details, and web launches wait for the terminal assistant turn to return to
+Ready, then enter their existing screens while preserving the idle
+authenticated session underneath. `search_web`
 passes search words, never a URL, to the Browser's fixed DuckDuckGo Lite
 entry; it is terminal and omitted from browser recents. The recorder writes
 one `/voice_last.wav`, which remains available through `search_audio`.

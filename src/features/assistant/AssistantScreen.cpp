@@ -28,7 +28,7 @@ AssistantScreen::AssistantScreen(Navigator &navigator, TouchController &touch,
     : Screen(navigator, touch, display), _controller(controller), _sdCard(sdCard),
       _avatar(), _avatarLoader(sdCard), _voiceGesture(), _voicePulseVisible(false),
       _snapshot{}, _lastTouchDown(false),
-      _closePending(false), _openingWiFi(false), _lastCloseRequestMs(0),
+      _closePending(false), _lastCloseRequestMs(0),
       _pendingAudioPath(),
       _pendingLaunchKind(XiaozhiProtocol::DeviceCommandKind::None), _pendingLaunchValue(),
       _lastAvatarRevision(0), _lastBackgroundRevision(0),
@@ -58,7 +58,6 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
   _voiceGesture.reset();
   _voicePulseVisible = false;
   _closePending = false;
-  _openingWiFi = false;
   _pendingAudioPath = "";
   _pendingLaunchKind = XiaozhiProtocol::DeviceCommandKind::None;
   _pendingLaunchValue = "";
@@ -83,7 +82,14 @@ void AssistantScreen::enter(bool resetAvatarSelection) {
 }
 
 void AssistantScreen::onExit() {
-  if (_controller.snapshot().sessionActive) _controller.deactivate();
+  // A covered Assistant keeps its authenticated connection, but it must not
+  // arm another microphone turn while another screen owns the UI.
+  _controller.setAutoListen(false);
+  _lastTouchDown = false;
+  _voiceGesture.reset();
+  _voicePulseVisible = false;
+  _menu = Menu::Closed;
+  _confirmNewConversation = false;
 }
 
 bool AssistantScreen::releaseResources() {
@@ -91,7 +97,6 @@ bool AssistantScreen::releaseResources() {
   const AssistantSnapshot current = _controller.snapshot();
   if (current.sessionActive) {
     _closePending = true;
-    _openingWiFi = false;
     _lastCloseRequestMs = millis();
     _controller.deactivate();
   }
@@ -147,7 +152,7 @@ void AssistantScreen::handleTouch(const TouchPoint &point) {
     return;
   }
   if (UiKit::navigationIconContains(point.x, point.y)) {
-    requestClose(false);
+    requestClose();
     return;
   }
   if (UiKit::appBarActionContains(point.x, point.y, _display.width())) {
@@ -170,7 +175,8 @@ void AssistantScreen::handleTouch(const TouchPoint &point) {
   }
   if (_snapshot.phase == AssistantPhase::Ready) _controller.startTurn();
   else if (active()) _controller.cancelTurn();
-  else if (_snapshot.phase == AssistantPhase::NeedsWiFi) requestClose(true);
+  else if (_snapshot.phase == AssistantPhase::NeedsWiFi)
+    _navigator.push(ScreenId::WiFi);
   else if (_snapshot.phase == AssistantPhase::Error && _snapshot.retryable)
     _controller.retry();
 }
@@ -182,23 +188,17 @@ void AssistantScreen::tick(uint32_t nowMs) {
   String requestedAudioPath;
   if (!_closePending && _controller.takeAudioLaunch(requestedAudioPath)) {
     _pendingAudioPath = requestedAudioPath;
-    _closePending = true;
-    _openingWiFi = false;
-    _lastCloseRequestMs = nowMs;
-    _controller.deactivate();
-    next = _controller.snapshot();
   }
   XiaozhiProtocol::DeviceCommandKind requestedKind = XiaozhiProtocol::DeviceCommandKind::None;
   String requestedValue;
   if (!_closePending && _controller.takeDeviceLaunch(requestedKind, requestedValue)) {
     _pendingLaunchKind = requestedKind;
     _pendingLaunchValue = requestedValue;
-    _closePending = true;
-    _openingWiFi = false;
-    _lastCloseRequestMs = nowMs;
-    _controller.deactivate();
-    next = _controller.snapshot();
   }
+  // The terminal tool result is published while the assistant turn is still
+  // Thinking. Wait for Ready so XiaozhiSession has stopped both I2S paths;
+  // the destination screen may then claim audio without a teardown race.
+  if (!_closePending && next.phase == AssistantPhase::Ready && openPendingScreen()) return;
   bool pulseChanged = false;
   const TouchPoint heldPoint = _touch.point();
   if (_voiceGesture.tick(nowMs, _touch.isTouched() &&
@@ -218,20 +218,7 @@ void AssistantScreen::tick(uint32_t nowMs) {
     _lastCloseRequestMs = nowMs;
   }
   if (_closePending && !next.sessionActive) {
-    if (_pendingAudioPath.length())
-      _navigator.push(ScreenId::AudioPlayer, ScreenData::audioPath(_pendingAudioPath));
-    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenBatteryDetails)
-      _navigator.push(ScreenId::BatteryInfo);
-    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenImage)
-      _navigator.push(ScreenId::ImageViewer, ScreenData::imagePath(_pendingLaunchValue));
-    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::PlayVideo)
-      _navigator.push(ScreenId::VideoPlayer, ScreenData::videoPath(_pendingLaunchValue));
-    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::OpenFolder)
-      _navigator.push(ScreenId::Files, ScreenData::normalFolder(_pendingLaunchValue));
-    else if (_pendingLaunchKind == XiaozhiProtocol::DeviceCommandKind::SearchWeb)
-      _navigator.push(ScreenId::Browser, ScreenData::webSearchQuery(_pendingLaunchValue));
-    else if (_openingWiFi) _navigator.push(ScreenId::WiFi);
-    else _navigator.pop();
+    _navigator.pop();
     return;
   }
 
@@ -280,13 +267,55 @@ void AssistantScreen::tick(uint32_t nowMs) {
   _lastAvatarCatalogRevision = _avatarLoader.catalogRevision();
 }
 
-void AssistantScreen::requestClose(bool openWiFi) {
+void AssistantScreen::tickSuspended(uint32_t nowMs) {
+  _controller.tick(nowMs);
+}
+
+void AssistantScreen::requestClose() {
   _closePending = true;
-  _openingWiFi = openWiFi;
   _lastCloseRequestMs = millis();
   if (_snapshot.sessionActive) _controller.deactivate();
-  else if (openWiFi) _navigator.push(ScreenId::WiFi);
   else _navigator.pop();
+}
+
+bool AssistantScreen::openPendingScreen() {
+  bool opened = false;
+  if (_pendingAudioPath.length()) {
+    opened = _navigator.push(ScreenId::AudioPlayer,
+                             ScreenData::audioPath(_pendingAudioPath));
+    if (opened) _pendingAudioPath = "";
+    return opened;
+  }
+
+  using Kind = XiaozhiProtocol::DeviceCommandKind;
+  switch (_pendingLaunchKind) {
+    case Kind::OpenBatteryDetails:
+      opened = _navigator.push(ScreenId::BatteryInfo);
+      break;
+    case Kind::OpenImage:
+      opened = _navigator.push(ScreenId::ImageViewer,
+                               ScreenData::imagePath(_pendingLaunchValue));
+      break;
+    case Kind::PlayVideo:
+      opened = _navigator.push(ScreenId::VideoPlayer,
+                               ScreenData::videoPath(_pendingLaunchValue));
+      break;
+    case Kind::OpenFolder:
+      opened = _navigator.push(ScreenId::Files,
+                               ScreenData::normalFolder(_pendingLaunchValue));
+      break;
+    case Kind::SearchWeb:
+      opened = _navigator.push(ScreenId::Browser,
+                               ScreenData::webSearchQuery(_pendingLaunchValue));
+      break;
+    default:
+      return false;
+  }
+  if (opened) {
+    _pendingLaunchKind = Kind::None;
+    _pendingLaunchValue = "";
+  }
+  return opened;
 }
 
 void AssistantScreen::draw(bool full) {
