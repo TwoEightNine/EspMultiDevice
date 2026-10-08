@@ -55,6 +55,20 @@ enum class VoiceActionIcon : uint8_t {
   Unavailable
 };
 
+// Fixed glyphs used by the Mac Remote action grid. The enum order matches the
+// screen's row-major 3x3 layout.
+enum class RemoteActionIcon : uint8_t {
+  YouTube,
+  Screenshot,
+  Lock,
+  Previous,
+  PlayPause,
+  Next,
+  Mute,
+  VolumeDown,
+  VolumeUp
+};
+
 bool navigationIconContains(int16_t x, int16_t y);
 // All app-bar trailing actions occupy the complete 48px cell.
 bool appBarActionContains(int16_t x, int16_t y, int16_t displayWidth);
@@ -119,6 +133,11 @@ void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
 void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
+void drawMacRemoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       uint16_t color, uint16_t backgroundColor);
+void drawRemoteActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                          RemoteActionIcon icon, uint16_t color,
+                          uint16_t backgroundColor);
 // Shared black popup-menu chrome. Rows use the standard 40px list-cell
 // height and may show their selected state without requiring a separate icon.
 void drawPopupMenuFrame(TFT_eSPI &tft, int16_t x, int16_t y,

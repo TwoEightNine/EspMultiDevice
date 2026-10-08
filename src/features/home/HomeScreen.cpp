@@ -40,6 +40,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
   _apps[5] = { "USB Drive", AppAction::UsbDrive, 0x0799, 0, 0, 0, 0 };
   _apps[6] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
   _apps[7] = { "Apps", AppAction::Apps, 0x6318, 0, 0, 0, 0 };
+  _apps[8] = { "Mac Remote", AppAction::MacRemote, 0x051d, 0, 0, 0, 0 };
 }
 
 void HomeScreen::onEnter() {
@@ -95,6 +96,8 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::Workout);
     } else if (app.action == AppAction::Apps) {
       _navigator.push(ScreenId::Apps);
+    } else if (app.action == AppAction::MacRemote) {
+      _navigator.push(ScreenId::MacRemote);
     }
     return;
   }
@@ -232,6 +235,11 @@ void HomeScreen::drawApps() {
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
   if (app.action == AppAction::Apps) {
     UiKit::drawAppsIcon(_display.tft(), centerX, centerY, TFT_WHITE, app.circleColor);
+    return;
+  }
+  if (app.action == AppAction::MacRemote) {
+    UiKit::drawMacRemoteIcon(_display.tft(), centerX, centerY, TFT_WHITE,
+                             app.circleColor);
     return;
   }
   const uint16_t *colors = nullptr;

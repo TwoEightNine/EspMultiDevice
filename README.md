@@ -6,6 +6,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 
 - SD-card browser with folders, pagination, rename/delete actions, thumbnails, and optional PIN-offset protected storage.
 - Manual USB Drive mode exposes the complete SD card as writable USB mass storage for macOS file transfer, with isolated transfer boot and safe-eject restart.
+- A Mac Remote screen exposes standard USB HID keyboard and media controls for YouTube, screenshots, screen lock, playback, mute, and volume without a companion Mac application or configured macOS Shortcut.
 - Image viewer for BMP, PNG, baseline JPEG, GIF, and WebP, including animated GIF/WebP playback backed by SD caches and PSRAM.
 - WAV/MP3 playback, 16 kHz mono WAV recording, configurable persisted volume, and built-in RGB LED settings.
 - Direct MP4/3GP video streaming for H.264, H.263, and MPEG-4 Part 2 at the source's full decodable size, downscaled to the portrait or on-demand landscape display at the best rate the device sustains, with AAC-LC, MP3, or AMR-NB audio where compatible. Complete local H.264/AAC fragmented MP4 files are also supported. A second-core scheduler decouples video decoding from non-blocking buffered audio output and does not create an SD cache.
@@ -34,7 +35,9 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 
 To try an SD app, copy `examples/apps/counter` to `/Apps/counter` on the card and open **Apps** on Home. See [docs/external-apps.md](docs/external-apps.md) for the package and SDK contract.
 
-Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART connector. If its automatic reset cannot enter the downloader, hold **BOOT**, tap **RESET/EN**, release **RESET/EN**, then release **BOOT** and upload again. USB Drive uses the second connector wired directly to the ESP32-S3 native USB D-/D+ pins (GPIO 19/20); it remains inactive during normal boot. Start the **USB Drive** Home app, connect the native port, transfer files in Finder, and eject the volume before unplugging it.
+The Mac Remote YouTube button opens Spotlight, types `https://www.youtube.com/`, selects the top result with Down Arrow, and submits it to the default browser. This requires the standard Command-Space Spotlight shortcut and a keyboard input source that types ASCII URL characters from US-keyboard positions. The remaining actions use standard HID media keys or macOS keyboard shortcuts and need no setup.
+
+Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART connector. If its automatic reset cannot enter the downloader, hold **BOOT**, tap **RESET/EN**, release **RESET/EN**, then release **BOOT** and upload again. Mac Remote and USB Drive use the second connector wired directly to the ESP32-S3 native USB D-/D+ pins (GPIO 19/20). It remains inactive until Mac Remote is opened or the device restarts into USB Drive. Mac Remote stays enumerated until reset after its first use. USB Drive remains an isolated MSC-only boot; eject its volume in Finder before unplugging it.
 
 The first upload after changing from the old 3 MB/9.9 MB FATFS scheme must flash the new partition table. Preferences/NVS remains at the same offset and is compatible. Contents of the old, now-unused internal FATFS region are not preserved; ESP Media user media remains on SD.
 

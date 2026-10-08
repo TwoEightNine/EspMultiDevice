@@ -10,11 +10,11 @@ Keep normal peripherals within GPIO 0–21 and 38–44, 47–48. On ESP32-S3 mod
 
 ## Native USB connection
 
-The two connectors have fixed roles. Use the **UART**, **COM**, or **Debug** connector backed by a CH340, CP210x, FTDI, or equivalent bridge for firmware upload and 115200-baud Serial. USB Drive uses the second **USB** or **OTG** connector wired directly to the ESP32-S3 USB D- and D+ signals on GPIO 19 and GPIO 20. Normal firmware disconnects the S3's built-in USB-Serial/JTAG PHY after startup, and transfer boot reconnects the native path as mass storage only. The ROM downloader can still appear briefly on that connector during reset.
+The two connectors have fixed roles. Use the **UART**, **COM**, or **Debug** connector backed by a CH340, CP210x, FTDI, or equivalent bridge for firmware upload and 115200-baud Serial. Mac Remote and USB Drive use the second **USB** or **OTG** connector wired directly to the ESP32-S3 USB D- and D+ signals on GPIO 19 and GPIO 20. Normal firmware disconnects the S3's built-in USB-Serial/JTAG PHY after startup. Opening Mac Remote reconnects it as a HID-only keyboard/media controller for the remainder of that boot; transfer boot instead constructs and exposes an MSC-only device. The ROM downloader can still appear briefly on that connector during reset.
 
-Build with **USB Mode: USB-OTG (TinyUSB)**; set **USB CDC On Boot**, **USB Firmware MSC On Boot**, and **USB DFU On Boot** to **Disabled**; and select **Upload Mode: UART0 / Hardware CDC**. The project starts and registers its SD-card MSC interface itself only in transfer boot. The USB Drive is certified against macOS Finder; it uses the standard MSC protocol and may also enumerate on other desktop hosts.
+Build with **USB Mode: USB-OTG (TinyUSB)**; set **USB CDC On Boot**, **USB Firmware MSC On Boot**, and **USB DFU On Boot** to **Disabled**; and select **Upload Mode: UART0 / Hardware CDC**. The project registers HID only in normal composition and MSC only in transfer boot. The USB Drive is certified against macOS Finder; Mac Remote targets macOS keyboard and consumer-control behavior, though both use standard USB classes.
 
-For the first upload, select the serial device belonging to the USB-to-UART bridge. If automatic reset fails, hold **BOOT**, tap and release **RESET/EN**, release **BOOT**, and upload again. Native USB is not an upload or Serial Monitor port in this profile.
+For the first upload, select the serial device belonging to the USB-to-UART bridge. If automatic reset fails, hold **BOOT**, tap and release **RESET/EN**, release **BOOT**, and upload again. Native USB is not an upload or Serial Monitor port in this profile. macOS may show its built-in keyboard-identification assistant the first time Mac Remote enumerates; this does not require a driver.
 
 ## Default wiring
 

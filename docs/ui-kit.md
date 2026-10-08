@@ -41,6 +41,8 @@ For a cross-screen shape, add one documented `UiKit` function and use it everywh
 
 Home's Apps tile uses `UiKit::drawAppsIcon()`, a four-cell smooth icon drawn over the tile's solid circle fill.
 
+Home's Mac Remote tile uses `UiKit::drawMacRemoteIcon()`. The remote screen uses the shared `RemoteActionIcon` glyph set for its nine antialiased grid controls; each owner supplies the complete rounded cell, immediate fill background, enabled colour, and whole-cell hit target.
+
 Home's status bar uses `UiKit::drawBatteryVoltage()` for the 46×16 battery
 glyph. The helper centers Compact `#.#V` text inside its 38px body and uses
 smooth rounded fills. `batteryVoltageColor()` returns green above 3.66 V, red

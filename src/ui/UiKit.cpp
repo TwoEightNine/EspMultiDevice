@@ -14,6 +14,111 @@ void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
     }
   }
 }
+
+void drawMacRemoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       uint16_t color, uint16_t backgroundColor) {
+  tft.fillSmoothRoundRect(centerX - 23, centerY - 17, 46, 31, 5,
+                          color, backgroundColor);
+  tft.fillSmoothRoundRect(centerX - 19, centerY - 13, 38, 23, 3,
+                          backgroundColor, color);
+  tft.drawWideLine(centerX, centerY + 14, centerX, centerY + 21,
+                   3.0f, color, backgroundColor);
+  tft.drawWideLine(centerX - 10, centerY + 21, centerX + 10, centerY + 21,
+                   3.0f, color, backgroundColor);
+  // Three small key cells distinguish this from the shared browser/home icon.
+  for (int16_t column = -1; column <= 1; ++column) {
+    tft.fillSmoothRoundRect(centerX + column * 10 - 3, centerY - 4,
+                            6, 6, 2, color, backgroundColor);
+  }
+}
+
+void drawRemoteActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                          RemoteActionIcon icon, uint16_t color,
+                          uint16_t backgroundColor) {
+  constexpr float stroke = 3.0f;
+  switch (icon) {
+    case RemoteActionIcon::YouTube:
+      tft.fillSmoothRoundRect(centerX - 18, centerY - 12, 36, 24, 7,
+                              color, backgroundColor);
+      drawPlaybackIcon(tft, centerX + 1, centerY, false,
+                       backgroundColor, color);
+      return;
+    case RemoteActionIcon::Screenshot:
+      tft.drawWideLine(centerX - 15, centerY - 7, centerX - 15, centerY - 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX - 15, centerY - 14, centerX - 8, centerY - 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX + 8, centerY - 14, centerX + 15, centerY - 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX + 15, centerY - 14, centerX + 15, centerY - 7,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX - 15, centerY + 7, centerX - 15, centerY + 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX - 15, centerY + 14, centerX - 8, centerY + 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX + 8, centerY + 14, centerX + 15, centerY + 14,
+                       stroke, color, backgroundColor);
+      tft.drawWideLine(centerX + 15, centerY + 14, centerX + 15, centerY + 7,
+                       stroke, color, backgroundColor);
+      tft.fillSmoothCircle(centerX, centerY, 5, color, backgroundColor);
+      return;
+    case RemoteActionIcon::Lock:
+      tft.drawSmoothArc(centerX, centerY - 6, 9, 6, 180, 360,
+                        color, backgroundColor, true);
+      tft.fillSmoothRoundRect(centerX - 13, centerY - 3, 26, 21, 5,
+                              color, backgroundColor);
+      tft.fillSmoothCircle(centerX, centerY + 5, 2, backgroundColor, color);
+      tft.drawWideLine(centerX, centerY + 6, centerX, centerY + 11,
+                       2.0f, backgroundColor, color);
+      return;
+    case RemoteActionIcon::Previous:
+      tft.drawWideLine(centerX - 13, centerY - 11,
+                       centerX - 13, centerY + 11,
+                       stroke, color, backgroundColor);
+      drawPageArrow(tft, centerX + 2, centerY, false, false,
+                    color, backgroundColor);
+      return;
+    case RemoteActionIcon::PlayPause:
+      drawPlaybackIcon(tft, centerX, centerY, false, color, backgroundColor);
+      return;
+    case RemoteActionIcon::Next:
+      tft.drawWideLine(centerX + 13, centerY - 11,
+                       centerX + 13, centerY + 11,
+                       stroke, color, backgroundColor);
+      drawPageArrow(tft, centerX - 2, centerY, false, true,
+                    color, backgroundColor);
+      return;
+    case RemoteActionIcon::Mute:
+    case RemoteActionIcon::VolumeDown:
+    case RemoteActionIcon::VolumeUp: {
+      tft.fillSmoothRoundRect(centerX - 16, centerY - 5, 7, 10, 2,
+                              color, backgroundColor);
+      tft.drawWideLine(centerX - 9, centerY - 5, centerX - 2, centerY - 11,
+                       4.0f, color, backgroundColor);
+      tft.drawWideLine(centerX - 9, centerY + 5, centerX - 2, centerY + 11,
+                       4.0f, color, backgroundColor);
+      tft.drawWideLine(centerX - 2, centerY - 11, centerX - 2, centerY + 11,
+                       4.0f, color, backgroundColor);
+      if (icon == RemoteActionIcon::Mute) {
+        tft.drawWideLine(centerX + 4, centerY - 9, centerX + 17, centerY + 9,
+                         stroke, color, backgroundColor);
+        tft.drawWideLine(centerX + 17, centerY - 9, centerX + 4, centerY + 9,
+                         stroke, color, backgroundColor);
+      } else {
+        tft.drawWideLine(centerX + 5, centerY, centerX + 17, centerY,
+                         stroke, color, backgroundColor);
+        if (icon == RemoteActionIcon::VolumeUp) {
+          tft.drawWideLine(centerX + 11, centerY - 6,
+                           centerX + 11, centerY + 6,
+                           stroke, color, backgroundColor);
+        }
+      }
+      return;
+    }
+    default:
+      return;
+  }
+}
 namespace {
 constexpr int16_t NavigationIconLeft = AppBarIconPadding;
 constexpr int16_t NavigationIconTop = AppBarIconPadding;

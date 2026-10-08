@@ -12,15 +12,18 @@
 #error Select USB-OTG (TinyUSB) for USB Mode
 #endif
 #if ARDUINO_USB_CDC_ON_BOOT || ARDUINO_USB_MSC_ON_BOOT || ARDUINO_USB_DFU_ON_BOOT
-#error Disable USB CDC, Firmware MSC, and DFU On Boot; ESP Media starts native USB only in USB Drive mode
+#error Disable USB CDC, Firmware MSC, and DFU On Boot; ESP Media starts native USB explicitly
 #endif
 #if !defined(CONFIG_TINYUSB_MSC_ENABLED) || !CONFIG_TINYUSB_MSC_ENABLED
 #error TinyUSB MSC support must be enabled for ESP Media USB Drive
 #endif
+#if !defined(CONFIG_TINYUSB_HID_ENABLED) || !CONFIG_TINYUSB_HID_ENABLED
+#error TinyUSB HID support must be enabled for ESP Media Mac Remote
+#endif
 
-// TinyUSB collects interfaces when USB.begin() runs. Keep the MSC descriptor
-// object static, but start native USB only from the isolated transfer boot.
-USBMSC usbMsc;
+// TinyUSB collects every constructed interface when USB.begin() runs. Create
+// MSC only in transfer boot so normal Mac Remote sessions remain HID-only.
+USBMSC *usbMsc = nullptr;
 
 #if defined(ESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE) && defined(ESP_MEDIA_XIAOZHI_COMPATIBILITY_PROBE)
 #error "Select only one assistant diagnostic"
@@ -51,6 +54,7 @@ USBMSC usbMsc;
 #include "src/features/apps/AppHostScreen.h"
 #include "src/features/home/HomeScreen.h"
 #include "src/features/image_viewer/ImageViewerScreen.h"
+#include "src/features/mac_remote/MacRemoteScreen.h"
 #include "src/services/audio/MicController.h"
 #include "src/features/splash/SplashScreen.h"
 #include "src/app/Navigator.h"
@@ -68,6 +72,7 @@ USBMSC usbMsc;
 #include "src/services/network/WiFiController.h"
 #include "src/services/storage/UsbDriveBoot.h"
 #include "src/services/storage/UsbMassStorageController.h"
+#include "src/services/usb/MacRemoteController.h"
 #include "src/features/settings/WiFiScreen.h"
 #include "src/features/settings/WiFiSpeedTestScreen.h"
 #include "src/features/workout/WorkoutScreen.h"
@@ -151,6 +156,7 @@ BatteryController *batteryController = nullptr;
 BatteryHistoryService *batteryHistory = nullptr;
 AssistantController *assistantController = nullptr;
 UsbMassStorageController *usbMassStorage = nullptr;
+MacRemoteController *macRemoteController = nullptr;
 
 Navigator *navigator = nullptr;
 HomeScreen *homeScreen = nullptr;
@@ -171,6 +177,7 @@ WiFiSpeedTestScreen *wifiSpeedTestScreen = nullptr;
 BrowserScreen *browserScreen = nullptr;
 WorkoutScreen *workoutScreen = nullptr;
 UsbDriveScreen *usbDriveScreen = nullptr;
+MacRemoteScreen *macRemoteScreen = nullptr;
 AssistantScreen *assistantScreen = nullptr;
 AppLauncherScreen *appLauncherScreen = nullptr;
 AppHostScreen *appHostScreen = nullptr;
@@ -321,7 +328,8 @@ void setup() {
 
   navigator = new Navigator();
   if (usbTransferBoot) {
-    usbMassStorage = new UsbMassStorageController(*sdCard, usbMsc);
+    usbMsc = new USBMSC();
+    usbMassStorage = new UsbMassStorageController(*sdCard, *usbMsc);
     usbDriveScreen = new UsbDriveScreen(
       *navigator, *touch, *display, usbMassStorage, true
     );
@@ -386,6 +394,10 @@ void setup() {
   timeController->begin();
   Serial.println(F("Time controller ready."));
 
+  // Construct HID descriptors only in normal composition. The controller
+  // starts the native peripheral lazily when Mac Remote is first opened.
+  macRemoteController = new MacRemoteController();
+
   const AssistantBackendConfig assistantBackend = loadAssistantBackendConfig();
   assistantController = new AssistantController(
     *wifiController, *timeController, *mic, *speaker, *sdCard,
@@ -416,6 +428,8 @@ void setup() {
   browserScreen = new BrowserScreen(*navigator, *touch, *display, *wifiController, *sdCard);
   workoutScreen = new WorkoutScreen(*navigator, *touch, *display, *speaker, *audioSettings);
   usbDriveScreen = new UsbDriveScreen(*navigator, *touch, *display, nullptr, false);
+  macRemoteScreen = new MacRemoteScreen(*navigator, *touch, *display,
+                                        *macRemoteController);
   assistantScreen = new AssistantScreen(
     *navigator, *touch, *display, *assistantController, *sdCard
   );
@@ -479,6 +493,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::UsbDrive, *usbDriveScreen)) {
     Serial.println(F("Navigator failed to register USB Drive screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::MacRemote, *macRemoteScreen)) {
+    Serial.println(F("Navigator failed to register Mac Remote screen."));
   }
   if (!navigator->registerScreen(ScreenId::Apps, *appLauncherScreen)) {
     Serial.println(F("Navigator failed to register Apps screen."));

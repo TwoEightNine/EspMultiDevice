@@ -16,6 +16,14 @@ This is intentional lightweight obfuscation, not authenticated encryption or sec
 
 Files hides common macOS bookkeeping entries (`._*`, `.DS_Store`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, and `.DocumentRevisions-V100`) without deleting them. They can still exist on the card and remain visible when Finder is configured to show hidden files.
 
+## Mac Remote
+
+The **Mac Remote** Home app starts the native GPIO 19/20 connector lazily as a HID-only device named `ESP Media Mac Remote`. Its screen owns the only action UI; leaving it releases keyboard modifiers and consumer-control reports, but the pinned Arduino-ESP32 USB stack remains enumerated until reset. USB mount, unmount, suspend, and resume callbacks publish state only, and the screen polls that state from `tick()` before enabling its complete action cells.
+
+The fixed 3×3 actions are YouTube, full-screen screenshot (Shift-Command-3), lock (Control-Command-Q), previous, play/pause, next, output mute, volume down, and volume up. Media actions use standard USB consumer usages. YouTube uses a reusable non-blocking URL macro: Command-Space opens Spotlight, the controller waits 500 ms, types `https://www.youtube.com/` incrementally, waits 350 ms for the result, presses Down Arrow to select the top option, waits 100 ms, and presses Return. The macro is cancelled and all keys are released if the screen closes or USB disconnects. It depends on the standard Spotlight shortcut and an input source compatible with US-keyboard URL positions, but requires no macOS Shortcut, companion application, CDC channel, network command, or persisted device configuration.
+
+Normal boot constructs the keyboard and consumer-control descriptors without constructing MSC. USB Drive transfer boot does the inverse. This keeps both host profiles single-purpose even if USB Drive is selected after Mac Remote has already started; the existing transfer request restarts before MSC is constructed.
+
 ## USB Drive mode
 
 The **USB Drive** Home app records a one-shot Preferences flag and restarts into an isolated transfer boot. That boot does not create any media, browser, download, recording, or cache workers. It explicitly starts an MSC-only TinyUSB device on the native GPIO 19/20 connector. Before marking its medium present, it closes FatFs and reinitializes the Arduino-ESP32 3.3.8 SPI SD driver as an unmounted raw 512-byte block device. The physical card, including its MBR and FAT32 partition, is then exposed as writable USB mass storage named `ESP Media SD`; the filesystem volume label itself is preserved. UART0 remains available for logs and recovery through the separate USB-to-UART connector.
