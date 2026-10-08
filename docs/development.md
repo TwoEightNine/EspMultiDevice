@@ -224,7 +224,7 @@ retain at least 8 KiB.
 | `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates native-display, 640×360 adaptive-size, fast-start/moov-last H.264/AAC, H.263, MPEG-4 Part 2, and 1280×720 PSRAM-limit candidate fixtures in `tests/video/fixtures/`. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
-| `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, signatures, and exact source-fingerprint matching. |
+| `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, text-source extension classification, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
 | `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
 | `tests/assistant_contract/` | Compile-time-only assistant URL, protocol, heartbeat/reset, fixed-panel captions/background, transcript, envelope, state, queue, overflow, and generation contract diagnostic. |

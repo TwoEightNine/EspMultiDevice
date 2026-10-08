@@ -2,17 +2,18 @@
 
 #include <Arduino.h>
 
-// Central registry for file formats understood by the application. Every
-// format belongs to an image, audio, or video family when applicable. Custom cache
-// formats retain that family, but are marked internal so callers do not treat
-// cache files as source media.
+// Central registry for file formats understood by the application. Formats
+// belong to an image, audio, video, or text family when applicable. Custom
+// cache formats retain their media family, but are marked internal so callers
+// do not treat cache files as source media.
 class FileFormats {
 public:
   enum class Group : uint8_t {
     Unknown,
     Image,
     Audio,
-    Video
+    Video,
+    Text
   };
 
   enum class Format : uint8_t {
@@ -32,7 +33,11 @@ public:
     // Keep new values after the persisted source-format values above. ETH1
     // stores a FileFormats::Format byte in its version-1 header.
     Eth1,
-    Em16Zoom
+    Em16Zoom,
+    Txt,
+    Json,
+    Lua,
+    Config
   };
 
   static Format fromPath(const String &path) {
@@ -57,6 +62,10 @@ public:
     if (suffix == F(".emga")) return Format::Emga;
     if (suffix == F(".empa")) return Format::Empa;
     if (suffix == F(".eth1")) return Format::Eth1;
+    if (suffix == F(".txt")) return Format::Txt;
+    if (suffix == F(".json")) return Format::Json;
+    if (suffix == F(".lua")) return Format::Lua;
+    if (suffix == F(".config")) return Format::Config;
     return Format::Unknown;
   }
 
@@ -127,6 +136,11 @@ public:
       case Format::Mp4:
       case Format::ThreeGp:
         return Group::Video;
+      case Format::Txt:
+      case Format::Json:
+      case Format::Lua:
+      case Format::Config:
+        return Group::Text;
       default:
         return Group::Unknown;
     }
@@ -137,7 +151,7 @@ public:
   }
 
   static bool isOpenable(Format format) {
-    return isDownloadable(format);
+    return isDownloadable(format) || isText(format);
   }
 
   static bool isImage(Format format) {
@@ -150,6 +164,10 @@ public:
 
   static bool isVideo(Format format) {
     return group(format) == Group::Video;
+  }
+
+  static bool isText(Format format) {
+    return group(format) == Group::Text;
   }
 
   static bool isInternal(Format format) {
@@ -187,6 +205,10 @@ public:
       case Format::Emga: return ".emga";
       case Format::Empa: return ".empa";
       case Format::Eth1: return ".eth1";
+      case Format::Txt: return ".txt";
+      case Format::Json: return ".json";
+      case Format::Lua: return ".lua";
+      case Format::Config: return ".config";
       default: return "";
     }
   }
@@ -199,5 +221,7 @@ static_assert((uint8_t)FileFormats::Format::Bmp == 1 &&
               (uint8_t)FileFormats::Format::Webp == 5,
               "ETH1 persists these source-format values");
 static_assert((uint8_t)FileFormats::Format::Empa == 12 &&
-              (uint8_t)FileFormats::Format::Eth1 == 13,
-              "New cache formats must be appended");
+              (uint8_t)FileFormats::Format::Eth1 == 13 &&
+              (uint8_t)FileFormats::Format::Em16Zoom == 14 &&
+              (uint8_t)FileFormats::Format::Txt == 15,
+              "New formats must be appended");

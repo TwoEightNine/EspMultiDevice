@@ -29,6 +29,7 @@ const uint16_t FileColor = TFT_LIGHTGREY;
 const uint16_t ImageFileColor = TFT_GREEN;
 const uint16_t AudioFileColor = TFT_BLUE;
 const uint16_t VideoFileColor = TFT_ORANGE;
+const uint16_t TextFileColor = TFT_WHITE;
 const uint16_t MenuColor = 0x2104;
 const uint16_t DangerColor = TFT_RED;
 const uint16_t FooterButtonColor = 0x2965;
@@ -1091,7 +1092,8 @@ void FilesScreen::drawRow(const Row &row) {
     const bool openable = FileFormats::isOpenable(entry->format);
     color = openable && FileFormats::isImage(entry->format) ? ImageFileColor
           : openable && FileFormats::isAudio(entry->format) ? AudioFileColor
-          : openable && FileFormats::isVideo(entry->format) ? VideoFileColor : FileColor;
+          : openable && FileFormats::isVideo(entry->format) ? VideoFileColor
+          : openable && FileFormats::isText(entry->format) ? TextFileColor : FileColor;
   }
   const uint16_t iconWidth = entry->directory ? ic_folder_width : ic_file_width;
   const uint16_t iconHeight = entry->directory ? ic_folder_height : ic_file_height;
@@ -1838,6 +1840,8 @@ void FilesScreen::openEntry(uint16_t index) {
     opened = _navigator.push(ScreenId::AudioPlayer, secret ? ScreenData::secretAudioPath(path, _secretStorage.pin()) : ScreenData::audioPath(path));
   } else if (FileFormats::isVideo(entry->format) && FileFormats::isOpenable(entry->format)) {
     opened = _navigator.push(ScreenId::VideoPlayer, secret ? ScreenData::secretVideoPath(path, _secretStorage.pin()) : ScreenData::videoPath(path));
+  } else if (FileFormats::isText(entry->format) && FileFormats::isOpenable(entry->format)) {
+    opened = _navigator.push(ScreenId::TextViewer, secret ? ScreenData::secretTextPath(path, _secretStorage.pin()) : ScreenData::textPath(path));
   }
   if (!opened) {
     _retainCacheWhileCovered = false;

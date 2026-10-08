@@ -48,6 +48,7 @@ USBMSC *usbMsc = nullptr;
 #include "src/features/settings/LedScreen.h"
 #include "src/features/audio_player/AudioPlayerScreen.h"
 #include "src/features/video_player/VideoPlayerScreen.h"
+#include "src/features/text_viewer/TextViewerScreen.h"
 #include "src/features/browser/BrowserScreen.h"
 #include "src/features/files/FilesScreen.h"
 #include "src/features/apps/AppLauncherScreen.h"
@@ -171,6 +172,7 @@ TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
 VideoPlayerScreen *videoPlayerScreen = nullptr;
+TextViewerScreen *textViewerScreen = nullptr;
 TextInputScreen *textInputScreen = nullptr;
 WiFiScreen *wifiScreen = nullptr;
 WiFiSpeedTestScreen *wifiSpeedTestScreen = nullptr;
@@ -421,6 +423,7 @@ void setup() {
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
   videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
+  textViewerScreen = new TextViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
   textInputScreen = new TextInputScreen(*navigator, *touch, *display);
   wifiScreen = new WiFiScreen(*navigator, *touch, *display, *wifiController);
   wifiSpeedTestScreen = new WiFiSpeedTestScreen(*navigator, *touch, *display,
@@ -479,6 +482,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::VideoPlayer, *videoPlayerScreen)) {
     Serial.println(F("Navigator failed to register Video Player screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::TextViewer, *textViewerScreen)) {
+    Serial.println(F("Navigator failed to register Text Viewer screen."));
   }
   if (!navigator->registerScreen(ScreenId::TextInput, *textInputScreen)) {
     Serial.println(F("Navigator failed to register Text Input screen."));

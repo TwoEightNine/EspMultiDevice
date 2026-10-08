@@ -18,7 +18,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 22 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
+`Navigator` registers the 23 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -32,7 +32,7 @@ All screens inherit `Screen`, which receives shared references to `Navigator`, `
 - `onResult(const ScreenResult&)` receives a result from `pop(result)`.
 - `handleTouch()` receives a changed `TouchPoint`; `tick()` must stay non-blocking.
 
-Use `ScreenData` for image, audio, video, text-input, and secret-files flows. Image payloads can carry adjacent image paths for edge navigation and the full-screen state to retain during an adjacent-image replacement; image zoom never transfers. `ScreenResult::withText()` returns keyboard text to the caller. Do not introduce direct cross-screen calls for new navigation flows.
+Use `ScreenData` for image, audio, video, text-viewer, text-input, and secret-files flows. Image payloads can carry adjacent image paths for edge navigation and the full-screen state to retain during an adjacent-image replacement; image zoom never transfers. Text-viewer payloads carry the source path plus normal/secret access mode. `ScreenResult::withText()` returns keyboard text to the caller. Do not introduce direct cross-screen calls for new navigation flows.
 
 ## Core services
 
@@ -69,6 +69,18 @@ SD and touch share clock/data lines. Long media reads are deliberately chunked, 
 USB MSC callbacks run outside the UI task. They never draw, navigate, or restart. Each 512-byte SD sector transaction takes `SpiBusLock` and releases it before the next sector so touch polling can proceed. Safe eject, disconnect, and I/O failures are published as state and acted on by the USB Drive screen. Local FatFs is fully unmounted before raw media becomes present to the host; normal and host filesystem ownership never overlap.
 
 `MediaCache` is constructed once in the composition root and shared by Files, Image Viewer, and Audio Player. Its reader, writer, cleanup, and relocation operations report busy separately from failure. Screen work retries incremental cleanup or relocation from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
+
+`TextViewerScreen` owns read-only paging for local text files. It retains only
+the visible wrapped page plus 64 recent page offsets. Source reads are at most
+512 bytes per `tick()` and each seek/read transaction takes `SpiBusLock`, so a
+large file never needs to fit in RAM and touch polling keeps running. Forward
+page boundaries are discovered while rendering; a previous page outside the
+recent-offset cache is recovered by an incremental rescan from the nearest
+known boundary. The app bar uses the source filename, the footer uses shared
+page arrows, and the center status reports the page number plus byte progress.
+Normal files restart at page one after an SD remount. Secret files cannot be
+reopened after removal because the main loop deliberately locks
+`SecretStorage`; the user must close the viewer and unlock Files again.
 
 `VideoPlayerScreen` owns only video UI and TFT presentation. Its screen-scoped `VideoStreamWorker` runs on the core opposite the Arduino UI loop and exclusively owns the source `StorageFile`, ISO-BMFF demuxer, video/audio decoders, 16,384-frame mono PCM ring, packed PSRAM frame slots, and I2S speaker calls. It drains at most 256 PCM frames with a zero-timeout I2S call, decodes at most eight compressed audio packets when restoring its reserve, and decodes at most one available video sample in a scheduling pass; it yields after a video decode or an 8 ms work quantum. Audio backpressure therefore cannot pace video decoding. Playback time is active wall time clamped by submitted PCM duration, so underruns stop progress rather than making video run ahead. Pause stops and resumes the installed I2S peripheral without destroying its queued DMA audio.
 

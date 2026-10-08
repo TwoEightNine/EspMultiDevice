@@ -5,6 +5,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 ## Features
 
 - SD-card browser with folders, pagination, rename/delete actions, thumbnails, and optional PIN-offset protected storage.
+- Read-only paged text viewing for `.txt`, `.json`, `.lua`, and `.config` files, including files in protected storage.
 - Manual USB Drive mode exposes the complete SD card as writable USB mass storage for macOS file transfer, with isolated transfer boot and safe-eject restart.
 - A Mac Remote screen exposes standard USB HID keyboard and media controls for YouTube, screenshots, screen lock, playback, mute, and volume without a companion Mac application or configured macOS Shortcut.
 - Image viewer for BMP, PNG, baseline JPEG, GIF, and WebP, including animated GIF/WebP playback backed by SD caches and PSRAM.

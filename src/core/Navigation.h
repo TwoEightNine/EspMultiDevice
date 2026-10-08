@@ -9,6 +9,7 @@ enum class ScreenDataKind : uint8_t {
   ImagePath,
   AudioPath,
   VideoPath,
+  TextPath,
   TextInput,
   SecretFiles,
   ExternalApp,
@@ -80,6 +81,20 @@ struct ScreenData {
 
   static ScreenData secretVideoPath(const String &path, uint16_t pin) {
     ScreenData data = videoPath(path);
+    data.fileAccess = FileAccessMode::Secret;
+    data.pin = pin;
+    return data;
+  }
+
+  static ScreenData textPath(const String &path) {
+    ScreenData data;
+    data.kind = ScreenDataKind::TextPath;
+    data.text = path;
+    return data;
+  }
+
+  static ScreenData secretTextPath(const String &path, uint16_t pin) {
+    ScreenData data = textPath(path);
     data.fileAccess = FileAccessMode::Secret;
     data.pin = pin;
     return data;

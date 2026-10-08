@@ -64,6 +64,20 @@ void setup() {
   expect(FileFormats::internalCacheCount() == 5, F("internal cache count mismatch"));
   expect(FileFormats::fromSignature((const uint8_t *)"ETH1", 4) == FileFormats::Format::Eth1,
          F("ETH1 signature not recognized"));
+  expect(FileFormats::fromPath("/Documents/NOTES.TXT") == FileFormats::Format::Txt,
+         F("TXT extension not recognized"));
+  expect(FileFormats::fromPath("/Documents/data.JsOn") == FileFormats::Format::Json,
+         F("JSON extension not recognized"));
+  expect(FileFormats::fromPath("/Apps/tool.LUA") == FileFormats::Format::Lua,
+         F("Lua extension not recognized"));
+  expect(FileFormats::fromPath("/Documents/device.CONFIG") == FileFormats::Format::Config,
+         F("config extension not recognized"));
+  expect(FileFormats::fromPath("/Documents/device.conf") == FileFormats::Format::Unknown,
+         F("unsupported conf extension recognized"));
+  expect(FileFormats::isText(FileFormats::Format::Txt) &&
+         FileFormats::isOpenable(FileFormats::Format::Txt) &&
+         !FileFormats::isDownloadable(FileFormats::Format::Txt),
+         F("text format exposure mismatch"));
   for (uint8_t index = 0; index < FileFormats::internalCacheCount(); index++) {
     const FileFormats::Format format = FileFormats::internalCacheAt(index);
     expect(FileFormats::isInternal(format), F("cache registry contains source format"));

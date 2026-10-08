@@ -2,7 +2,7 @@
 
 ## Central format registry
 
-`src/media/FileFormats.h` is the sole source of truth for media classification. It resolves extensions, HTTP content types, and file signatures for BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4/M4V, and 3GP/3GPP. Browser and Files must use it consistently.
+`src/media/FileFormats.h` is the sole source of truth for file classification. It resolves extensions, HTTP content types, and file signatures for BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4/M4V, and 3GP/3GPP, plus the local text extensions `.txt`, `.json`, `.lua`, and `.config`. Browser and Files must use it consistently. Text formats are openable from Files but are not Browser-downloadable media.
 
 `.eth1`, `.em16`, `.em16z`, `.emga`, and `.empa` are internal cache files. They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
 
@@ -11,6 +11,34 @@ normal-SD privacy filter as audio search. They return at most five opaque
 selections, revalidate the selected source before launch, and hand off to the
 existing Image Viewer or Video Player after the Assistant session stops.
 Internal cache files are never selections.
+
+## Text viewer
+
+Files opens `.txt`, `.json`, `.lua`, and `.config` sources in the read-only
+Text Viewer. Extension matching is case-insensitive; extensionless files and
+similar suffixes such as `.conf` remain unknown. All four formats use the same
+plain-text presentation without syntax highlighting, JSON validation, or
+reformatting.
+
+The viewer uses the shared 48px app bar and smooth `UiText` Content face. It
+wraps at whitespace when possible, hard-wraps uninterrupted tokens, preserves
+explicit blank lines, expands tabs to four spaces, and pages through the
+document with shared footer arrows. The footer reports `Page N` and byte
+progress rather than pre-scanning the complete file for a total page count.
+Page navigation repaints the document viewport and changed footer state while
+leaving the app bar in place.
+
+Input is UTF-8 or its ASCII subset. An optional UTF-8 BOM is skipped, CRLF and
+CR are normalized as line endings, malformed sequences and other control bytes
+render as replacement question marks, and the normal Latin/Cyrillic font
+fallback applies to unsupported glyphs. UTF-16 BOMs produce an explicit error.
+
+Only the visible page is retained. The screen reads at most 512 source bytes
+per UI tick under `SpiBusLock`, keeps 64 recent page offsets, and incrementally
+rescans from a known boundary when older history is needed. It creates no SD
+cache. The same `StorageFile` path supports normal and protected files; SD
+removal closes the source, normal files restart from page one after remount,
+and protected files require a new unlock.
 
 ## Image viewer
 
