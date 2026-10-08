@@ -21,13 +21,24 @@ search. The client hello advertises `features.device_tools_version: 2` beside
 two original audio commands. The version-2 backend validates a distinct
 `device_result.result` shape for every command, including typed file/folder
 matches, nullable unavailable telemetry, and `accepted: true` for terminal
-launches. A command result must never contain a source path.
+launches. Version 3 adds `list_directory {selection_id,cursor}` and changes
+`search_files` matches from names to user-facing SD-relative paths. These paths
+are result data only: the backend still cannot submit a path as device
+authority. Version-1 and version-2 result schemas remain unchanged.
 
 All local searches share one latest selection set: at most five matches,
 120-second expiry, an eight-second scan deadline, and the audio scanner's
 normal-storage privacy filter. A new search clears selections from every
 search type. `search_files` may select an ordinary file for `show_file_info`
 or a folder for `open_folder`; unsupported ordinary file types are included.
+On version 3, selection ID zero represents the visible SD root only for
+`list_directory`; other IDs must select a folder from the latest
+`search_files`. A zero cursor starts one worker-owned directory iterator and a
+positive cursor must exactly match its preceding continuation token. Each page
+contains at most five typed SD-relative paths. The iterator expires 120 seconds
+after its last page and is closed on completion, cancellation, storage loss,
+session close, or reconnect. Listings expose names and kinds only, never file
+contents.
 `search_web` accepts only a 96-byte query. Browser constructs the fixed
 DuckDuckGo Lite URL on the UI side and excludes it from recents and logs.
 The built-in recorder's `/voice_last.wav` remains discoverable through
@@ -49,8 +60,10 @@ Add the command to `XiaozhiProtocol` first.
    integer request ID, and the active session ID. Reject duplicate, unknown,
    malformed, oversized, and out-of-state input without executing it.
 3. Extend the typed `device_result` builder with only the fields that the
-   backend needs. Do not return raw file paths, credentials, secret contents,
-   or internal error text.
+   backend needs. Do not return host/VFS paths, credentials, secret contents,
+   or internal error text. A user-facing SD-relative path is permitted only
+   for the version-3 file-location/listing contract and must never be accepted
+   back as command authority.
 4. Handle the command in `XiaozhiSession::handleDeviceCommand()`. Maintain one
    request per command ID and send one correlated result before publishing any
    UI event. Clear selections and request state on session close or reconnect.

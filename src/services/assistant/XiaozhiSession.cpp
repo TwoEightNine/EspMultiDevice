@@ -766,6 +766,17 @@ bool XiaozhiSession::handleDeviceCommand(const XiaozhiProtocol::Message &message
     case Kind::OpenFolder:
       result = _deviceTools.selected(message.selectionId, message.deviceCommand, launchPath);
       break;
+    case Kind::ListDirectory: {
+      struct ListingCancellation { XiaozhiSession *session; uint32_t generation; };
+      ListingCancellation cancellation = {this, generation};
+      result = _deviceTools.listDirectory(message.selectionId, message.cursor,
+                                          [](void *opaque) {
+                                            const auto *state =
+                                                static_cast<ListingCancellation *>(opaque);
+                                            return state->session->interrupted(state->generation);
+                                          }, &cancellation);
+      break;
+    }
     case Kind::GetTime:
     case Kind::GetWifiStatus:
     case Kind::GetWifiSignal:
@@ -1049,6 +1060,7 @@ void XiaozhiSession::stopTurn(bool drainPlayback) {
 
 void XiaozhiSession::stopSession(bool drainPlayback) {
   stopTurn(drainPlayback);
+  _deviceTools.clearDirectoryListing();
   _deviceTools.clearSelections();
   _lastDeviceCommandId = 0;
   _websocket.close();

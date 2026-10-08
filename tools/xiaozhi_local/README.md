@@ -17,11 +17,13 @@ WebSocket ping handling is enabled for the firmware's 60-second heartbeat.
 The backend also uses OpenAI function calling for the firmware's custom,
 authenticated `device_tools` RPC. MCP stays disabled: the only v1 tools search
 normal SD WAV/MP3 filenames and play a returned opaque selection. The backend
-never receives a source path or secret-storage content.
+receives neither a source path nor secret-storage content from a v1 client.
 Version-2 firmware additionally exposes eight device-status commands, three
 persisted setting commands, Battery Details, image/video/file search and
 selection, and DuckDuckGo Lite Browser search. The backend never sends a raw
-file path or URL to firmware.
+file path or URL to firmware. Version-3 firmware returns user-facing
+SD-relative paths from file search and adds paged visible-directory listing;
+paths remain result data and are never accepted back as filesystem authority.
 
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
@@ -78,8 +80,9 @@ idempotent reset for an isolated test device without printing credentials. Use `
 for status. Avoid routine backend log output because transcripts and provider
 errors can contain user data.
 
-The overlay registers only audio tools for version-1 `device_tools` clients
-and the expanded catalog for clients advertising `device_tools_version: 2`.
+The overlay registers only audio tools for version-1 `device_tools` clients,
+the existing expanded catalog for version 2, and `list_directory` plus
+path-bearing file search for clients advertising `device_tools_version: 3`.
 Each tool call uses a session-bound nonzero request ID and a
 single in-flight `device_command`/`device_result` exchange. Invalid, delayed,
 duplicate, or mismatched results are discarded. Media, folder, Battery Details,

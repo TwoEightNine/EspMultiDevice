@@ -11,7 +11,7 @@ DEVICE_TOOL_NAMES = (
     "get_sd_status", "get_mic_status", "get_battery_status", "get_volume",
     "get_led_status", "open_battery_details", "set_volume", "set_led_enabled",
     "set_led_color", "search_images", "open_image", "search_videos", "play_video",
-    "search_files", "show_file_info", "open_folder", "search_web",
+    "search_files", "show_file_info", "open_folder", "search_web", "list_directory",
 )
 DEVICE_TOOL_NAMES_LITERAL = repr(DEVICE_TOOL_NAMES)
 

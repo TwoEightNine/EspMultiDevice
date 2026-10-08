@@ -14,6 +14,7 @@ constexpr size_t MaxAudioPacketBytes = 1275;
 constexpr size_t MaxDeviceCommandNameBytes = 24;
 constexpr size_t MaxDeviceQueryBytes = 96;
 constexpr size_t MaxDeviceMatchNameBytes = 96;
+constexpr size_t MaxDevicePathBytes = 256;
 constexpr uint8_t MaxDeviceMatches = 5;
 
 struct ParsedUrl {
@@ -49,7 +50,7 @@ enum class DeviceCommandKind : uint8_t {
   GetSdStatus, GetMicStatus, GetBatteryStatus, GetVolume, GetLedStatus,
   OpenBatteryDetails, SetVolume, SetLedEnabled, SetLedColor,
   SearchImages, OpenImage, SearchVideos, PlayVideo, SearchFiles,
-  ShowFileInfo, OpenFolder, SearchWeb
+  ShowFileInfo, OpenFolder, SearchWeb, ListDirectory
 };
 enum class DeviceToolError : uint8_t {
   None,
@@ -65,6 +66,7 @@ enum class DeviceToolError : uint8_t {
 struct DeviceToolMatch {
   uint8_t selectionId;
   char name[MaxDeviceMatchNameBytes + 1];
+  char path[MaxDevicePathBytes + 1];
   bool directory;
 };
 
@@ -75,6 +77,8 @@ struct DeviceToolResult {
   DeviceToolError error;
   uint8_t matchCount;
   DeviceToolMatch matches[MaxDeviceMatches];
+  bool hasNextCursor;
+  uint32_t nextCursor;
   bool available;
   bool connected;
   bool present;
@@ -94,6 +98,7 @@ struct DeviceToolResult {
   char localTime[32];
   char name[MaxDeviceMatchNameBytes + 1];
   char fileType[20];
+  char directoryPath[MaxDevicePathBytes + 1];
 
   void clear();
 };
@@ -107,6 +112,7 @@ struct Message {
   uint32_t requestId;
   DeviceCommandKind deviceCommand;
   uint8_t selectionId;
+  uint32_t cursor;
   uint8_t level;
   bool enabled;
   char sessionId[MaxSessionIdBytes + 1];

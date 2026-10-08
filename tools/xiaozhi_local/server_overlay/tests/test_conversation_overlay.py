@@ -22,7 +22,7 @@ from core.providers.memory.mem_local_short import esp_media_memory_overlay as me
 from core.providers.llm.esp_media_openai_responses.esp_media_openai_responses import LLMProvider as ResponsesProvider
 from core.providers.tts.esp_media_azure_multilingual import TTSProvider as AzureTtsProvider
 from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
-from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES
+from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES, V2_TOOLS
 from core.providers.tools.device_audio.device_audio_handler import _valid_result
 from core.providers.tools.base import ToolType
 from core.providers.tools.unified_tool_handler import UnifiedToolHandler
@@ -263,7 +263,7 @@ class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
             "open_folder": {"accepted": True},
             "search_web": {"accepted": True},
         }
-        self.assertEqual(set(examples), DEVICE_TOOL_NAMES)
+        self.assertEqual(set(examples), V2_TOOLS)
         for command, result in examples.items():
             with self.subTest(command=command):
                 self.assertTrue(_valid_result(command, result))
@@ -360,10 +360,76 @@ class DeviceAudioRpcTests(unittest.IsolatedAsyncioTestCase):
     async def test_v2_advertises_exact_new_command_set(self):
         conn = FakeDeviceConnection(version=2)
         executor = DeviceAudioExecutor(conn)
-        self.assertEqual(set(executor.get_tools()), DEVICE_TOOL_NAMES)
+        self.assertEqual(set(executor.get_tools()), V2_TOOLS)
         for tool in executor.get_tools().values():
             self.assertFalse(tool.description["function"]["parameters"]["additionalProperties"])
         self.assertEqual(DeviceAudioExecutor(FakeDeviceConnection(version=False)).get_tools(), {})
+
+    async def test_v3_advertises_directory_listing_and_validates_paths(self):
+        conn = FakeDeviceConnection(version=3)
+        executor = DeviceAudioExecutor(conn)
+        self.assertEqual(set(executor.get_tools()), DEVICE_TOOL_NAMES)
+        self.assertIn("list_directory", executor.get_tools())
+        self.assertTrue(_valid_result("search_files", {"matches": [
+            {"selection_id": 1, "path": "/Photos/Trips/photo.jpg", "kind": "file"},
+            {"selection_id": 2, "path": "/Photos/Trips", "kind": "folder"},
+        ]}, 3))
+        self.assertFalse(_valid_result("search_files", {"matches": [
+            {"selection_id": 1, "name": "photo.jpg", "kind": "file"},
+        ]}, 3))
+        self.assertFalse(_valid_result("search_files", {"matches": [
+            {"selection_id": 1, "path": "/.system/private", "kind": "file"},
+        ]}, 3))
+
+    async def test_v3_directory_listing_forwards_and_validates_pages(self):
+        conn = FakeDeviceConnection(version=3)
+        executor = DeviceAudioExecutor(conn)
+        task = asyncio.create_task(executor.execute(
+            conn, "list_directory", {"selection_id": 0, "cursor": 0}
+        ))
+        await asyncio.sleep(0)
+        self.assertEqual(conn.websocket.messages[-1], {
+            "type": "device_command", "session_id": conn.session_id,
+            "request_id": 1, "command": "list_directory",
+            "arguments": {"selection_id": 0, "cursor": 0},
+        })
+        await handle_device_result(conn, {
+            "type": "device_result", "session_id": conn.session_id,
+            "request_id": 1, "ok": True, "result": {
+                "directory_path": "/",
+                "entries": [
+                    {"path": "/Photos", "kind": "folder"},
+                    {"path": "/notes.txt", "kind": "file"},
+                ],
+                "next_cursor": 1,
+            },
+        })
+        response = await task
+        self.assertEqual(response.action, Action.REQLLM)
+        self.assertIn('"next_cursor":1', response.result)
+
+        final_page = {"directory_path": "/Photos", "entries": [], "next_cursor": None}
+        self.assertTrue(_valid_result("list_directory", final_page, 3))
+        self.assertFalse(_valid_result("list_directory", {
+            **final_page, "entries": [{"path": "/Other/file.txt", "kind": "file"}]
+        }, 3))
+        self.assertFalse(_valid_result("list_directory", {
+            **final_page, "next_cursor": 0
+        }, 3))
+
+    async def test_v3_rejects_invalid_listing_arguments_before_rpc(self):
+        conn = FakeDeviceConnection(version=3)
+        executor = DeviceAudioExecutor(conn)
+        invalid = (
+            {"selection_id": 6, "cursor": 0},
+            {"selection_id": True, "cursor": 0},
+            {"selection_id": 0, "cursor": -1},
+            {"selection_id": 0, "cursor": 0, "path": "/"},
+        )
+        for arguments in invalid:
+            response = await executor.execute(conn, "list_directory", arguments)
+            self.assertEqual(response.action, Action.ERROR)
+        self.assertEqual(conn.websocket.messages, [])
 
     async def test_v2_status_result_rejects_extra_or_wrong_fields(self):
         conn = FakeDeviceConnection(version=2)
@@ -512,6 +578,38 @@ class ResponsesProviderTests(unittest.TestCase):
         self.assertEqual(request["reasoning"], {"effort": "medium"})
         self.assertEqual(request["instructions"], "policy")
         self.assertEqual(request["tools"][0]["name"], "direct_answer")
+
+    def test_compacts_function_call_index_after_reasoning_output(self):
+        function = SimpleNamespace(
+            type="function_call", id="item-1", call_id="call-1",
+            name="get_weather", arguments='{"location":"Moscow"}',
+        )
+        events = [
+            SimpleNamespace(type="response.output_item.added", output_index=0,
+                            item=SimpleNamespace(type="reasoning", id="reasoning-1")),
+            SimpleNamespace(type="response.output_item.added", item_id="item-1",
+                            output_index=1, item=function),
+            SimpleNamespace(type="response.function_call_arguments.delta",
+                            item_id="item-1", output_index=1,
+                            delta='{"location":"Mos'),
+            SimpleNamespace(type="response.output_item.done", item_id="item-1",
+                            output_index=1, item=function),
+        ]
+        provider = self._provider(events)
+        result = list(provider.response_with_functions(
+            "session", [{"role": "user", "content": "weather"}],
+            functions=[{"type": "function", "function": {
+                "name": "get_weather", "parameters": {"type": "object"},
+            }}],
+        ))
+        calls = [call for _, call_list in result if call_list for call in call_list]
+        self.assertTrue(calls)
+        self.assertEqual({call.index for call in calls}, {0})
+        self.assertEqual(calls[0].function.name, "get_weather")
+        self.assertEqual(
+            "".join(call.function.arguments for call in calls),
+            '{"location":"Moscow"}',
+        )
 
     def test_converts_stored_chat_tool_history_to_responses_items(self):
         instructions, items = ResponsesProvider._to_responses_input([

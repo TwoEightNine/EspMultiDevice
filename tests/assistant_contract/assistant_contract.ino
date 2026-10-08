@@ -58,7 +58,7 @@ void testJson() {
   cJSON *deviceToolsVersion = features ? cJSON_GetObjectItemCaseSensitive(features, "device_tools_version") : nullptr;
   check(cJSON_IsFalse(mcp), "explicit features.mcp false");
   check(cJSON_IsTrue(deviceTools), "explicit device tools capability");
-  check(cJSON_IsNumber(deviceToolsVersion) && deviceToolsVersion->valueint == 2,
+  check(cJSON_IsNumber(deviceToolsVersion) && deviceToolsVersion->valueint == 3,
         "versioned device tools capability");
   if (root) cJSON_Delete(root);
 
@@ -186,6 +186,7 @@ void testJson() {
     {"show_file_info", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::ShowFileInfo},
     {"open_folder", "{\"selection_id\":2}", XiaozhiProtocol::DeviceCommandKind::OpenFolder},
     {"search_web", "{\"query\":\"weather\"}", XiaozhiProtocol::DeviceCommandKind::SearchWeb},
+    {"list_directory", "{\"selection_id\":0,\"cursor\":0}", XiaozhiProtocol::DeviceCommandKind::ListDirectory},
   };
   for (const auto &command : commands) {
     snprintf(json, sizeof(json),
@@ -225,9 +226,69 @@ void testJson() {
   toolResult.matchCount = 1;
   toolResult.matches[0].selectionId = 1;
   toolResult.matches[0].directory = true;
-  strcpy(toolResult.matches[0].name, "Photos");
+  strcpy(toolResult.matches[0].path, "/Photos");
   check(XiaozhiProtocol::buildDeviceResult("s1", 13, toolResult, json, sizeof(json)) &&
-        strstr(json, "\"kind\":\"folder\""), "build typed folder search result");
+        strstr(json, "\"path\":\"/Photos\"") &&
+        strstr(json, "\"kind\":\"folder\"") && !strstr(json, "\"name\""),
+        "build path-bearing folder search result");
+  const char listRoot[] =
+      "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":14,"
+      "\"command\":\"list_directory\",\"arguments\":{\"selection_id\":0,\"cursor\":0}}";
+  check(XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(listRoot),
+                                      strlen(listRoot), "s1", message) &&
+        message.deviceCommand == XiaozhiProtocol::DeviceCommandKind::ListDirectory &&
+        message.selectionId == 0 && message.cursor == 0,
+        "parse root directory listing command");
+  toolResult.clear();
+  toolResult.command = XiaozhiProtocol::DeviceCommandKind::ListDirectory;
+  toolResult.ok = true;
+  strcpy(toolResult.directoryPath, "/Photos");
+  toolResult.matchCount = 3;
+  strcpy(toolResult.matches[0].path, "/Photos/Trips");
+  toolResult.matches[0].directory = true;
+  strcpy(toolResult.matches[1].path, "/Photos/photo.jpg");
+  strcpy(toolResult.matches[2].path, "/Photos/\xE6\x97\x85\xE8\xA1\x8C.jpg");
+  toolResult.hasNextCursor = true;
+  toolResult.nextCursor = 1;
+  check(XiaozhiProtocol::buildDeviceResult("s1", 14, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"directory_path\":\"/Photos\"") &&
+        strstr(json, "\"next_cursor\":1") &&
+        strstr(json, "\"path\":\"/Photos/Trips\""),
+        "build paginated directory listing result");
+  toolResult.hasNextCursor = false;
+  check(XiaozhiProtocol::buildDeviceResult("s1", 15, toolResult, json, sizeof(json)) &&
+        strstr(json, "\"next_cursor\":null"), "build final directory listing page");
+  const char *invalidListings[] = {
+    "{\"selection_id\":6,\"cursor\":0}",
+    "{\"selection_id\":1.5,\"cursor\":0}",
+    "{\"selection_id\":1,\"cursor\":-1}",
+    "{\"selection_id\":1,\"cursor\":0,\"path\":\"/Photos\"}"
+  };
+  for (const char *arguments : invalidListings) {
+    snprintf(json, sizeof(json),
+             "{\"type\":\"device_command\",\"session_id\":\"s1\",\"request_id\":16,"
+             "\"command\":\"list_directory\",\"arguments\":%s}", arguments);
+    check(!XiaozhiProtocol::parseMessage(reinterpret_cast<const uint8_t *>(json),
+                                         strlen(json), "s1", message),
+          "reject invalid directory listing arguments");
+  }
+  toolResult.clear();
+  toolResult.command = XiaozhiProtocol::DeviceCommandKind::ListDirectory;
+  toolResult.ok = true;
+  strcpy(toolResult.directoryPath, "/Directory-With-A-Long-But-Valid-Name");
+  toolResult.matchCount = XiaozhiProtocol::MaxDeviceMatches;
+  for (uint8_t index = 0; index < XiaozhiProtocol::MaxDeviceMatches; ++index) {
+    char *path = toolResult.matches[index].path;
+    path[0] = '/';
+    path[1] = static_cast<char>('0' + index);
+    memset(path + 2, 'a' + index, XiaozhiProtocol::MaxDevicePathBytes - 2);
+    path[XiaozhiProtocol::MaxDevicePathBytes] = 0;
+  }
+  toolResult.hasNextCursor = true;
+  toolResult.nextCursor = UINT32_MAX;
+  check(XiaozhiProtocol::buildDeviceResult("s1", 17, toolResult, json, sizeof(json)) &&
+        strlen(json) < XiaozhiProtocol::MaxJsonBytes,
+        "serialize worst-case bounded directory page");
   toolResult.clear();
   toolResult.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
   memset(json, 0, sizeof(json));

@@ -10,6 +10,7 @@ from ..base import ToolDefinition, ToolExecutor, ToolType
 
 QUERY_TOOLS = {"search_audio", "search_images", "search_videos", "search_files", "search_web"}
 SELECT_TOOLS = {"play_audio", "open_image", "play_video", "show_file_info", "open_folder"}
+LIST_TOOLS = {"list_directory"}
 SETTING_TOOLS = {"set_volume", "set_led_enabled", "set_led_color"}
 STATUS_TOOLS = {
     "get_time", "get_wifi_status", "get_wifi_signal", "get_sd_status",
@@ -19,8 +20,9 @@ TERMINAL_TOOLS = {
     "play_audio", "open_battery_details", "open_image", "play_video",
     "open_folder", "search_web",
 }
-DEVICE_TOOL_NAMES = frozenset(QUERY_TOOLS | SELECT_TOOLS | SETTING_TOOLS |
-                              STATUS_TOOLS | {"open_battery_details"})
+V2_TOOLS = frozenset(QUERY_TOOLS | SELECT_TOOLS | SETTING_TOOLS |
+                     STATUS_TOOLS | {"open_battery_details"})
+DEVICE_TOOL_NAMES = frozenset(V2_TOOLS | LIST_TOOLS)
 V1_TOOLS = frozenset({"search_audio", "play_audio"})
 COLORS = ("red", "green", "blue", "yellow", "cyan", "magenta")
 
@@ -40,6 +42,12 @@ def _parameters(name: str) -> Dict[str, Any]:
     elif name in SELECT_TOOLS:
         properties = {"selection_id": {"type": "integer", "minimum": 1, "maximum": 5}}
         required = ["selection_id"]
+    elif name == "list_directory":
+        properties = {
+            "selection_id": {"type": "integer", "minimum": 0, "maximum": 5},
+            "cursor": {"type": "integer", "minimum": 0, "maximum": 0xFFFFFFFF},
+        }
+        required = ["selection_id", "cursor"]
     elif name == "set_volume":
         properties = {"level": {"type": "integer", "minimum": 0, "maximum": 10}}
         required = ["level"]
@@ -78,6 +86,7 @@ DESCRIPTIONS = {
     "search_files": "Search visible normal-SD files and folders, including unsupported file types; use '*' for a bounded list.",
     "show_file_info": "Show type, size, and modification time of a file selected by search_files; never reads its contents.",
     "open_folder": "Open a folder selected by search_files in Files. Terminal action.",
+    "list_directory": "List one page of a visible normal-SD folder selected by search_files. Use selection_id 0 for root, cursor 0 initially, and pass back next_cursor until it is null. Never invent a cursor or path.",
     "search_web": "Open DuckDuckGo Lite search results in the device Browser. Pass search words only, never a URL. Terminal action.",
 }
 
@@ -165,6 +174,13 @@ class DeviceAudioExecutor(ToolExecutor):
                 value = arguments.get("selection_id")
                 if set(arguments) != {"selection_id"} or type(value) is not int or not 1 <= value <= 5:
                     raise ValueError("invalid_arguments")
+            elif tool_name == "list_directory":
+                selection_id = arguments.get("selection_id")
+                cursor = arguments.get("cursor")
+                if set(arguments) != {"selection_id", "cursor"} or \
+                        type(selection_id) is not int or not 0 <= selection_id <= 5 or \
+                        type(cursor) is not int or not 0 <= cursor <= 0xFFFFFFFF:
+                    raise ValueError("invalid_arguments")
             elif tool_name == "set_volume":
                 value = arguments.get("level")
                 if set(arguments) != {"level"} or type(value) is not int or not 0 <= value <= 10:
@@ -194,12 +210,21 @@ class DeviceAudioExecutor(ToolExecutor):
 
     def get_tools(self) -> Dict[str, ToolDefinition]:
         version = _capability_version(self.conn)
-        names = V1_TOOLS if version == 1 else DEVICE_TOOL_NAMES if version >= 2 else ()
-        return {name: ToolDefinition(
-            name=name, tool_type=ToolType.DEVICE_AUDIO,
-            description={"type": "function", "function": {
-                "name": name, "description": DESCRIPTIONS[name], "parameters": _parameters(name)
-            }}) for name in sorted(names)}
+        names = V1_TOOLS if version == 1 else V2_TOOLS if version == 2 else \
+            DEVICE_TOOL_NAMES if version >= 3 else ()
+        tools = {}
+        for name in sorted(names):
+            description = DESCRIPTIONS[name]
+            if name == "search_files" and version >= 3:
+                description = ("Search visible normal-SD files and folders and return exact "
+                               "SD-relative paths; use '*' for a bounded list. Use a returned "
+                               "folder selection with list_directory, never as a raw path argument.")
+            tools[name] = ToolDefinition(
+                name=name, tool_type=ToolType.DEVICE_AUDIO,
+                description={"type": "function", "function": {
+                    "name": name, "description": description, "parameters": _parameters(name)
+                }})
+        return tools
 
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self.get_tools()

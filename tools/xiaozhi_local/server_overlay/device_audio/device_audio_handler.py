@@ -24,15 +24,33 @@ def _string(value: Any, maximum: int, allow_empty: bool = False) -> bool:
     return isinstance(value, str) and (allow_empty or bool(value)) and len(value.encode("utf-8")) <= maximum
 
 
-def _matches(command: str, result: Dict[str, Any]) -> bool:
+def _sd_path(value: Any, allow_root: bool = False) -> bool:
+    if not _string(value, 256) or not value.startswith("/") or "\\" in value:
+        return False
+    if value == "/":
+        return allow_root
+    segments = value[1:].split("/")
+    return all(segment and segment not in (".", "..") and
+               not segment.startswith(".") and not segment.endswith(".tmp") and
+               segment != ".configs" for segment in segments)
+
+
+def _matches(command: str, result: Dict[str, Any], version: int = 2) -> bool:
     if set(result) != {"matches"} or not isinstance(result["matches"], list) or len(result["matches"]) > 5:
         return False
     seen = set()
     for match in result["matches"]:
-        keys = {"selection_id", "name", "kind"} if command == "search_files" else {"selection_id", "name"}
+        keys = ({"selection_id", "path", "kind"} if command == "search_files" and version >= 3
+                else {"selection_id", "name", "kind"} if command == "search_files"
+                else {"selection_id", "name"})
         if not isinstance(match, dict) or set(match) != keys or \
                 not _integer(match["selection_id"], 1, 5) or \
-                not _string(match["name"], 96) or match["selection_id"] in seen:
+                match["selection_id"] in seen:
+            return False
+        if command == "search_files" and version >= 3:
+            if not _sd_path(match["path"]):
+                return False
+        elif not _string(match["name"], 96):
             return False
         if command == "search_files" and match["kind"] not in ("file", "folder"):
             return False
@@ -40,11 +58,27 @@ def _matches(command: str, result: Dict[str, Any]) -> bool:
     return True
 
 
-def _valid_result(command: str, result: Any) -> bool:
+def _valid_result(command: str, result: Any, version: int = 2) -> bool:
     if not isinstance(result, dict):
         return False
     if command in QUERY_TOOLS - {"search_web"}:
-        return _matches(command, result)
+        return _matches(command, result, version)
+    if command == "list_directory":
+        if set(result) != {"directory_path", "entries", "next_cursor"} or \
+                not _sd_path(result["directory_path"], allow_root=True) or \
+                not isinstance(result["entries"], list) or len(result["entries"]) > 5:
+            return False
+        for entry in result["entries"]:
+            if not isinstance(entry, dict) or set(entry) != {"path", "kind"} or \
+                    not _sd_path(entry["path"]) or entry["kind"] not in ("file", "folder"):
+                return False
+            parent = result["directory_path"]
+            expected_prefix = "/" if parent == "/" else parent + "/"
+            if not entry["path"].startswith(expected_prefix) or \
+                    "/" in entry["path"][len(expected_prefix):]:
+                return False
+        cursor = result["next_cursor"]
+        return cursor is None or _integer(cursor, 1, 0xFFFFFFFF)
     if command in TERMINAL_TOOLS:
         return set(result) == {"accepted"} and result["accepted"] is True
     if command == "get_time":
@@ -108,7 +142,7 @@ async def handle_device_result(conn, message: Dict[str, Any]) -> None:
     if message["ok"]:
         valid = set(message) == {"type", "session_id", "request_id", "ok", "result"} and \
             (_valid_v1_result(message.get("result")) if version == 1
-             else _valid_result(command, message.get("result")))
+             else _valid_result(command, message.get("result"), version))
     else:
         valid = set(message) == {"type", "session_id", "request_id", "ok", "error"} and \
             isinstance(message.get("error"), dict) and set(message["error"]) == {"code"} and \

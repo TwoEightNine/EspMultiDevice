@@ -162,6 +162,7 @@ constexpr CommandName DeviceCommands[] = {
   {"show_file_info", XiaozhiProtocol::DeviceCommandKind::ShowFileInfo},
   {"open_folder", XiaozhiProtocol::DeviceCommandKind::OpenFolder},
   {"search_web", XiaozhiProtocol::DeviceCommandKind::SearchWeb},
+  {"list_directory", XiaozhiProtocol::DeviceCommandKind::ListDirectory},
 };
 
 XiaozhiProtocol::DeviceCommandKind commandKind(const char *name) {
@@ -179,6 +180,14 @@ bool validRequestId(cJSON *item, uint32_t &requestId) {
       static_cast<double>(static_cast<uint32_t>(item->valuedouble)) != item->valuedouble)
     return false;
   requestId = static_cast<uint32_t>(item->valuedouble);
+  return true;
+}
+
+bool validUint32(cJSON *item, uint32_t &value) {
+  if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > UINT32_MAX ||
+      static_cast<double>(static_cast<uint32_t>(item->valuedouble)) != item->valuedouble)
+    return false;
+  value = static_cast<uint32_t>(item->valuedouble);
   return true;
 }
 
@@ -304,7 +313,7 @@ bool buildClientHello(uint8_t version, char *output, size_t capacity) {
   cJSON *features = cJSON_AddObjectToObject(root, "features");
   cJSON_AddBoolToObject(features, "mcp", false);
   cJSON_AddBoolToObject(features, "device_tools", true);
-  cJSON_AddNumberToObject(features, "device_tools_version", 2);
+  cJSON_AddNumberToObject(features, "device_tools_version", 3);
   cJSON_AddStringToObject(root, "transport", "websocket");
   cJSON *audio = cJSON_AddObjectToObject(root, "audio_params");
   cJSON_AddStringToObject(audio, "format", "opus");
@@ -367,17 +376,40 @@ bool buildDeviceResult(const char *sessionId, uint32_t requestId,
         if (!matches) { cJSON_Delete(root); return false; }
         const uint8_t count = min<uint8_t>(result.matchCount, MaxDeviceMatches);
         for (uint8_t index = 0; index < count; ++index) {
-          if (!result.matches[index].selectionId || !result.matches[index].name[0]) {
+          const bool fileSearch = result.command == DeviceCommandKind::SearchFiles;
+          if (!result.matches[index].selectionId ||
+              (fileSearch ? !result.matches[index].path[0] : !result.matches[index].name[0])) {
             cJSON_Delete(root);
             return false;
           }
           cJSON *match = cJSON_CreateObject();
           cJSON_AddNumberToObject(match, "selection_id", result.matches[index].selectionId);
-          cJSON_AddStringToObject(match, "name", result.matches[index].name);
-          if (result.command == DeviceCommandKind::SearchFiles)
+          if (fileSearch) {
+            cJSON_AddStringToObject(match, "path", result.matches[index].path);
             cJSON_AddStringToObject(match, "kind", result.matches[index].directory ? "folder" : "file");
+          } else {
+            cJSON_AddStringToObject(match, "name", result.matches[index].name);
+          }
           cJSON_AddItemToArray(matches, match);
         }
+        break;
+      }
+      case DeviceCommandKind::ListDirectory: {
+        if (!result.directoryPath[0]) { cJSON_Delete(root); return false; }
+        cJSON_AddStringToObject(body, "directory_path", result.directoryPath);
+        cJSON *entries = cJSON_AddArrayToObject(body, "entries");
+        if (!entries) { cJSON_Delete(root); return false; }
+        const uint8_t count = min<uint8_t>(result.matchCount, MaxDeviceMatches);
+        for (uint8_t index = 0; index < count; ++index) {
+          if (!result.matches[index].path[0]) { cJSON_Delete(root); return false; }
+          cJSON *entry = cJSON_CreateObject();
+          cJSON_AddStringToObject(entry, "path", result.matches[index].path);
+          cJSON_AddStringToObject(entry, "kind",
+                                  result.matches[index].directory ? "folder" : "file");
+          cJSON_AddItemToArray(entries, entry);
+        }
+        if (result.hasNextCursor) cJSON_AddNumberToObject(body, "next_cursor", result.nextCursor);
+        else cJSON_AddNullToObject(body, "next_cursor");
         break;
       }
       case DeviceCommandKind::GetTime:
@@ -577,6 +609,17 @@ bool parseMessage(const uint8_t *json, size_t length, const char *expectedSessio
         return false;
       }
       message.selectionId = static_cast<uint8_t>(parsed);
+    } else if (message.deviceCommand == DeviceCommandKind::ListDirectory) {
+      static constexpr const char *Keys[] = {"selection_id", "cursor"};
+      cJSON *selectionId = cJSON_GetObjectItemCaseSensitive(arguments, "selection_id");
+      cJSON *cursor = cJSON_GetObjectItemCaseSensitive(arguments, "cursor");
+      uint32_t parsedSelection = 0;
+      if (!hasOnlyKeys(arguments, Keys, 2) || !validUint32(selectionId, parsedSelection) ||
+          parsedSelection > MaxDeviceMatches || !validUint32(cursor, message.cursor)) {
+        cJSON_Delete(root);
+        return false;
+      }
+      message.selectionId = static_cast<uint8_t>(parsedSelection);
     } else if (message.deviceCommand == DeviceCommandKind::SetVolume) {
       static constexpr const char *Keys[] = {"level"};
       cJSON *level = cJSON_GetObjectItemCaseSensitive(arguments, "level");

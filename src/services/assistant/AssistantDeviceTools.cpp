@@ -45,8 +45,15 @@ void copyFileType(const char *name, FileFormats::Format format, char *output, si
 AssistantDeviceTools::AssistantDeviceTools(SdCardController &sdCard)
     : _sdCard(sdCard), _selections{}, _selectionExpiresAt(0), _scanDeadlineMs(0),
       _scanBusy(false), _scanCancelled(nullptr), _scanCancelContext(nullptr),
-      _searchKind(XiaozhiProtocol::DeviceCommandKind::None) {
+      _searchKind(XiaozhiProtocol::DeviceCommandKind::None), _listingDirectory(),
+      _listingPath(), _listingPendingPath(), _listingExpectedCursor(0),
+      _listingExpiresAt(0), _listingSelectionId(0), _listingPendingDirectory(false),
+      _listingHasPending(false) {
   clearSelections();
+}
+
+AssistantDeviceTools::~AssistantDeviceTools() {
+  closeDirectoryListing();
 }
 
 void AssistantDeviceTools::clearSelections() {
@@ -58,6 +65,30 @@ void AssistantDeviceTools::clearSelections() {
   }
   _selectionExpiresAt = 0;
   _searchKind = XiaozhiProtocol::DeviceCommandKind::None;
+}
+
+bool AssistantDeviceTools::closeDirectoryListing() {
+  bool closed = true;
+  if (_listingDirectory) {
+    if (lockSd()) {
+      _listingDirectory.close();
+      SpiBusLock::unlock();
+    } else {
+      closed = false;
+    }
+  }
+  if (closed) _listingPath = "";
+  _listingPendingPath = "";
+  _listingExpectedCursor = 0;
+  _listingExpiresAt = 0;
+  _listingSelectionId = 0;
+  _listingPendingDirectory = false;
+  _listingHasPending = false;
+  return closed;
+}
+
+void AssistantDeviceTools::clearDirectoryListing() {
+  closeDirectoryListing();
 }
 
 XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::searchAudio(const char *queryText) {
@@ -267,7 +298,11 @@ void AssistantDeviceTools::considerPath(const String &path, bool directory, cons
   if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchVideos &&
       (directory || !FileFormats::isVideo(format) || !FileFormats::isOpenable(format))) return;
   if (_searchKind != XiaozhiProtocol::DeviceCommandKind::SearchFiles && directory) return;
-  const uint16_t score = scoreMatch(normalizedName(baseName(path)), query);
+  uint16_t score = scoreMatch(normalizedName(baseName(path)), query);
+  if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchFiles) {
+    const uint16_t pathScore = scoreMatch(normalizedName(path), query);
+    if (pathScore > score) score = pathScore;
+  }
   if (score) insertMatch(path, directory, score, result);
 }
 
@@ -293,15 +328,205 @@ void AssistantDeviceTools::insertMatch(const String &path, bool directory, uint1
     XiaozhiProtocol::DeviceToolMatch &match = result.matches[result.matchCount++];
     match.selectionId = index + 1;
     if (_searchKind == XiaozhiProtocol::DeviceCommandKind::SearchFiles) {
-      const String &selectedPath = _selections[index].path;
-      const int16_t slash = selectedPath.lastIndexOf('/');
-      XiaozhiProtocol::copyUtf8Bounded(selectedPath.c_str() + slash + 1,
-                                       match.name, sizeof(match.name));
+      XiaozhiProtocol::copyUtf8Bounded(_selections[index].path.c_str(),
+                                       match.path, sizeof(match.path));
     } else {
       copyDisplayName(_selections[index].path, match.name, sizeof(match.name));
     }
     match.directory = _selections[index].directory;
   }
+}
+
+bool AssistantDeviceTools::startDirectoryListing(
+    uint8_t selectionId, XiaozhiProtocol::DeviceToolResult &result) {
+  if (!closeDirectoryListing()) {
+    result.error = XiaozhiProtocol::DeviceToolError::Busy;
+    return false;
+  }
+  String path;
+  if (selectionId == 0) {
+    path = "/";
+  } else {
+    if (!selectionValid(selectionId) ||
+        _searchKind != XiaozhiProtocol::DeviceCommandKind::SearchFiles ||
+        !_selections[selectionId - 1].directory) {
+      result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+      return false;
+    }
+    path = _selections[selectionId - 1].path;
+    if (hiddenOrPrivate(path)) {
+      result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+      return false;
+    }
+  }
+  if (path.length() > MaxPathBytes || !lockSd()) {
+    result.error = path.length() > MaxPathBytes
+        ? XiaozhiProtocol::DeviceToolError::SelectionUnavailable
+        : XiaozhiProtocol::DeviceToolError::Busy;
+    return false;
+  }
+  _listingDirectory = SD.open(path, FILE_READ);
+  const bool valid = _listingDirectory && _listingDirectory.isDirectory();
+  if (!valid && _listingDirectory) _listingDirectory.close();
+  SpiBusLock::unlock();
+  if (!valid) {
+    result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+    return false;
+  }
+  _listingPath = path;
+  _listingSelectionId = selectionId;
+  _listingExpectedCursor = 0;
+  _listingExpiresAt = millis() + SelectionLifetimeMs;
+  return true;
+}
+
+AssistantDeviceTools::ListingRead AssistantDeviceTools::readDirectoryEntry(
+    String &path, bool &directory, bool (*cancelled)(void *), void *cancelContext) {
+  path = "";
+  directory = false;
+  if (cancelled && cancelled(cancelContext)) return ListingRead::Cancelled;
+  if (!_sdCard.isMounted()) return ListingRead::Unavailable;
+  if (_listingHasPending) {
+    path = _listingPendingPath;
+    directory = _listingPendingDirectory;
+    _listingPendingPath = "";
+    _listingPendingDirectory = false;
+    _listingHasPending = false;
+    return ListingRead::Found;
+  }
+  for (;;) {
+    if (cancelled && cancelled(cancelContext)) return ListingRead::Cancelled;
+    if (!_sdCard.isMounted()) return ListingRead::Unavailable;
+    if (!lockSd()) return ListingRead::Busy;
+    fs::File entry = _listingDirectory.openNextFile();
+    if (!entry) {
+      _listingDirectory.close();
+      SpiBusLock::unlock();
+      return ListingRead::End;
+    }
+    const String entryPath = entry.path() ? String(entry.path()) : String();
+    const bool directoryEntry = entry.isDirectory();
+    entry.close();
+    SpiBusLock::unlock();
+    if (entryPath.length() <= MaxPathBytes && !hiddenOrPrivate(entryPath) &&
+        (directoryEntry || !FileFormats::isInternal(FileFormats::fromPath(entryPath)))) {
+      path = entryPath;
+      directory = directoryEntry;
+      return ListingRead::Found;
+    }
+    vTaskDelay(1);
+  }
+}
+
+XiaozhiProtocol::DeviceToolResult AssistantDeviceTools::listDirectory(
+    uint8_t selectionId, uint32_t cursor, bool (*cancelled)(void *), void *cancelContext) {
+  XiaozhiProtocol::DeviceToolResult result = {};
+  result.clear();
+  result.command = XiaozhiProtocol::DeviceCommandKind::ListDirectory;
+  if (!_sdCard.isMounted()) {
+    closeDirectoryListing();
+    result.error = XiaozhiProtocol::DeviceToolError::StorageUnavailable;
+    return result;
+  }
+  if (cursor == 0) {
+    if (!startDirectoryListing(selectionId, result)) return result;
+  } else {
+    const bool expired = _listingExpiresAt == 0 ||
+        static_cast<int32_t>(millis() - _listingExpiresAt) >= 0;
+    if (!_listingDirectory || expired || selectionId != _listingSelectionId ||
+        cursor != _listingExpectedCursor) {
+      if (expired) closeDirectoryListing();
+      result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+      return result;
+    }
+  }
+  XiaozhiProtocol::copyUtf8Bounded(_listingPath.c_str(), result.directoryPath,
+                                   sizeof(result.directoryPath));
+  while (result.matchCount < MaxMatches) {
+    String path;
+    bool directory = false;
+    const ListingRead read = readDirectoryEntry(path, directory, cancelled, cancelContext);
+    if (read == ListingRead::Found) {
+      auto &entry = result.matches[result.matchCount++];
+      XiaozhiProtocol::copyUtf8Bounded(path.c_str(), entry.path, sizeof(entry.path));
+      entry.directory = directory;
+      vTaskDelay(1);
+      continue;
+    }
+    if (read == ListingRead::End) {
+      result.ok = true;
+      closeDirectoryListing();
+      return result;
+    }
+    if (read == ListingRead::Unavailable) {
+      closeDirectoryListing();
+      result.error = XiaozhiProtocol::DeviceToolError::StorageUnavailable;
+      return result;
+    }
+    if (read == ListingRead::Cancelled) closeDirectoryListing();
+    if (read == ListingRead::Busy && result.matchCount) {
+      _listingExpectedCursor = cursor == 0 ? 1 : cursor + 1;
+      if (_listingExpectedCursor == 0) {
+        closeDirectoryListing();
+        result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+        return result;
+      }
+      _listingExpiresAt = millis() + SelectionLifetimeMs;
+      result.ok = true;
+      result.hasNextCursor = true;
+      result.nextCursor = _listingExpectedCursor;
+      return result;
+    }
+    result.error = XiaozhiProtocol::DeviceToolError::Busy;
+    return result;
+  }
+
+  String pendingPath;
+  bool pendingDirectory = false;
+  const ListingRead lookahead = readDirectoryEntry(
+      pendingPath, pendingDirectory, cancelled, cancelContext);
+  if (lookahead == ListingRead::Found) {
+    _listingPendingPath = pendingPath;
+    _listingPendingDirectory = pendingDirectory;
+    _listingHasPending = true;
+    _listingExpectedCursor = cursor == 0 ? 1 : cursor + 1;
+    if (_listingExpectedCursor == 0) {
+      closeDirectoryListing();
+      result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+      return result;
+    }
+    _listingExpiresAt = millis() + SelectionLifetimeMs;
+    result.ok = true;
+    result.hasNextCursor = true;
+    result.nextCursor = _listingExpectedCursor;
+    return result;
+  }
+  if (lookahead == ListingRead::End) {
+    result.ok = true;
+    closeDirectoryListing();
+    return result;
+  }
+  if (lookahead == ListingRead::Unavailable) {
+    closeDirectoryListing();
+    result.error = XiaozhiProtocol::DeviceToolError::StorageUnavailable;
+    return result;
+  }
+  if (lookahead == ListingRead::Busy) {
+    _listingExpectedCursor = cursor == 0 ? 1 : cursor + 1;
+    if (_listingExpectedCursor == 0) {
+      closeDirectoryListing();
+      result.error = XiaozhiProtocol::DeviceToolError::SelectionUnavailable;
+      return result;
+    }
+    _listingExpiresAt = millis() + SelectionLifetimeMs;
+    result.ok = true;
+    result.hasNextCursor = true;
+    result.nextCursor = _listingExpectedCursor;
+    return result;
+  }
+  if (lookahead == ListingRead::Cancelled) closeDirectoryListing();
+  result.error = XiaozhiProtocol::DeviceToolError::Busy;
+  return result;
 }
 
 bool AssistantDeviceTools::before(const Selection &left, const Selection &right) {

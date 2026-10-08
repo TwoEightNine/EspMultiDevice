@@ -141,16 +141,21 @@ class LLMProvider(LLMProviderBase):
                         continue
                     item_id = getattr(event, "item_id", None) or getattr(item, "id", None)
                     call_id = getattr(item, "call_id", None) or item_id
-                    index = getattr(event, "output_index", next_index)
-                    next_index = max(next_index, index + 1)
-                    calls[item_id] = {
-                        "index": index,
-                        "id": call_id,
-                        "name": getattr(item, "name", ""),
-                        "sent": 0,
-                    }
+                    state = calls.get(item_id)
+                    if state is None:
+                        state = {
+                            "index": next_index,
+                            "id": call_id,
+                            "name": getattr(item, "name", ""),
+                            "sent": 0,
+                        }
+                        calls[item_id] = state
+                        next_index += 1
+                    else:
+                        state["id"] = call_id or state["id"]
+                        state["name"] = getattr(item, "name", "") or state["name"]
                     yield "", [self._tool_delta(
-                        index, call_id, getattr(item, "name", ""), ""
+                        state["index"], state["id"], state["name"], ""
                     )]
                     continue
 
@@ -158,15 +163,14 @@ class LLMProvider(LLMProviderBase):
                     item_id = getattr(event, "item_id", None)
                     state = calls.get(item_id)
                     if state is None:
-                        index = getattr(event, "output_index", next_index)
-                        next_index = max(next_index, index + 1)
                         state = {
-                            "index": index,
+                            "index": next_index,
                             "id": item_id,
                             "name": "",
                             "sent": 0,
                         }
                         calls[item_id] = state
+                        next_index += 1
                     delta = getattr(event, "delta", "")
                     state["sent"] += len(delta)
                     yield "", [self._tool_delta(
@@ -181,9 +185,9 @@ class LLMProvider(LLMProviderBase):
                     item_id = getattr(event, "item_id", None) or getattr(item, "id", None)
                     state = calls.get(item_id)
                     if state is None:
-                        index = getattr(event, "output_index", next_index)
-                        next_index = max(next_index, index + 1)
-                        state = {"index": index, "id": None, "name": "", "sent": 0}
+                        state = {"index": next_index, "id": None, "name": "", "sent": 0}
+                        calls[item_id] = state
+                        next_index += 1
                     call_id = getattr(item, "call_id", None) or state["id"] or item_id
                     name = getattr(item, "name", None) or state["name"]
                     arguments = self._content(getattr(item, "arguments", ""))

@@ -135,6 +135,9 @@ UI-owned Assistant controller; settings report success only after persistence.
 The battery command reports the most recent one-second smoothed measurement as
 `voltage_mv`. Voltage alone does not establish state of charge or whether the
 cell is charging. An absent or invalid sample returns `unavailable`.
+Capability version 3 preserves that catalog, changes `search_files` matches to
+exact SD-root-relative paths, and adds `list_directory`. The backend retains
+the exact version-2 schemas for older clients.
 
 While Ready, firmware sends an application ping every 60 seconds and requires
 a pong within 10 seconds. Any reconnect clears the screen transcript and shows
@@ -202,7 +205,17 @@ lookup and playback; `File.name()` on Arduino-ESP32 contains only the basename.
 The other local searches share audio's bounded, latest-only selection set and
 normal-storage privacy filter. `search_files` includes ordinary files of any
 type and folders with their displayed filename extensions; internal cache
-formats remain excluded. `show_file_info` returns name/type/size/modified time for a
+formats remain excluded. Version 3 ranks both basenames and normalized complete
+SD-relative paths, then returns the selected path so the assistant can answer
+where a match is located. `list_directory` uses selection ID zero for root or
+an unexpired folder selection from `search_files`, returns at most five direct
+children per page, and accepts only its own active continuation cursor. Its
+worker-owned directory iterator has a rolling 120-second expiry and closes on
+completion, restart, cancellation, storage loss, session close, or reconnect.
+Page order is the SD filesystem's iterator order rather than an alphabetical
+sort.
+Listings preserve the same hidden/system/cache/secret filter and never read
+file contents. `show_file_info` returns name/type/size/modified time for a
 selected file but never contents or path. Image, video, and folder launches
 deactivate Assistant before entering their existing screens. `search_web`
 passes search words, never a URL, to the Browser's fixed DuckDuckGo Lite

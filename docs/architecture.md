@@ -308,8 +308,10 @@ headroom.
 searches normal mounted SD storage only: each directory operation takes the
 shared SPI lock briefly, yields between entries, and excludes secret, hidden,
 system, and cache paths. WAV/MP3 classification comes only from `FileFormats`.
-It returns at most five normalized filename matches with opaque IDs, never
-paths; selections expire after 120 seconds and are revalidated before play.
+It returns at most five normalized filename matches with opaque IDs; version-3
+file searches additionally expose exact user-facing SD-relative paths while
+never accepting a path back as authority. Selections expire after 120 seconds
+and are revalidated before play.
 An accepted play request is first returned to the backend, then published as a
 generation-tagged `LaunchAudio` event. `AssistantScreen` deactivates the
 session before pushing `AudioPlayer` with the retained local path, preventing
@@ -325,6 +327,16 @@ and pushes the selected screen with a `Navigator` payload. Files accepts a
 normal-folder payload, while Browser accepts only a search-query payload and
 builds its fixed provider URL internally. Neither worker nor backend receives
 navigation authority.
+
+Version 3 adds a separate paged directory-listing context. Selection ID zero
+opens the visible SD root, while IDs 1–5 must be unexpired folder selections
+from `search_files`. The context owns one open directory iterator, its path,
+expected continuation cursor, optional prefetched entry, and rolling
+120-second expiry. It returns at most five direct-child SD-relative paths per
+page in filesystem iterator order, keeps every iterator transaction under
+`SpiBusLock`, and closes on end,
+restart, cancellation, SD loss, session close, or reconnect. Listing produces
+only a correlated device result; it never publishes a navigation event.
 
 ## Assistant dependency and compatibility history
 

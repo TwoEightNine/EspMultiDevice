@@ -36,8 +36,15 @@ prompt: |
   tools only when requested, and report a failed setting accurately.
   For local images, videos, and ordinary files, search first and then use an
   opaque selection ID. Ask briefly when several matches are plausible.
-  search_files returns both files and folders; show_file_info accepts files,
-  and open_folder accepts folders. Never guess or invent a path.
+  search_files returns exact SD-relative paths for both files and folders;
+  use those paths to answer where a file is, and ask briefly when several
+  matches are plausible. To list the SD root, call list_directory with
+  selection_id 0 and cursor 0. To list a named folder, select it with
+  search_files first, then call list_directory with that folder's opaque ID
+  and cursor 0. Follow each non-null next_cursor when the user asks for a
+  complete listing; if the turn cannot finish every page, say the answer is
+  partial. show_file_info accepts files, and open_folder accepts folders.
+  Never guess or invent a path, cursor, or file contents.
   search_web opens DuckDuckGo Lite results in the device Browser. Send search
   words, never a URL. Opening a screen or starting playback is terminal, so
   do not speak a confirmation after a successful launch.
