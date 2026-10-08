@@ -55,7 +55,7 @@ Without a card-detect pin, `SdCardController` probes an attached card every 500 
 
 The UI loop must continue to process touch and redraw while expensive work is under way. Files thumbnails, browser inline images, and animated-image cache loading use worker work on the other core; results are returned to the UI task for display updates. Do not let a worker redraw UI directly.
 
-An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its Lua state, bounded app-file transactions, and callback limits. It publishes validated, fixed-size UI scenes to `AppHostScreen`; only the UI task renders them and converts button hit tests into action IDs. Final navigation is deferred until the worker stops, then its task, queue, and Lua state are released. The launcher scans one package per `tick()` and polls mount state without consuming the single-recipient SD event. See [external-apps.md](external-apps.md) for the SD format and SDK.
+An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its Lua state, bounded app-file transactions, callback limits, and SDK 2 tone queue. SDK 1 publishes fixed-size row scenes; SDK 2 may publish bounded, complete drawing frames. Only the UI task renders them, within a viewport below the shared app bar, and forwards content-relative touch-down coordinates. The worker uses non-blocking speaker writes and stops output during exit or failure. Final navigation is deferred until the worker stops, then its task, queue, and Lua state are released. The launcher scans one package per `tick()` and polls mount state without consuming the single-recipient SD event. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
 Navigator records free/largest internal heap and free/largest PSRAM before and
 after every successful final screen release. This is the hardware audit point
@@ -211,8 +211,12 @@ AssistantController is the UI-facing boundary. Its commands include manual
 turn start/cancel, Auto-listen, authenticated conversation reset, retry, and
 screen activation/deactivation. Callers receive a value copy of the
 mutex-protected AssistantSnapshot and copy transcript entries through the same
-mutex. The screen-scoped PSRAM ring retains five completed exchanges plus one
-draft: user text is UTF-8-safe at 192 bytes and assistant text at 384 bytes.
+mutex. While its screen is active, the controller also reconciles the physical
+microphone power-sense line into that snapshot on every UI tick; loss of power
+disarms Auto-listen and generation-cancels pending or active capture without
+tearing down the authenticated session. The screen-scoped PSRAM ring retains
+five completed exchanges plus one draft: user text is UTF-8-safe at 192 bytes
+and assistant text at 384 bytes.
 Completion of a sixth exchange evicts only the oldest; cancellation discards
 the draft. Snapshots and events never contain credentials, Authorization
 headers, complete WSS URLs, device/session IDs, or raw JSON.

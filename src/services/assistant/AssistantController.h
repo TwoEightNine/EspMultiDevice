@@ -65,6 +65,7 @@ private:
   bool _lastWifiConnected;
   bool _resetPending;
   bool _turnPending;
+  bool _micLossCancelPending;
   String _pendingAudioLaunch;
   XiaozhiProtocol::DeviceCommandKind _pendingLaunchKind;
   String _pendingLaunchValue;
@@ -74,6 +75,7 @@ private:
   uint32_t nextGeneration();
   bool send(XiaozhiSessionCommandType type, uint32_t generation);
   bool sendResetConversation();
+  void refreshMicAvailability();
   void syncTranscriptMetadata();
   void apply(const XiaozhiSessionEvent &event);
   void handleUiAction(const XiaozhiSessionEvent &event);

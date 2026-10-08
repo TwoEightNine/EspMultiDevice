@@ -435,7 +435,8 @@ void setup() {
   );
   appLauncherScreen = new AppLauncherScreen(*navigator, *touch, *display, *sdCard);
   appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
-                                    *wifiController, *batteryHistory);
+                                    *wifiController, *batteryHistory,
+                                    *speaker, *audioSettings);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));

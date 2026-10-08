@@ -101,9 +101,11 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
     } else if (!cJSON_IsString(manifestName) || !manifestName->valuestring ||
                !manifestName->valuestring[0] || strlen(manifestName->valuestring) > 40) {
       result.error = "Invalid app name";
-    } else if (!cJSON_IsNumber(sdk) || sdk->valuedouble != 1) {
+    } else if (!cJSON_IsNumber(sdk) ||
+               (sdk->valuedouble != 1 && sdk->valuedouble != 2)) {
       result.error = "Unsupported SDK version";
     } else {
+      result.sdk = static_cast<uint8_t>(sdk->valuedouble);
       result.name = manifestName->valuestring;
       if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
         result.error = "SD busy";

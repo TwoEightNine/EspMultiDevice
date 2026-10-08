@@ -28,7 +28,7 @@ Normal boot constructs the keyboard and consumer-control descriptors without con
 
 The **USB Drive** Home app records a one-shot Preferences flag and restarts into an isolated transfer boot. That boot does not create any media, browser, download, recording, or cache workers. It explicitly starts an MSC-only TinyUSB device on the native GPIO 19/20 connector. Before marking its medium present, it closes FatFs and reinitializes the Arduino-ESP32 3.3.8 SPI SD driver as an unmounted raw 512-byte block device. The physical card, including its MBR and FAT32 partition, is then exposed as writable USB mass storage named `ESP Media SD`; the filesystem volume label itself is preserved. UART0 remains available for logs and recovery through the separate USB-to-UART connector.
 
-External apps are discovered under `/Apps` when the launcher opens or the card remounts. SDK 1 app data lives under `/.system/appdata/<id>` on that card. Writes use a temporary file and rename, and reads/writes yield between 1 KiB SPI-locked chunks. App code cannot address other SD paths through the SDK. Removing the card stops an open app; reinserting it allows the launcher to rescan. Package bounds and the public API are specified in [external-apps.md](external-apps.md).
+External apps are discovered under `/Apps` when the launcher opens or the card remounts. SDK 1 and 2 app data lives under `/.system/appdata/<id>` on that card. Writes use a temporary file and rename, and reads/writes yield between 1 KiB SPI-locked chunks. App code cannot address other SD paths through the SDK. SDK 2 uses the shared speaker for bounded queued tones and the persisted global volume; its worker stops output when the app closes or the card is removed. Reinserting the card allows the launcher to rescan. Package bounds and the public API are specified in [external-apps.md](external-apps.md).
 
 While the Mac owns the card, device-side filesystem access is unavailable. Raw transfers validate the full byte range, handle partial-sector requests with read/modify/write, and release `SpiBusLock` between sectors for touch polling. The screen can be cancelled before host block access starts. Once active, eject the volume in Finder; the host stop/eject command withdraws the medium, deinitializes raw storage, and restarts into normal mode. A USB disconnect also returns to normal mode when the device remains externally powered. Suspend/resume is not treated as eject.
 
@@ -98,7 +98,12 @@ OpusCodec binding; the decoder accepts only 16 or 24 kHz mono output. The
 speaker starts only after microphone shutdown. Normal TTS completion drains
 the bounded downlink ring and I2S DMA before mute/stop; cancellation discards
 queued audio immediately. The persisted global speaker volume remains
-authoritative.
+authoritative. While the Assistant screen is active, its controller samples the
+optional microphone power-sense line on every UI tick. Turning the switch on
+immediately restores the Ready microphone action without restarting; turning it
+off updates the action, disarms Auto-listen, and safely cancels a pending or
+active listening turn. Thinking and playback may finish because they no longer
+use microphone input.
 
 Command/event queue depths of four/eight, four uplink frames (240 ms), and eight
 downlink packets (480 ms) are the hard queue limits. Overflow closes the

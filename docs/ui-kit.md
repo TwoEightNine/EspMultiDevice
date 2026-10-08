@@ -89,6 +89,8 @@ icon requires the same immediate background color used on its first draw.
 
 The external-app host draws SDK 1 pages with the shared 48px app bar, `drawListCell()` for text, and `drawFilledButton()` for action rows. The complete 40px row is the action hit target. App scripts submit data only; they never call TFT_eSPI or choose a separate navigation icon.
 
+SDK 2 canvas commands are still rendered by the host UI task. The host clips them below the same app bar and uses `UiText` for app text and `UiKit` for submitted buttons and progress bars. Apps supply the immediate background to smooth drawing primitives and own the full hit rectangles of content controls through `on_touch(x, y)`; the host always owns the close cell.
+
 Rounded controls are fill-only smooth rounded rectangles: use `fillSmoothRoundRect()` with the fill as the edge background, never an outline. Labels default to `UiText::Size::Content`; numeric PIN keys are the sole exception and use `Title`.
 
 Use `UiKit::drawFilledButton()` for ordinary rounded text buttons. The helper draws the fill and ellipsized `Content` label with the supplied immediate background; the screen retains responsibility for making the complete button rectangle tappable.

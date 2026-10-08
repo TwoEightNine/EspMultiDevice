@@ -12,6 +12,7 @@ struct AppPackage {
   String id;
   String name;
   String error;
+  uint8_t sdk = 0;
   bool valid = false;
 
   static bool validId(const String &value);

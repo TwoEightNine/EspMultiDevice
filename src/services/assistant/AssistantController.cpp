@@ -23,7 +23,8 @@ AssistantController::AssistantController(WiFiController &wifi, TimeController &t
       _config(config), _session(nullptr),
       _snapshotMutex(nullptr), _snapshot{}, _transcript{}, _generation(0), _begun(false),
       _screenActive(false), _deactivationPending(false), _disposeSession(false),
-      _lastWifiConnected(false), _resetPending(false), _turnPending(false), _pendingAudioLaunch(),
+      _lastWifiConnected(false), _resetPending(false), _turnPending(false),
+      _micLossCancelPending(false), _pendingAudioLaunch(),
       _pendingLaunchKind(XiaozhiProtocol::DeviceCommandKind::None), _pendingLaunchValue() {
   _snapshot.clear();
 }
@@ -54,6 +55,7 @@ void AssistantController::activate() {
   _screenActive = true;
   _deactivationPending = false;
   _turnPending = false;
+  _micLossCancelPending = false;
   _lastWifiConnected = _wifi.isConnected();
   const uint32_t generation = nextGeneration();
   xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
@@ -87,6 +89,7 @@ void AssistantController::deactivate() {
   _snapshot.resettingConversation = false;
   _resetPending = false;
   _turnPending = false;
+  _micLossCancelPending = false;
   copyBounded("Closing safely", _snapshot.status, sizeof(_snapshot.status));
   ++_snapshot.revision;
   xSemaphoreGive(_snapshotMutex);
@@ -100,7 +103,7 @@ void AssistantController::deactivate() {
 void AssistantController::startTurn() {
   const AssistantSnapshot current = snapshot();
   if (!_begun || !_screenActive || current.phase != AssistantPhase::Ready ||
-      _turnPending) return;
+      !current.micAvailable || _turnPending) return;
   _turnPending = true;
   const uint32_t generation = nextGeneration();
   xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
@@ -131,7 +134,8 @@ void AssistantController::setAutoListen(bool enabled) {
   bool cancel = false;
   xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
   _snapshot.autoListen = enabled;
-  start = enabled && _snapshot.phase == AssistantPhase::Ready && !_resetPending;
+  start = enabled && _snapshot.phase == AssistantPhase::Ready &&
+      _snapshot.micAvailable && !_resetPending;
   cancel = !enabled && _snapshot.phase == AssistantPhase::Listening;
   ++_snapshot.revision;
   xSemaphoreGive(_snapshotMutex);
@@ -161,7 +165,8 @@ void AssistantController::newConversation() {
 
 void AssistantController::cancelTurn() {
   const AssistantSnapshot current = snapshot();
-  if (!_begun || !_screenActive || !turnActive(current.phase)) return;
+  if (!_begun || !_screenActive ||
+      (!turnActive(current.phase) && !_turnPending)) return;
   const uint32_t generation = nextGeneration();
   xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
   _snapshot.generation = generation;
@@ -231,6 +236,7 @@ void AssistantController::tick(uint32_t nowMs) {
     }
     memset(&event, 0, sizeof(event));
   }
+  refreshMicAvailability();
   if (_disposeSession && _session && !_session->running()) {
     // The worker sends Deactivated only after full session teardown and
     // credential wiping.
@@ -409,6 +415,34 @@ bool AssistantController::sendResetConversation() {
   return send(XiaozhiSessionCommandType::ResetConversation, generation);
 }
 
+void AssistantController::refreshMicAvailability() {
+  if (!_screenActive || _deactivationPending || _disposeSession) return;
+  const bool available = _mic.isReady() && _mic.isPowered();
+  bool cancelListening = false;
+  xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
+  if (available) {
+    _micLossCancelPending = false;
+  } else if (!_micLossCancelPending &&
+             (_snapshot.phase == AssistantPhase::Listening || _turnPending)) {
+    _micLossCancelPending = true;
+    cancelListening = true;
+  }
+  if (_snapshot.micAvailable != available) {
+    _snapshot.micAvailable = available;
+    if (!available) {
+      _snapshot.autoListen = false;
+      if (_snapshot.phase == AssistantPhase::Ready && !_turnPending) {
+        copyBounded("Turn mic switch on", _snapshot.status, sizeof(_snapshot.status));
+      }
+    } else if (_snapshot.phase == AssistantPhase::Ready && !_turnPending) {
+      copyBounded("Ready", _snapshot.status, sizeof(_snapshot.status));
+    }
+    ++_snapshot.revision;
+  }
+  xSemaphoreGive(_snapshotMutex);
+  if (cancelListening) cancelTurn();
+}
+
 void AssistantController::syncTranscriptMetadata() {
   _snapshot.transcriptRevision = _transcript.revision();
   _snapshot.transcriptCount = _transcript.count();
@@ -422,16 +456,19 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
   if (event.type == XiaozhiSessionEventType::Phase) {
     if (event.phase == AssistantPhase::Listening ||
         event.phase == AssistantPhase::Ready) _turnPending = false;
+    if (event.phase == AssistantPhase::Ready) _micLossCancelPending = false;
     _snapshot.phase = event.phase;
     _snapshot.micAvailable = event.micAvailable;
     _snapshot.error = AssistantError::None;
     _snapshot.retryable = false;
-    copyBounded(event.text, _snapshot.status, sizeof(_snapshot.status));
+    copyBounded(event.phase == AssistantPhase::Ready && !event.micAvailable
+                    ? "Turn mic switch on" : event.text,
+                _snapshot.status, sizeof(_snapshot.status));
     if (event.phase == AssistantPhase::Ready) {
       if (previousPhase == AssistantPhase::Speaking) _transcript.completeDraft();
       else if (strcmp(event.text, "Cancelled") == 0) _transcript.discardDraft();
       if (_resetPending) sendReset = true;
-      else startNext = _snapshot.autoListen;
+      else startNext = _snapshot.autoListen && event.micAvailable;
     }
   } else if (event.type == XiaozhiSessionEventType::Activation) {
     _snapshot.phase = AssistantPhase::NeedsActivation;
@@ -449,6 +486,7 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
     _snapshot.emotion = event.emotion;
   } else if (event.type == XiaozhiSessionEventType::Error) {
     _turnPending = false;
+    _micLossCancelPending = false;
     _transcript.discardDraft();
     if (_resetPending) {
       _resetPending = false;
@@ -468,6 +506,7 @@ void AssistantController::apply(const XiaozhiSessionEvent &event) {
     copyBounded(event.text, _snapshot.status, sizeof(_snapshot.status));
   } else if (event.type == XiaozhiSessionEventType::ContextLost) {
     _turnPending = false;
+    _micLossCancelPending = false;
     _transcript.clear();
     _snapshot.sttCaption[0] = 0;
     _snapshot.ttsCaption[0] = 0;
@@ -506,6 +545,7 @@ bool AssistantController::ensureSession() {
   _screenActive = false;
   _deactivationPending = false;
   _turnPending = false;
+  _micLossCancelPending = false;
   _resetPending = false;
   _pendingAudioLaunch = "";
   setLocalError(AssistantError::Internal, true, "Assistant worker unavailable");
@@ -521,6 +561,7 @@ void AssistantController::disposeSession() {
   _screenActive = false;
   _deactivationPending = false;
   _turnPending = false;
+  _micLossCancelPending = false;
   _resetPending = false;
   xSemaphoreTake(_snapshotMutex, portMAX_DELAY);
   _transcript.end();
