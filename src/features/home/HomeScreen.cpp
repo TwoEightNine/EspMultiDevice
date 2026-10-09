@@ -1,6 +1,7 @@
 #include "HomeScreen.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <string.h>
 
 #include "../../app/Navigator.h"
@@ -25,6 +26,14 @@ int compareFolded(const char *left, const char *right) {
   }
   return *a == *b ? 0 : (*a ? 1 : -1);
 }
+
+void hashBytes(uint64_t &hash, const void *data, size_t length) {
+  const uint8_t *bytes = static_cast<const uint8_t *>(data);
+  for (size_t index = 0; index < length; ++index) {
+    hash ^= bytes[index];
+    hash *= 1099511628211ULL;
+  }
+}
 }
 
 HomeScreen::HomeScreen(Navigator &navigator,
@@ -40,18 +49,34 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _time(time),
     _batteryHistory(batteryHistory),
     _catalogLoader(sdCard),
+    _pageStrip(&display.tft()),
+    _pageFrame(&display.tft()),
     _catalogRevision(0),
     _sdMounted(false),
     _wifiConnected(false),
     _batteryVoltage(0.0f),
     _gestureActive(false),
     _gestureCancelled(false),
-    _swipeHandled(false),
+    _horizontalDrag(false),
     _filesHoldTriggered(false),
+    _settling(false),
+    _pageStripReady(false),
     _pressedIndex(-1),
     _gestureStartX(0),
     _gestureStartY(0),
     _gestureStartedMs(0),
+    _velocityStartX(0),
+    _velocityEndX(0),
+    _velocityStartMs(0),
+    _velocityEndMs(0),
+    _gestureBaseScroll(0),
+    _visibleScroll(0),
+    _renderedScroll(INT32_MIN),
+    _settleFromScroll(0),
+    _settleToScroll(0),
+    _settleStartedMs(0),
+    _settleDurationMs(0),
+    _lastAnimationFrameMs(0),
     _lastClockCheckMs(0xffffffffUL),
     _lastBatteryGeneration(0),
     _lastClockText(""),
@@ -73,28 +98,64 @@ void HomeScreen::onEnter() {
   if (_sdMounted) _catalogLoader.requestScan();
 }
 
+void HomeScreen::onResume() {
+  const bool wasMounted = _sdMounted;
+  refreshSdState();
+  _wifiConnected = _wifi.isConnected();
+  _batteryVoltage = _batteryHistory.latest().smoothVoltage;
+  _lastBatteryGeneration = _batteryHistory.generation();
+  _lastClockCheckMs = 0xffffffffUL;
+  _lastClockText = "";
+  cancelMotion();
+
+  const bool hasCachedPage = _pageStripReady && _pageFrame.created();
+  if (hasCachedPage) restoreCachedPage();
+  if (wasMounted && !_sdMounted) {
+    _catalogLoader.cancel();
+    AppCatalogLoader::clearCatalog(_pendingCatalog);
+    updateCatalogTiles();
+  }
+  if (!hasCachedPage) draw();
+  if (_sdMounted) _catalogLoader.requestScan();
+}
+
+void HomeScreen::onExit() {
+  cancelMotion();
+}
+
 bool HomeScreen::releaseResources() {
+  destroyPageStrip();
   _catalogLoader.stop();
   if (!_catalogLoader.releaseResources()) return false;
   AppCatalogLoader::clearCatalog(_catalog);
+  AppCatalogLoader::clearCatalog(_pendingCatalog);
   return true;
 }
 
 void HomeScreen::handleTouch(const TouchPoint &point) {
+  const uint32_t nowMs = millis();
   if (!point.touched) {
-    if (_gestureActive && !_gestureCancelled && !_swipeHandled &&
-        !_filesHoldTriggered && _pressedIndex >= 0 && _pressedIndex < _appCount) {
-      activateApp(_apps[_pressedIndex]);
-    }
-    resetGesture();
+    if (_gestureActive) finishGesture(nowMs);
     return;
   }
 
   if (!_gestureActive) {
+    if (_settling) {
+      _visibleScroll = _settleToScroll;
+      _page = static_cast<uint8_t>(_settleToScroll / _display.width());
+      _settling = false;
+      renderPageViewport(true);
+    }
     _gestureActive = true;
+    _gestureCancelled = false;
+    _horizontalDrag = false;
+    _filesHoldTriggered = false;
     _gestureStartX = point.x;
     _gestureStartY = point.y;
-    _gestureStartedMs = millis();
+    _gestureStartedMs = nowMs;
+    _gestureBaseScroll = _visibleScroll;
+    _velocityStartX = _velocityEndX = static_cast<int16_t>(point.x);
+    _velocityStartMs = _velocityEndMs = nowMs;
     _pressedIndex = appAt(point.x, point.y);
     return;
   }
@@ -112,6 +173,7 @@ void HomeScreen::onResult(const ScreenResult &result) {
 void HomeScreen::tick(uint32_t nowMs) {
   const TouchPoint held = _touch.point();
   if (_gestureActive && held.touched) updateGesture(held.x, held.y);
+  if (_settling) updateSettle(nowMs);
 
   if (_gestureActive && !_gestureCancelled && !_filesHoldTriggered &&
       _pressedIndex >= 0 && _pressedIndex < _appCount &&
@@ -141,19 +203,25 @@ void HomeScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
   setWifiState(_wifi.isConnected());
 
-  if (!_gestureActive && _catalogLoader.takeCatalog(_catalog, _catalogRevision)) {
-    rebuildApps();
-    draw();
+  if (!_gestureActive && !_settling &&
+      _catalogLoader.takeCatalog(_pendingCatalog, _catalogRevision)) {
+    updateCatalogTiles();
   }
 }
 
 void HomeScreen::draw() {
   if (!_display.isReady()) return;
   layoutApps();
+  cancelMotion();
+  _visibleScroll = static_cast<int32_t>(_page) * _display.width();
+  _renderedScroll = INT32_MIN;
   _display.tft().fillScreen(TFT_BLACK);
   drawStatusBar();
-  drawApps();
-  drawPageIndicator();
+  if (buildPageStrip()) renderPageViewport(true);
+  else {
+    drawApps();
+    drawPageIndicator();
+  }
 }
 
 void HomeScreen::rebuildApps() {
@@ -186,8 +254,8 @@ void HomeScreen::rebuildApps() {
     app.iconAlpha = source.iconAlpha;
   }
   sortApps();
-  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
-  if (_page >= pageCount) _page = pageCount - 1;
+  const uint8_t pages = pageCount();
+  if (_page >= pages) _page = pages - 1;
   layoutApps();
 }
 
@@ -278,47 +346,65 @@ void HomeScreen::drawApps() {
   const uint8_t first = _page * PageSize;
   const uint8_t end = min<uint8_t>(_appCount, first + PageSize);
   for (uint8_t index = first; index < end; ++index) {
-    const AppTile &app = _apps[index];
-    const int16_t centerX = app.x + app.w / 2;
-    const int16_t centerY = app.y + 48;
-    tft.fillSmoothCircle(centerX, centerY, IconDiameter / 2,
-                         app.circleColor, TFT_BLACK);
-    drawAppIcon(app, centerX, centerY);
-    const String label = truncateLabel(String(app.label), app.w - 12);
-    UiText::draw(tft, label, centerX, app.y + 94, TFT_WHITE, TFT_BLACK,
-                 UiText::Size::Compact, TC_DATUM);
+    drawAppTileTo(tft, _apps[index], 0, 0);
   }
+}
+
+template <typename Canvas>
+void HomeScreen::drawAppTileTo(Canvas &canvas, const AppTile &app,
+                               int16_t xOffset, int16_t yOffset) {
+  const int16_t centerX = xOffset + app.x + app.w / 2;
+  const int16_t centerY = yOffset + app.y + 48;
+  canvas.fillSmoothCircle(centerX, centerY, IconDiameter / 2,
+                          app.circleColor, TFT_BLACK);
+  drawAppIconTo(canvas, app, centerX, centerY);
+  const String label = truncateLabel(String(app.label), app.w - 12);
+  UiText::draw(canvas, label, centerX, yOffset + app.y + 94,
+               TFT_WHITE, TFT_BLACK, UiText::Size::Compact, TC_DATUM);
 }
 
 void HomeScreen::drawPageIndicator() {
-  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
-  if (pageCount <= 1) return;
-  TFT_eSPI &tft = _display.tft();
-  constexpr int16_t spacing = 14;
-  const int16_t startX = (_display.width() - (pageCount - 1) * spacing) / 2;
-  constexpr int16_t y = 448;
-  for (uint8_t index = 0; index < pageCount; ++index) {
-    const uint16_t color = index == _page ? TFT_WHITE : TFT_DARKGREY;
-    tft.fillSmoothCircle(startX + index * spacing, y, index == _page ? 4 : 3,
-                         color, TFT_BLACK);
-  }
+  drawPageIndicatorTo(_display.tft(), 0);
 }
 
-void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
+void HomeScreen::drawPageIndicatorTo(TFT_eSPI &target, int16_t yOffset) {
+  constexpr int16_t indicatorTop = 436;
+  constexpr int16_t indicatorHeight = 25;
+  target.fillRect(0, indicatorTop - yOffset,
+                  _display.width(), indicatorHeight, TFT_BLACK);
+  const uint8_t pages = pageCount();
+  if (pages <= 1) return;
+  constexpr int16_t spacing = 14;
+  const int16_t startX = (_display.width() - (pages - 1) * spacing) / 2;
+  constexpr int16_t y = 448;
+  for (uint8_t index = 0; index < pages; ++index) {
+    target.fillSmoothCircle(startX + index * spacing, y - yOffset, 3,
+                            TFT_DARKGREY, TFT_BLACK);
+  }
+  const int32_t maximum = static_cast<int32_t>(pages - 1) * _display.width();
+  const int32_t clamped = min<int32_t>(maximum, max<int32_t>(0, _visibleScroll));
+  const int16_t markerX = startX + static_cast<int16_t>(
+      (clamped * spacing + _display.width() / 2) / _display.width());
+  target.fillSmoothCircle(markerX, y - yOffset, 4, TFT_WHITE, TFT_BLACK);
+}
+
+template <typename Canvas>
+void HomeScreen::drawAppIconTo(Canvas &canvas, const AppTile &app,
+                               int16_t centerX, int16_t centerY) {
   if (app.action == AppAction::External) {
     if (app.iconColors && app.iconAlpha) {
       UiKit::drawRgba565IconFromMemory(
-          _display.tft(), centerX - AppCatalogLoader::IconWidth / 2,
+          canvas, centerX - AppCatalogLoader::IconWidth / 2,
           centerY - AppCatalogLoader::IconHeight / 2,
           AppCatalogLoader::IconWidth, AppCatalogLoader::IconHeight,
           app.iconColors, app.iconAlpha, app.circleColor);
     } else {
-      UiKit::drawAppsIcon(_display.tft(), centerX, centerY, TFT_WHITE, app.circleColor);
+      UiKit::drawAppsIcon(canvas, centerX, centerY, TFT_WHITE, app.circleColor);
     }
     return;
   }
   if (app.action == AppAction::MacRemote) {
-    UiKit::drawMacRemoteIcon(_display.tft(), centerX, centerY, TFT_WHITE,
+    UiKit::drawMacRemoteIcon(canvas, centerX, centerY, TFT_WHITE,
                              app.circleColor);
     return;
   }
@@ -342,9 +428,249 @@ void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t center
     colors = ic_usb_colors; alpha = ic_usb_alpha; width = ic_usb_width; height = ic_usb_height;
   }
   if (colors && alpha) {
-    UiKit::drawRgba565Icon(_display.tft(), centerX - width / 2, centerY - height / 2,
+    UiKit::drawRgba565Icon(canvas, centerX - width / 2, centerY - height / 2,
                            width, height, colors, alpha, app.circleColor);
   }
+}
+
+bool HomeScreen::buildPageStrip() {
+  if (_pageStrip.created()) _pageStrip.deleteSprite();
+  _pageStripReady = false;
+  const int16_t stripWidth = static_cast<int16_t>(_display.width() * pageCount());
+  _pageStrip.setColorDepth(16);
+  if (!_pageStrip.createSprite(stripWidth, PageContentHeight)) {
+    Serial.printf("[Home] page strip allocation failed: %dx%d, psram=%u, largest=%u\n",
+                  stripWidth, PageContentHeight, ESP.getFreePsram(), ESP.getMaxAllocPsram());
+    return false;
+  }
+  if (!_pageFrame.created()) {
+    _pageFrame.setColorDepth(16);
+    if (!_pageFrame.createSprite(_display.width(), PageFrameHeight)) {
+      Serial.printf("[Home] page frame allocation failed: %ux%d, psram=%u, largest=%u\n",
+                    _display.width(), PageFrameHeight,
+                    ESP.getFreePsram(), ESP.getMaxAllocPsram());
+      _pageStrip.deleteSprite();
+      return false;
+    }
+    _pageFrame.fillSprite(TFT_BLACK);
+    _renderedScroll = INT32_MIN;
+  }
+
+  _pageStripReady = true;
+  _pageStrip.fillSprite(TFT_BLACK);
+  for (uint8_t index = 0; index < _appCount; ++index) {
+    const AppTile &app = _apps[index];
+    const int16_t pageOffset = static_cast<int16_t>(index / PageSize) * _display.width();
+    drawAppTileTo(_pageStrip, app, pageOffset, -StatusBarHeight);
+  }
+  return true;
+}
+
+void HomeScreen::destroyPageStrip() {
+  if (_pageFrame.created()) _pageFrame.deleteSprite();
+  if (_pageStrip.created()) _pageStrip.deleteSprite();
+  _pageStripReady = false;
+  _renderedScroll = INT32_MIN;
+}
+
+void HomeScreen::restoreCachedPage() {
+  if (!_display.isReady() || !_pageStripReady || !_pageFrame.created()) return;
+  _visibleScroll = static_cast<int32_t>(_page) * _display.width();
+  if (_renderedScroll != _visibleScroll) renderPageViewport(true);
+  else _pageFrame.pushSprite(0, StatusBarHeight);
+  if (_display.height() > PageFrameBottom) {
+    _display.tft().fillRect(0, PageFrameBottom, _display.width(),
+                            _display.height() - PageFrameBottom, TFT_BLACK);
+  }
+  drawStatusBar();
+}
+
+void HomeScreen::renderPageViewport(bool force) {
+  if (!_pageStripReady || !_display.isReady()) return;
+  const uint32_t nowMs = millis();
+  if (!force && _renderedScroll == _visibleScroll) return;
+  if (!force && nowMs - _lastAnimationFrameMs < AnimationFrameMs) return;
+
+  uint16_t *frame = static_cast<uint16_t *>(_pageFrame.getPointer());
+  const uint16_t *strip = static_cast<const uint16_t *>(_pageStrip.getPointer());
+  if (!frame || !strip) return;
+  const int32_t displayWidth = _display.width();
+  const int32_t stripWidth = displayWidth * pageCount();
+  const int32_t maximum = static_cast<int32_t>(pageCount() - 1) * _display.width();
+  int32_t sourceX = _visibleScroll;
+  int16_t destinationX = 0;
+  int16_t copyWidth = static_cast<int16_t>(displayWidth);
+  if (_visibleScroll < 0) {
+    destinationX = static_cast<int16_t>(min<int32_t>(displayWidth, -_visibleScroll));
+    sourceX = 0;
+    copyWidth = static_cast<int16_t>(displayWidth - destinationX);
+  } else if (_visibleScroll > maximum) {
+    const int16_t overscroll = static_cast<int16_t>(min<int32_t>(
+        displayWidth, _visibleScroll - maximum));
+    sourceX = maximum + overscroll;
+    copyWidth = static_cast<int16_t>(displayWidth - overscroll);
+  }
+
+  if (copyWidth < displayWidth) {
+    memset(frame, 0, static_cast<size_t>(displayWidth) * PageContentHeight * sizeof(uint16_t));
+  }
+  if (copyWidth > 0 && sourceX >= 0 && sourceX + copyWidth <= stripWidth) {
+    for (int16_t row = 0; row < PageContentHeight; ++row) {
+      memcpy(frame + static_cast<size_t>(row) * displayWidth + destinationX,
+             strip + static_cast<size_t>(row) * stripWidth + sourceX,
+             static_cast<size_t>(copyWidth) * sizeof(uint16_t));
+    }
+  }
+  drawPageIndicatorTo(_pageFrame, StatusBarHeight);
+  _pageFrame.pushSprite(0, StatusBarHeight);
+  _renderedScroll = _visibleScroll;
+  _lastAnimationFrameMs = nowMs;
+}
+
+void HomeScreen::updateCatalogTiles() {
+  uint64_t previous[MaxHomeApps] = {};
+  const uint8_t previousCount = _appCount;
+  const uint8_t previousPages = pageCount();
+  const uint8_t previousPage = _page;
+  for (uint8_t index = 0; index < previousCount; ++index) {
+    previous[index] = tileSignature(_apps[index]);
+  }
+
+  AppCatalogLoader::clearCatalog(_catalog);
+  _catalog = _pendingCatalog;
+  _pendingCatalog = AppCatalogLoader::Catalog{};
+  rebuildApps();
+
+  bool changed[MaxHomeApps] = {};
+  bool anyChanged = false;
+  const uint8_t comparedCount = max(previousCount, _appCount);
+  for (uint8_t index = 0; index < comparedCount; ++index) {
+    const bool differs = index >= previousCount || index >= _appCount ||
+        previous[index] != tileSignature(_apps[index]);
+    changed[index] = differs;
+    anyChanged |= differs;
+  }
+  const uint8_t currentPages = pageCount();
+  const bool pageStructureChanged = previousPages != currentPages;
+  if (!anyChanged && !pageStructureChanged) return;
+
+  if (_pageStripReady) {
+    if (pageStructureChanged) {
+      if (!buildPageStrip()) {
+        draw();
+        return;
+      }
+    } else {
+      for (uint8_t index = 0; index < comparedCount; ++index) {
+        if (changed[index]) redrawStripSlot(index);
+      }
+    }
+
+    if (previousPage != _page) {
+      _visibleScroll = static_cast<int32_t>(_page) * _display.width();
+      _renderedScroll = INT32_MIN;
+      renderPageViewport(true);
+      return;
+    }
+    for (uint8_t index = 0; index < comparedCount; ++index) {
+      if (changed[index]) presentSlot(index);
+    }
+    if (pageStructureChanged) presentPageIndicator();
+    return;
+  }
+
+  for (uint8_t index = 0; index < comparedCount; ++index) {
+    if (!changed[index] || index / PageSize != _page) continue;
+    int16_t x = 0;
+    int16_t y = 0;
+    int16_t width = 0;
+    int16_t height = 0;
+    slotBounds(index, x, y, width, height);
+    _display.tft().fillRect(x, y + StatusBarHeight, width, height, TFT_BLACK);
+    if (index < _appCount) drawAppTileTo(_display.tft(), _apps[index], 0, 0);
+  }
+  if (pageStructureChanged) drawPageIndicator();
+}
+
+void HomeScreen::redrawStripSlot(uint8_t index) {
+  if (!_pageStripReady || index >= MaxHomeApps) return;
+  int16_t x = 0;
+  int16_t y = 0;
+  int16_t width = 0;
+  int16_t height = 0;
+  slotBounds(index, x, y, width, height);
+  const int16_t pageOffset = static_cast<int16_t>(index / PageSize) * _display.width();
+  _pageStrip.fillRect(pageOffset + x, y, width, height, TFT_BLACK);
+  if (index < _appCount) {
+    drawAppTileTo(_pageStrip, _apps[index], pageOffset, -StatusBarHeight);
+  }
+}
+
+void HomeScreen::presentSlot(uint8_t index) {
+  if (!_pageStripReady || !_pageFrame.created() || index / PageSize != _page) return;
+  int16_t x = 0;
+  int16_t y = 0;
+  int16_t width = 0;
+  int16_t height = 0;
+  slotBounds(index, x, y, width, height);
+  uint16_t *frame = static_cast<uint16_t *>(_pageFrame.getPointer());
+  const uint16_t *strip = static_cast<const uint16_t *>(_pageStrip.getPointer());
+  if (!frame || !strip) return;
+  const int32_t displayWidth = _display.width();
+  const int32_t stripWidth = displayWidth * pageCount();
+  const int32_t sourceX = static_cast<int32_t>(_page) * displayWidth + x;
+  for (int16_t row = 0; row < height; ++row) {
+    memcpy(frame + static_cast<size_t>(y + row) * displayWidth + x,
+           strip + static_cast<size_t>(y + row) * stripWidth + sourceX,
+           static_cast<size_t>(width) * sizeof(uint16_t));
+  }
+  _pageFrame.pushSprite(x, y + StatusBarHeight, x, y, width, height);
+}
+
+void HomeScreen::presentPageIndicator() {
+  if (!_pageFrame.created()) {
+    drawPageIndicator();
+    return;
+  }
+  constexpr int16_t indicatorTop = 436;
+  constexpr int16_t indicatorHeight = 25;
+  const int16_t sourceY = indicatorTop - StatusBarHeight;
+  drawPageIndicatorTo(_pageFrame, StatusBarHeight);
+  _pageFrame.pushSprite(0, indicatorTop, 0, sourceY,
+                        _display.width(), indicatorHeight);
+}
+
+void HomeScreen::slotBounds(uint8_t index, int16_t &x, int16_t &y,
+                            int16_t &width, int16_t &height) const {
+  const int16_t columnWidth = _display.width() / AppColumns;
+  const uint8_t slot = index % PageSize;
+  const uint8_t column = slot % AppColumns;
+  const uint8_t row = slot / AppColumns;
+  x = column * columnWidth;
+  y = 16 + row * 116;
+  width = column == AppColumns - 1 ? _display.width() - x : columnWidth;
+  height = 116;
+}
+
+uint64_t HomeScreen::tileSignature(const AppTile &app) const {
+  uint64_t hash = 1469598103934665603ULL;
+  hashBytes(hash, app.label, strlen(app.label) + 1);
+  hashBytes(hash, app.externalId, strlen(app.externalId) + 1);
+  hashBytes(hash, &app.action, sizeof(app.action));
+  hashBytes(hash, &app.circleColor, sizeof(app.circleColor));
+  const uint8_t hasArtwork = app.iconColors && app.iconAlpha ? 1 : 0;
+  hashBytes(hash, &hasArtwork, sizeof(hasArtwork));
+  if (hasArtwork) {
+    constexpr size_t pixels = static_cast<size_t>(AppCatalogLoader::IconWidth) *
+        AppCatalogLoader::IconHeight;
+    hashBytes(hash, app.iconColors, pixels * sizeof(uint16_t));
+    hashBytes(hash, app.iconAlpha, pixels);
+  }
+  return hash;
+}
+
+uint8_t HomeScreen::pageCount() const {
+  return max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
 }
 
 int8_t HomeScreen::appAt(uint16_t x, uint16_t y) const {
@@ -376,26 +702,129 @@ void HomeScreen::activateApp(const AppTile &app) {
 }
 
 void HomeScreen::updateGesture(uint16_t x, uint16_t y) {
-  if (!_gestureActive || _swipeHandled) return;
-  const int16_t deltaX = static_cast<int16_t>(x) - static_cast<int16_t>(_gestureStartX);
-  const int16_t deltaY = static_cast<int16_t>(y) - static_cast<int16_t>(_gestureStartY);
-  const int16_t absX = abs(deltaX);
-  const int16_t absY = abs(deltaY);
-  if (absX > TapSlop || absY > TapSlop) _gestureCancelled = true;
-  if (absX < SwipeThreshold || absX <= absY) return;
+  if (!_gestureActive) return;
+  const uint32_t nowMs = millis();
+  if (static_cast<int16_t>(x) != _velocityEndX) {
+    if (nowMs - _velocityStartMs > VelocityWindowMs) {
+      _velocityStartX = _velocityEndX;
+      _velocityStartMs = _velocityEndMs;
+    }
+    _velocityEndX = static_cast<int16_t>(x);
+    _velocityEndMs = nowMs;
+  }
 
-  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
-  if (deltaX < 0 && _page + 1 < pageCount) ++_page;
-  else if (deltaX > 0 && _page > 0) --_page;
-  _swipeHandled = true;
-  _gestureCancelled = true;
-  draw();
+  const int32_t deltaX = static_cast<int32_t>(x) - _gestureStartX;
+  const int32_t deltaY = static_cast<int32_t>(y) - _gestureStartY;
+  const int32_t absX = abs(deltaX);
+  const int32_t absY = abs(deltaY);
+  if (absX > TapSlop || absY > TapSlop) _gestureCancelled = true;
+  if (!_horizontalDrag) {
+    if (absX <= TapSlop || absX <= absY) return;
+    _horizontalDrag = true;
+    _gestureCancelled = true;
+    _pressedIndex = -1;
+  }
+
+  int32_t nextScroll = _gestureBaseScroll - deltaX;
+  const int32_t maximum = static_cast<int32_t>(pageCount() - 1) * _display.width();
+  if (nextScroll < 0) nextScroll /= 3;
+  else if (nextScroll > maximum) nextScroll = maximum + (nextScroll - maximum) / 3;
+  if (_visibleScroll == nextScroll) return;
+  _visibleScroll = nextScroll;
+  renderPageViewport();
+}
+
+void HomeScreen::finishGesture(uint32_t nowMs) {
+  if (!_gestureActive) return;
+  if (_horizontalDrag) {
+    const int32_t width = _display.width();
+    const int32_t maximum = static_cast<int32_t>(pageCount() - 1) * width;
+    const int32_t clampedBase = min<int32_t>(maximum, max<int32_t>(0, _gestureBaseScroll));
+    const uint8_t originPage = static_cast<uint8_t>((clampedBase + width / 2) / width);
+    const int32_t deltaX = static_cast<int32_t>(_velocityEndX) - _gestureStartX;
+    const int16_t velocity = releaseVelocity(nowMs);
+
+    int8_t direction = 0;
+    if (_horizontalDrag && abs(deltaX) >= SwipeThreshold) direction = deltaX < 0 ? 1 : -1;
+    else if (_horizontalDrag && abs(velocity) >= FlickVelocity) direction = velocity < 0 ? 1 : -1;
+
+    int16_t target = originPage + direction;
+    target = max<int16_t>(0, min<int16_t>(pageCount() - 1, target));
+    resetGesture();
+    beginSettle(static_cast<uint8_t>(target), nowMs);
+    return;
+  }
+
+  const int8_t pressedIndex = _pressedIndex;
+  const bool shouldActivate = !_gestureCancelled && !_filesHoldTriggered &&
+      pressedIndex >= 0 && pressedIndex < _appCount;
+  resetGesture();
+  if (shouldActivate) activateApp(_apps[pressedIndex]);
+}
+
+void HomeScreen::beginSettle(uint8_t targetPage, uint32_t nowMs) {
+  targetPage = min<uint8_t>(pageCount() - 1, targetPage);
+  const int32_t targetScroll = static_cast<int32_t>(targetPage) * _display.width();
+  // Hit testing follows the accepted destination immediately; only the
+  // visual viewport remains in flight during the short settle animation.
+  _page = targetPage;
+  if (!_pageStripReady) {
+    _visibleScroll = targetScroll;
+    draw();
+    return;
+  }
+  const uint32_t distance = static_cast<uint32_t>(abs(targetScroll - _visibleScroll));
+  if (distance == 0) {
+    _settling = false;
+    renderPageViewport(true);
+    return;
+  }
+  _settleFromScroll = _visibleScroll;
+  _settleToScroll = targetScroll;
+  _settleStartedMs = nowMs;
+  const uint32_t scaled = distance * SettleDurationMs / _display.width();
+  _settleDurationMs = static_cast<uint16_t>(
+      min<uint32_t>(SettleDurationMs, max<uint32_t>(80, scaled)));
+  _settling = true;
+}
+
+void HomeScreen::updateSettle(uint32_t nowMs, bool force) {
+  if (!_settling) return;
+  const uint32_t elapsed = nowMs - _settleStartedMs;
+  if (elapsed >= _settleDurationMs) {
+    _visibleScroll = _settleToScroll;
+    _page = static_cast<uint8_t>(_settleToScroll / _display.width());
+    _settling = false;
+    renderPageViewport(true);
+    return;
+  }
+
+  const float progress = static_cast<float>(elapsed) / _settleDurationMs;
+  const float remaining = 1.0f - progress;
+  const float eased = 1.0f - remaining * remaining * remaining;
+  _visibleScroll = _settleFromScroll + static_cast<int32_t>(
+      (_settleToScroll - _settleFromScroll) * eased);
+  renderPageViewport(force);
+}
+
+int16_t HomeScreen::releaseVelocity(uint32_t nowMs) const {
+  if (_velocityEndMs <= _velocityStartMs ||
+      nowMs - _velocityEndMs > VelocityWindowMs) return 0;
+  const int32_t elapsed = _velocityEndMs - _velocityStartMs;
+  const int32_t velocity = (static_cast<int32_t>(_velocityEndX) - _velocityStartX) *
+      1000 / elapsed;
+  return static_cast<int16_t>(max<int32_t>(INT16_MIN, min<int32_t>(INT16_MAX, velocity)));
+}
+
+void HomeScreen::cancelMotion() {
+  _settling = false;
+  resetGesture();
 }
 
 void HomeScreen::resetGesture() {
   _gestureActive = false;
   _gestureCancelled = false;
-  _swipeHandled = false;
+  _horizontalDrag = false;
   _filesHoldTriggered = false;
   _pressedIndex = -1;
 }
@@ -444,9 +873,8 @@ void HomeScreen::handleSdCardEvent(SdCardEvent event) {
   } else if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
     setSdState(false);
     _catalogLoader.cancel();
-    resetGesture();
-    AppCatalogLoader::clearCatalog(_catalog);
-    rebuildApps();
-    draw();
+    cancelMotion();
+    AppCatalogLoader::clearCatalog(_pendingCatalog);
+    updateCatalogTiles();
   }
 }

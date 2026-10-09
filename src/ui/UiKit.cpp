@@ -148,6 +148,47 @@ uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
   return static_cast<uint16_t>((red << 11) | (green << 5) | blue);
 }
 
+template <bool FlashResident, typename Target>
+void drawBoundedRgba565Icon(Target &target,
+                            int16_t x,
+                            int16_t y,
+                            uint16_t width,
+                            uint16_t height,
+                            const uint16_t *colors,
+                            const uint8_t *alpha,
+                            uint16_t backgroundColor) {
+  uint16_t row[MaxRgba565IconWidth];
+  for (uint16_t rowIndex = 0; rowIndex < height; ++rowIndex) {
+    const size_t offset = static_cast<size_t>(rowIndex) * width;
+    uint16_t runStart = 0;
+    bool inRun = false;
+    for (uint16_t column = 0; column < width; ++column) {
+      const size_t sourceIndex = offset + column;
+      const uint8_t opacity = FlashResident
+        ? pgm_read_byte(alpha + sourceIndex) : alpha[sourceIndex];
+      if (opacity == 0) {
+        if (inRun) {
+          target.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
+                           column - runStart, 1, row + runStart);
+          inRun = false;
+        }
+        continue;
+      }
+      if (!inRun) {
+        runStart = column;
+        inRun = true;
+      }
+      const uint16_t foreground = FlashResident
+        ? pgm_read_word(colors + sourceIndex) : colors[sourceIndex];
+      row[column] = blendRgba565(foreground, backgroundColor, opacity);
+    }
+    if (inRun) {
+      target.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
+                       width - runStart, 1, row + runStart);
+    }
+  }
+}
+
 }  // namespace
 
 bool navigationIconContains(int16_t x, int16_t y) {
@@ -514,6 +555,23 @@ void drawRgba565Icon(TFT_eSPI &tft,
   drawRgba565Image(tft, x, y, width, height, colors, alpha, backgroundColor);
 }
 
+void drawRgba565Icon(TFT_eSprite &sprite,
+                     int16_t x,
+                     int16_t y,
+                     uint16_t width,
+                     uint16_t height,
+                     const uint16_t *colors,
+                     const uint8_t *alpha,
+                     uint16_t backgroundColor) {
+  if (!colors || !alpha || width == 0 || height == 0 ||
+      width > MaxRgba565IconWidth) return;
+  const bool previousSwap = sprite.getSwapBytes();
+  sprite.setSwapBytes(true);
+  drawBoundedRgba565Icon<true>(sprite, x, y, width, height,
+                               colors, alpha, backgroundColor);
+  sprite.setSwapBytes(previousSwap);
+}
+
 void drawRgba565IconFromMemory(TFT_eSPI &tft,
                               int16_t x,
                               int16_t y,
@@ -524,35 +582,27 @@ void drawRgba565IconFromMemory(TFT_eSPI &tft,
                               uint16_t backgroundColor) {
   if (!colors || !alpha || width == 0 || height == 0 ||
       width > MaxRgba565IconWidth) return;
-
-  uint16_t row[MaxRgba565IconWidth];
   tft.startWrite();
-  for (uint16_t rowIndex = 0; rowIndex < height; ++rowIndex) {
-    const size_t offset = static_cast<size_t>(rowIndex) * width;
-    uint16_t runStart = 0;
-    bool inRun = false;
-    for (uint16_t column = 0; column < width; ++column) {
-      const uint8_t opacity = alpha[offset + column];
-      if (opacity == 0) {
-        if (inRun) {
-          tft.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
-                        column - runStart, 1, row + runStart);
-          inRun = false;
-        }
-        continue;
-      }
-      if (!inRun) {
-        runStart = column;
-        inRun = true;
-      }
-      row[column] = blendRgba565(colors[offset + column], backgroundColor, opacity);
-    }
-    if (inRun) {
-      tft.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
-                    width - runStart, 1, row + runStart);
-    }
-  }
+  drawBoundedRgba565Icon<false>(tft, x, y, width, height,
+                                colors, alpha, backgroundColor);
   tft.endWrite();
+}
+
+void drawRgba565IconFromMemory(TFT_eSprite &sprite,
+                               int16_t x,
+                               int16_t y,
+                               uint16_t width,
+                               uint16_t height,
+                               const uint16_t *colors,
+                               const uint8_t *alpha,
+                               uint16_t backgroundColor) {
+  if (!colors || !alpha || width == 0 || height == 0 ||
+      width > MaxRgba565IconWidth) return;
+  const bool previousSwap = sprite.getSwapBytes();
+  sprite.setSwapBytes(true);
+  drawBoundedRgba565Icon<false>(sprite, x, y, width, height,
+                                colors, alpha, backgroundColor);
+  sprite.setSwapBytes(previousSwap);
 }
 
 void drawRgba565Image(TFT_eSPI &tft,

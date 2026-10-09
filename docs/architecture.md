@@ -63,6 +63,32 @@ An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its
 
 Home owns a separate app-catalog worker. It scans bounded `/Apps` entries, validates runnable packages, and decodes exact 64×64 alpha PNG logos into PSRAM under generation cancellation. It publishes only complete catalogs; the UI task merges them with built-ins, sorts and draws them, and passes the selected package ID through `Navigator`. SD reads use `SpiBusLock`, and the worker never draws, consumes the shared SD event, or navigates. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
+Home's UI task renders the combined catalog into a 16-bit PSRAM sprite strip
+covering only the area below the status bar and above the page dots. Horizontal
+dragging moves a viewport through that strip, while the dots interpolate the
+visible page position. Release advances one non-wrapping page after 48 px or a
+650 px/s flick and otherwise settles back with a bounded cubic ease-out;
+outward edge motion is reduced to one third. Home retains the strip and the
+last composed viewport while another screen covers it, then restores that
+cached viewport without rerasterizing its circles and icons. The buffers are
+released only when Home's stack entry is permanently released. Each displayed
+position is first copied into one
+contiguous 320×437 sprite together with the interpolated page dots and any
+black edge-reveal area, then sent in a single TFT transfer so a drag never
+exposes row-by-row updates or a cleared intermediate frame. Allocation failure
+retains direct, static page drawing rather than making Home unusable.
+A catalog publication is compared with the currently sorted tiles, including
+decoded logo pixels. An identical rescan does not redraw. When content changes,
+Home invalidates only changed grid positions in the strip and transfers only
+changed positions on the visible page; it rebuilds the off-screen strip only
+when the page count changes.
+A successful swipe commits its destination page before the visual settle
+starts, so tile hit testing always follows the accepted page even while the
+sprite viewport is finishing its motion.
+A new touch during the short settle completes that visual motion first and
+performs ordinary tile hit testing; visible incoming tiles therefore never
+exist in a temporarily non-interactive state.
+
 Navigator records free/largest internal heap and free/largest PSRAM before and
 after every successful final screen release. This is the hardware audit point
 for screen-scoped ownership: a deferred release remains on the active screen

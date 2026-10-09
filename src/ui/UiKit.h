@@ -173,6 +173,17 @@ void drawRgba565Icon(TFT_eSPI &tft,
                      const uint8_t *alpha,
                      uint16_t backgroundColor);
 
+// Sprite-target overload used by cached UI surfaces. It preserves the same
+// alpha and width contract while writing into the sprite rather than the TFT.
+void drawRgba565Icon(TFT_eSprite &sprite,
+                     int16_t x,
+                     int16_t y,
+                     uint16_t width,
+                     uint16_t height,
+                     const uint16_t *colors,
+                     const uint8_t *alpha,
+                     uint16_t backgroundColor);
+
 // Draws a runtime RGB565/alpha icon from ordinary RAM or PSRAM. This mirrors
 // drawRgba565Icon without using PROGMEM reads and keeps the same 64px bound.
 void drawRgba565IconFromMemory(TFT_eSPI &tft,
@@ -183,6 +194,15 @@ void drawRgba565IconFromMemory(TFT_eSPI &tft,
                               const uint16_t *colors,
                               const uint8_t *alpha,
                               uint16_t backgroundColor);
+
+void drawRgba565IconFromMemory(TFT_eSprite &sprite,
+                               int16_t x,
+                               int16_t y,
+                               uint16_t width,
+                               uint16_t height,
+                               const uint16_t *colors,
+                               const uint8_t *alpha,
+                               uint16_t backgroundColor);
 
 // Draws a flash-resident, straight-alpha RGB565 image of any uint16_t
 // dimensions over a solid immediate background. Wide rows are processed in

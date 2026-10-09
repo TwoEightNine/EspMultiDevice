@@ -57,6 +57,19 @@ readback. Its maximum width is `UiKit::MaxRgba565IconWidth` (64 px).
 Use `UiKit::drawRgba565IconFromMemory()` for the same straight RGB565 plus
 8-bit alpha representation when both arrays live in RAM or PSRAM. It keeps the
 same 64px width bound and is the required path for Home's SD-loaded Lua logos.
+Both RGB565 icon helpers also provide `TFT_eSprite` overloads. Cached surfaces
+must use those overloads because sprite writes target the off-screen buffer;
+the alpha, immediate-background, and 64px width contracts are unchanged.
+
+Home caches its tile pages in a 16-bit PSRAM sprite strip. The status bar and
+page indicator remain direct TFT UI, while a clipped strip viewport follows
+horizontal touch movement. The visible content and page dots are composed into
+one contiguous 320×437 sprite and transferred once per frame, avoiding partial
+TFT clears and row-sized transfers. Home retains both buffers while covered,
+restores the cached viewport on resume, and releases them only when its stack
+entry is removed. Catalog changes clear and redraw individual tile cells in the
+strip, then transfer only changed cells on the visible page. It falls back to
+direct static rendering if allocation fails.
 
 Wide full-colour compile-time artwork uses `UiKit::drawRgba565Image()` with the
 same generated colour and alpha arrays. The helper processes each row in
