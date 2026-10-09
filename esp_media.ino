@@ -51,7 +51,6 @@ USBMSC *usbMsc = nullptr;
 #include "src/features/text_viewer/TextViewerScreen.h"
 #include "src/features/browser/BrowserScreen.h"
 #include "src/features/files/FilesScreen.h"
-#include "src/features/apps/AppLauncherScreen.h"
 #include "src/features/apps/AppHostScreen.h"
 #include "src/features/home/HomeScreen.h"
 #include "src/features/image_viewer/ImageViewerScreen.h"
@@ -181,7 +180,6 @@ WorkoutScreen *workoutScreen = nullptr;
 UsbDriveScreen *usbDriveScreen = nullptr;
 MacRemoteScreen *macRemoteScreen = nullptr;
 AssistantScreen *assistantScreen = nullptr;
-AppLauncherScreen *appLauncherScreen = nullptr;
 AppHostScreen *appHostScreen = nullptr;
 
 void updateTouch();
@@ -436,7 +434,6 @@ void setup() {
   assistantScreen = new AssistantScreen(
     *navigator, *touch, *display, *assistantController, *sdCard
   );
-  appLauncherScreen = new AppLauncherScreen(*navigator, *touch, *display, *sdCard);
   appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
                                     *wifiController, *batteryHistory,
                                     *speaker, *audioSettings);
@@ -503,9 +500,6 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::MacRemote, *macRemoteScreen)) {
     Serial.println(F("Navigator failed to register Mac Remote screen."));
-  }
-  if (!navigator->registerScreen(ScreenId::Apps, *appLauncherScreen)) {
-    Serial.println(F("Navigator failed to register Apps screen."));
   }
   if (!navigator->registerScreen(ScreenId::ExternalApp, *appHostScreen)) {
     Serial.println(F("Navigator failed to register external app screen."));

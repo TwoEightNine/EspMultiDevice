@@ -8,11 +8,14 @@ struct AppPackage {
   static constexpr size_t MaxManifestBytes = 2048;
   static constexpr size_t MaxSourceBytes = 65536;
   static constexpr size_t MaxDataBytes = 16384;
+  static constexpr uint16_t DefaultIconBackground = 0x6318;
 
   String id;
   String name;
   String error;
   uint8_t sdk = 0;
+  uint16_t iconBackground = DefaultIconBackground;
+  bool hasIconBackground = false;
   bool valid = false;
 
   static bool validId(const String &value);

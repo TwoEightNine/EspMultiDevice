@@ -39,7 +39,7 @@ Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Build it with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
-Home's Apps tile uses `UiKit::drawAppsIcon()`, a four-cell smooth icon drawn over the tile's solid circle fill.
+Lua app tiles use `drawRgba565IconFromMemory()` to alpha-blend worker-decoded 64×64 RGB565 artwork from PSRAM over the manifest-selected solid circle. `UiKit::drawAppsIcon()` is the smooth generic fallback when package artwork is unavailable.
 
 Home's Mac Remote tile uses `UiKit::drawMacRemoteIcon()`. The remote screen uses the shared `RemoteActionIcon` glyph set for its nine antialiased grid controls; each owner supplies the complete rounded cell, immediate fill background, enabled colour, and whole-cell hit target.
 
@@ -53,6 +53,10 @@ arrays with `tools/png_to_rgba565_icon.py` and draw them through
 `UiKit::drawRgba565Icon()`. Pass the icon's actual solid immediate background
 colour; the helper alpha-blends every edge pixel without an SD card or display
 readback. Its maximum width is `UiKit::MaxRgba565IconWidth` (64 px).
+
+Use `UiKit::drawRgba565IconFromMemory()` for the same straight RGB565 plus
+8-bit alpha representation when both arrays live in RAM or PSRAM. It keeps the
+same 64px width bound and is the required path for Home's SD-loaded Lua logos.
 
 Wide full-colour compile-time artwork uses `UiKit::drawRgba565Image()` with the
 same generated colour and alpha arrays. The helper processes each row in

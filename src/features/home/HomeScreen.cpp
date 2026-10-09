@@ -1,13 +1,30 @@
 #include "HomeScreen.h"
 
+#include <ctype.h>
+#include <string.h>
+
 #include "../../app/Navigator.h"
+#include "../../features/apps/AppPackage.h"
 #include "../../ui/UiKit.h"
 #include "../../ui/UiText.h"
 #include "../../ui/icons.h"
 
 namespace {
-const uint16_t StatusActiveColor = TFT_WHITE;
-const uint16_t StatusInactiveColor = TFT_DARKGREY;
+constexpr uint16_t StatusActiveColor = TFT_WHITE;
+constexpr uint16_t StatusInactiveColor = TFT_DARKGREY;
+
+int compareFolded(const char *left, const char *right) {
+  const unsigned char *a = reinterpret_cast<const unsigned char *>(left);
+  const unsigned char *b = reinterpret_cast<const unsigned char *>(right);
+  while (*a && *b) {
+    const unsigned char foldedA = *a < 0x80 ? static_cast<unsigned char>(tolower(*a)) : *a;
+    const unsigned char foldedB = *b < 0x80 ? static_cast<unsigned char>(tolower(*b)) : *b;
+    if (foldedA != foldedB) return foldedA < foldedB ? -1 : 1;
+    ++a;
+    ++b;
+  }
+  return *a == *b ? 0 : (*a ? 1 : -1);
+}
 }
 
 HomeScreen::HomeScreen(Navigator &navigator,
@@ -22,25 +39,25 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _wifi(wifi),
     _time(time),
     _batteryHistory(batteryHistory),
+    _catalogLoader(sdCard),
+    _catalogRevision(0),
     _sdMounted(false),
     _wifiConnected(false),
     _batteryVoltage(0.0f),
-    _lastTouchDown(false),
-    _filesPressPending(false),
+    _gestureActive(false),
+    _gestureCancelled(false),
+    _swipeHandled(false),
     _filesHoldTriggered(false),
-    _filesPressedMs(0),
+    _pressedIndex(-1),
+    _gestureStartX(0),
+    _gestureStartY(0),
+    _gestureStartedMs(0),
     _lastClockCheckMs(0xffffffffUL),
     _lastBatteryGeneration(0),
-    _lastClockText("") {
-  _apps[0] = { "AI Assistant", AppAction::AiAssistant, 0xfe67, 0, 0, 0, 0 };
-  _apps[1] = { "Browser", AppAction::Browser, 0xfb17, 0, 0, 0, 0 };
-  _apps[2] = { "Files", AppAction::Files, 0x065f, 0, 0, 0, 0 };
-  _apps[3] = { "Recorder", AppAction::Recorder, 0x9adf, 0, 0, 0, 0 };
-  _apps[4] = { "Settings", AppAction::Settings, 0xfda0, 0, 0, 0, 0 };
-  _apps[5] = { "USB Drive", AppAction::UsbDrive, 0x0799, 0, 0, 0, 0 };
-  _apps[6] = { "Workout", AppAction::Workout, 0x04df, 0, 0, 0, 0 };
-  _apps[7] = { "Apps", AppAction::Apps, 0x6318, 0, 0, 0, 0 };
-  _apps[8] = { "Mac Remote", AppAction::MacRemote, 0x051d, 0, 0, 0, 0 };
+    _lastClockText(""),
+    _appCount(0),
+    _page(0) {
+  rebuildApps();
 }
 
 void HomeScreen::onEnter() {
@@ -50,77 +67,66 @@ void HomeScreen::onEnter() {
   _lastBatteryGeneration = _batteryHistory.generation();
   _lastClockCheckMs = 0xffffffffUL;
   _lastClockText = "";
-  _filesPressPending = false;
-  _filesHoldTriggered = false;
+  resetGesture();
+  rebuildApps();
   draw();
-  // Do not run a read/write probe on every return to Home.  Besides creating
-  // needless SD traffic, it used to run in the screen-enter call path and
-  // could make the outgoing screen appear frozen.
+  if (_sdMounted) _catalogLoader.requestScan();
+}
+
+bool HomeScreen::releaseResources() {
+  _catalogLoader.stop();
+  if (!_catalogLoader.releaseResources()) return false;
+  AppCatalogLoader::clearCatalog(_catalog);
+  return true;
 }
 
 void HomeScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) {
-    _lastTouchDown = false;
-    if (_filesPressPending && !_filesHoldTriggered) _navigator.push(ScreenId::Files);
-    _filesPressPending = false;
-    return;
-  }
-
-  if (_lastTouchDown) {
-    return;
-  }
-  _lastTouchDown = true;
-
-  for (uint8_t i = 0; i < AppCount; i++) {
-    AppTile &app = _apps[i];
-    if (point.x < app.x || point.x >= app.x + app.w ||
-        point.y < app.y || point.y >= app.y + app.h) {
-      continue;
+    if (_gestureActive && !_gestureCancelled && !_swipeHandled &&
+        !_filesHoldTriggered && _pressedIndex >= 0 && _pressedIndex < _appCount) {
+      activateApp(_apps[_pressedIndex]);
     }
-
-    if (app.action == AppAction::Files) {
-      _filesPressPending = true;
-      _filesHoldTriggered = false;
-      _filesPressedMs = millis();
-    } else if (app.action == AppAction::AiAssistant) {
-      _navigator.push(ScreenId::Assistant);
-    } else if (app.action == AppAction::Recorder) {
-      _navigator.push(ScreenId::VoiceRecorder);
-    } else if (app.action == AppAction::Settings) {
-      _navigator.push(ScreenId::Settings);
-    } else if (app.action == AppAction::Browser) {
-      _navigator.push(ScreenId::Browser);
-    } else if (app.action == AppAction::UsbDrive) {
-      _navigator.push(ScreenId::UsbDrive);
-    } else if (app.action == AppAction::Workout) {
-      _navigator.push(ScreenId::Workout);
-    } else if (app.action == AppAction::Apps) {
-      _navigator.push(ScreenId::Apps);
-    } else if (app.action == AppAction::MacRemote) {
-      _navigator.push(ScreenId::MacRemote);
-    }
+    resetGesture();
     return;
   }
+
+  if (!_gestureActive) {
+    _gestureActive = true;
+    _gestureStartX = point.x;
+    _gestureStartY = point.y;
+    _gestureStartedMs = millis();
+    _pressedIndex = appAt(point.x, point.y);
+    return;
+  }
+
+  updateGesture(point.x, point.y);
 }
 
 void HomeScreen::onResult(const ScreenResult &result) {
   if (result.kind != ScreenResultKind::Text || result.text.length() != 4) return;
   for (uint8_t i = 0; i < 4; i++) if (result.text[i] < '0' || result.text[i] > '9') return;
-  const uint16_t pin = (uint16_t)result.text.toInt();
+  const uint16_t pin = static_cast<uint16_t>(result.text.toInt());
   _navigator.push(ScreenId::Files, ScreenData::secretFiles(pin));
 }
 
 void HomeScreen::tick(uint32_t nowMs) {
-  const TouchPoint heldPoint = _touch.point();
-  const AppTile &files = _apps[FilesAppIndex];
-  const bool holdingFiles = heldPoint.touched && heldPoint.x >= files.x && heldPoint.x < files.x + files.w &&
-                            heldPoint.y >= files.y && heldPoint.y < files.y + files.h;
-  if (_filesPressPending && !_filesHoldTriggered && holdingFiles && nowMs - _filesPressedMs >= 1000) {
-    _filesHoldTriggered = true;
-    _filesPressPending = false;
-    _navigator.push(ScreenId::TextInput, ScreenData::pinInput("Secret PIN"));
-    return;
+  const TouchPoint held = _touch.point();
+  if (_gestureActive && held.touched) updateGesture(held.x, held.y);
+
+  if (_gestureActive && !_gestureCancelled && !_filesHoldTriggered &&
+      _pressedIndex >= 0 && _pressedIndex < _appCount &&
+      _apps[_pressedIndex].action == AppAction::Files) {
+    const AppTile &files = _apps[_pressedIndex];
+    const bool inside = held.touched && held.x >= files.x && held.x < files.x + files.w &&
+                        held.y >= files.y && held.y < files.y + files.h;
+    if (inside && nowMs - _gestureStartedMs >= 1000) {
+      _filesHoldTriggered = true;
+      _gestureCancelled = true;
+      _navigator.push(ScreenId::TextInput, ScreenData::pinInput("Secret PIN"));
+      return;
+    }
   }
+
   if (_lastClockCheckMs == 0xffffffffUL || nowMs - _lastClockCheckMs >= 1000UL) {
     drawClock(false);
     _lastClockCheckMs = nowMs;
@@ -134,32 +140,90 @@ void HomeScreen::tick(uint32_t nowMs) {
 
   handleSdCardEvent(_sdCard.takeEvent());
   setWifiState(_wifi.isConnected());
+
+  if (!_gestureActive && _catalogLoader.takeCatalog(_catalog, _catalogRevision)) {
+    rebuildApps();
+    draw();
+  }
 }
 
 void HomeScreen::draw() {
-  if (!_display.isReady()) {
-    return;
-  }
-
+  if (!_display.isReady()) return;
   layoutApps();
   _display.tft().fillScreen(TFT_BLACK);
   drawStatusBar();
   drawApps();
+  drawPageIndicator();
+}
+
+void HomeScreen::rebuildApps() {
+  _appCount = 0;
+  auto addBuiltIn = [&](const char *label, AppAction action, uint16_t color) {
+    AppTile &app = _apps[_appCount++];
+    memset(&app, 0, sizeof(app));
+    strncpy(app.label, label, sizeof(app.label) - 1);
+    app.action = action;
+    app.circleColor = color;
+  };
+  addBuiltIn("AI Assistant", AppAction::AiAssistant, 0xfe67);
+  addBuiltIn("Browser", AppAction::Browser, 0xfb17);
+  addBuiltIn("Files", AppAction::Files, 0x065f);
+  addBuiltIn("Recorder", AppAction::Recorder, 0x9adf);
+  addBuiltIn("Settings", AppAction::Settings, 0xfda0);
+  addBuiltIn("USB Drive", AppAction::UsbDrive, 0x0799);
+  addBuiltIn("Workout", AppAction::Workout, 0x04df);
+  addBuiltIn("Mac Remote", AppAction::MacRemote, 0x051d);
+
+  for (uint8_t index = 0; index < _catalog.count && _appCount < MaxHomeApps; ++index) {
+    const AppCatalogLoader::Entry &source = _catalog.entries[index];
+    AppTile &app = _apps[_appCount++];
+    memset(&app, 0, sizeof(app));
+    strncpy(app.label, source.name, sizeof(app.label) - 1);
+    strncpy(app.externalId, source.id, sizeof(app.externalId) - 1);
+    app.action = AppAction::External;
+    app.circleColor = source.iconBackground;
+    app.iconColors = source.iconColors;
+    app.iconAlpha = source.iconAlpha;
+  }
+  sortApps();
+  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
+  if (_page >= pageCount) _page = pageCount - 1;
+  layoutApps();
+}
+
+void HomeScreen::sortApps() {
+  for (uint8_t index = 1; index < _appCount; ++index) {
+    AppTile value = _apps[index];
+    uint8_t position = index;
+    while (position > 0) {
+      const AppTile &previous = _apps[position - 1];
+      int comparison = compareFolded(previous.label, value.label);
+      if (comparison == 0) comparison = strcmp(previous.label, value.label);
+      if (comparison == 0 && previous.action != value.action) {
+        comparison = previous.action == AppAction::External ? 1 : -1;
+      }
+      if (comparison == 0) comparison = strcmp(previous.externalId, value.externalId);
+      if (comparison <= 0) break;
+      _apps[position] = _apps[position - 1];
+      --position;
+    }
+    _apps[position] = value;
+  }
 }
 
 void HomeScreen::layoutApps() {
-  int16_t width = _display.width();
-  int16_t columnWidth = width / AppColumns;
-  int16_t tileTop = StatusBarHeight + 16;
-  int16_t tileHeight = 116;
-
-  for (uint8_t i = 0; i < AppCount; i++) {
-    uint8_t column = i % AppColumns;
-    uint8_t row = i / AppColumns;
-    _apps[i].x = column * columnWidth;
-    _apps[i].y = tileTop + row * tileHeight;
-    _apps[i].w = column == AppColumns - 1 ? width - _apps[i].x : columnWidth;
-    _apps[i].h = tileHeight;
+  const int16_t width = _display.width();
+  const int16_t columnWidth = width / AppColumns;
+  const int16_t tileTop = StatusBarHeight + 16;
+  const int16_t tileHeight = 116;
+  for (uint8_t index = 0; index < _appCount; ++index) {
+    const uint8_t slot = index % PageSize;
+    const uint8_t column = slot % AppColumns;
+    const uint8_t row = slot / AppColumns;
+    _apps[index].x = column * columnWidth;
+    _apps[index].y = tileTop + row * tileHeight;
+    _apps[index].w = column == AppColumns - 1 ? width - _apps[index].x : columnWidth;
+    _apps[index].h = tileHeight;
   }
 }
 
@@ -173,16 +237,10 @@ void HomeScreen::drawStatusBar() {
 }
 
 void HomeScreen::drawClock(bool force) {
-  if (!_display.isReady()) {
-    return;
-  }
-
-  struct tm local = {};
-  String text = _time.localTime(local) ? clockText(local) : "--:--";
-  if (!force && text == _lastClockText) {
-    return;
-  }
-
+  if (!_display.isReady()) return;
+  struct tm localTimeValue = {};
+  String text = _time.localTime(localTimeValue) ? clockText(localTimeValue) : "--:--";
+  if (!force && text == _lastClockText) return;
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(0, 0, 72, StatusBarHeight, TFT_BLACK);
   UiText::draw(tft, text, 8, StatusBarHeight / 2, TFT_WHITE, TFT_BLACK,
@@ -211,30 +269,52 @@ void HomeScreen::drawWifiIcon() {
 }
 
 void HomeScreen::drawBattery() {
-  const int16_t x = _display.width() - 46;
-  const int16_t y = 4;
-  UiKit::drawBatteryVoltage(_display.tft(), x, y, _batteryVoltage, TFT_BLACK);
+  UiKit::drawBatteryVoltage(_display.tft(), _display.width() - 46, 4,
+                            _batteryVoltage, TFT_BLACK);
 }
 
 void HomeScreen::drawApps() {
   TFT_eSPI &tft = _display.tft();
-  for (uint8_t i = 0; i < AppCount; i++) {
-    const AppTile &app = _apps[i];
-    int16_t centerX = app.x + app.w / 2;
-    int16_t centerY = app.y + 48;
+  const uint8_t first = _page * PageSize;
+  const uint8_t end = min<uint8_t>(_appCount, first + PageSize);
+  for (uint8_t index = first; index < end; ++index) {
+    const AppTile &app = _apps[index];
+    const int16_t centerX = app.x + app.w / 2;
+    const int16_t centerY = app.y + 48;
     tft.fillSmoothCircle(centerX, centerY, IconDiameter / 2,
                          app.circleColor, TFT_BLACK);
     drawAppIcon(app, centerX, centerY);
-
-    String label = truncateLabel(String(app.label), app.w - 12);
+    const String label = truncateLabel(String(app.label), app.w - 12);
     UiText::draw(tft, label, centerX, app.y + 94, TFT_WHITE, TFT_BLACK,
                  UiText::Size::Compact, TC_DATUM);
   }
 }
 
+void HomeScreen::drawPageIndicator() {
+  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
+  if (pageCount <= 1) return;
+  TFT_eSPI &tft = _display.tft();
+  constexpr int16_t spacing = 14;
+  const int16_t startX = (_display.width() - (pageCount - 1) * spacing) / 2;
+  constexpr int16_t y = 448;
+  for (uint8_t index = 0; index < pageCount; ++index) {
+    const uint16_t color = index == _page ? TFT_WHITE : TFT_DARKGREY;
+    tft.fillSmoothCircle(startX + index * spacing, y, index == _page ? 4 : 3,
+                         color, TFT_BLACK);
+  }
+}
+
 void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t centerY) {
-  if (app.action == AppAction::Apps) {
-    UiKit::drawAppsIcon(_display.tft(), centerX, centerY, TFT_WHITE, app.circleColor);
+  if (app.action == AppAction::External) {
+    if (app.iconColors && app.iconAlpha) {
+      UiKit::drawRgba565IconFromMemory(
+          _display.tft(), centerX - AppCatalogLoader::IconWidth / 2,
+          centerY - AppCatalogLoader::IconHeight / 2,
+          AppCatalogLoader::IconWidth, AppCatalogLoader::IconHeight,
+          app.iconColors, app.iconAlpha, app.circleColor);
+    } else {
+      UiKit::drawAppsIcon(_display.tft(), centerX, centerY, TFT_WHITE, app.circleColor);
+    }
     return;
   }
   if (app.action == AppAction::MacRemote) {
@@ -246,48 +326,78 @@ void HomeScreen::drawAppIcon(const AppTile &app, int16_t centerX, int16_t center
   const uint8_t *alpha = nullptr;
   uint16_t width = 0;
   uint16_t height = 0;
-
   if (app.action == AppAction::AiAssistant) {
-    colors = ic_ai_colors;
-    alpha = ic_ai_alpha;
-    width = ic_ai_width;
-    height = ic_ai_height;
+    colors = ic_ai_colors; alpha = ic_ai_alpha; width = ic_ai_width; height = ic_ai_height;
   } else if (app.action == AppAction::Recorder) {
-    colors = ic_recorder_colors;
-    alpha = ic_recorder_alpha;
-    width = ic_recorder_width;
-    height = ic_recorder_height;
+    colors = ic_recorder_colors; alpha = ic_recorder_alpha; width = ic_recorder_width; height = ic_recorder_height;
   } else if (app.action == AppAction::Settings) {
-    colors = ic_settings_colors;
-    alpha = ic_settings_alpha;
-    width = ic_settings_width;
-    height = ic_settings_height;
+    colors = ic_settings_colors; alpha = ic_settings_alpha; width = ic_settings_width; height = ic_settings_height;
   } else if (app.action == AppAction::Workout) {
-    colors = ic_workout_colors;
-    alpha = ic_workout_alpha;
-    width = ic_workout_width;
-    height = ic_workout_height;
+    colors = ic_workout_colors; alpha = ic_workout_alpha; width = ic_workout_width; height = ic_workout_height;
   } else if (app.action == AppAction::Files) {
-    colors = ic_files_colors;
-    alpha = ic_files_alpha;
-    width = ic_files_width;
-    height = ic_files_height;
+    colors = ic_files_colors; alpha = ic_files_alpha; width = ic_files_width; height = ic_files_height;
   } else if (app.action == AppAction::Browser) {
-    colors = ic_browser_colors;
-    alpha = ic_browser_alpha;
-    width = ic_browser_width;
-    height = ic_browser_height;
+    colors = ic_browser_colors; alpha = ic_browser_alpha; width = ic_browser_width; height = ic_browser_height;
   } else if (app.action == AppAction::UsbDrive) {
-    colors = ic_usb_colors;
-    alpha = ic_usb_alpha;
-    width = ic_usb_width;
-    height = ic_usb_height;
+    colors = ic_usb_colors; alpha = ic_usb_alpha; width = ic_usb_width; height = ic_usb_height;
   }
-
   if (colors && alpha) {
     UiKit::drawRgba565Icon(_display.tft(), centerX - width / 2, centerY - height / 2,
                            width, height, colors, alpha, app.circleColor);
   }
+}
+
+int8_t HomeScreen::appAt(uint16_t x, uint16_t y) const {
+  const uint8_t first = _page * PageSize;
+  const uint8_t end = min<uint8_t>(_appCount, first + PageSize);
+  for (uint8_t index = first; index < end; ++index) {
+    const AppTile &app = _apps[index];
+    if (x >= app.x && x < app.x + app.w && y >= app.y && y < app.y + app.h) {
+      return static_cast<int8_t>(index);
+    }
+  }
+  return -1;
+}
+
+void HomeScreen::activateApp(const AppTile &app) {
+  switch (app.action) {
+    case AppAction::AiAssistant: _navigator.push(ScreenId::Assistant); break;
+    case AppAction::Files: _navigator.push(ScreenId::Files); break;
+    case AppAction::Recorder: _navigator.push(ScreenId::VoiceRecorder); break;
+    case AppAction::Settings: _navigator.push(ScreenId::Settings); break;
+    case AppAction::Browser: _navigator.push(ScreenId::Browser); break;
+    case AppAction::UsbDrive: _navigator.push(ScreenId::UsbDrive); break;
+    case AppAction::Workout: _navigator.push(ScreenId::Workout); break;
+    case AppAction::MacRemote: _navigator.push(ScreenId::MacRemote); break;
+    case AppAction::External:
+      _navigator.push(ScreenId::ExternalApp, ScreenData::externalApp(app.externalId));
+      break;
+  }
+}
+
+void HomeScreen::updateGesture(uint16_t x, uint16_t y) {
+  if (!_gestureActive || _swipeHandled) return;
+  const int16_t deltaX = static_cast<int16_t>(x) - static_cast<int16_t>(_gestureStartX);
+  const int16_t deltaY = static_cast<int16_t>(y) - static_cast<int16_t>(_gestureStartY);
+  const int16_t absX = abs(deltaX);
+  const int16_t absY = abs(deltaY);
+  if (absX > TapSlop || absY > TapSlop) _gestureCancelled = true;
+  if (absX < SwipeThreshold || absX <= absY) return;
+
+  const uint8_t pageCount = max<uint8_t>(1, (_appCount + PageSize - 1) / PageSize);
+  if (deltaX < 0 && _page + 1 < pageCount) ++_page;
+  else if (deltaX > 0 && _page > 0) --_page;
+  _swipeHandled = true;
+  _gestureCancelled = true;
+  draw();
+}
+
+void HomeScreen::resetGesture() {
+  _gestureActive = false;
+  _gestureCancelled = false;
+  _swipeHandled = false;
+  _filesHoldTriggered = false;
+  _pressedIndex = -1;
 }
 
 String HomeScreen::clockText(const struct tm &localTime) const {
@@ -301,17 +411,13 @@ String HomeScreen::truncateLabel(const String &label, int16_t maxWidth) {
 }
 
 void HomeScreen::setSdState(bool mounted) {
-  if (_sdMounted == mounted) {
-    return;
-  }
+  if (_sdMounted == mounted) return;
   _sdMounted = mounted;
   drawSdIcon();
 }
 
 void HomeScreen::setWifiState(bool connected) {
-  if (_wifiConnected == connected) {
-    return;
-  }
+  if (_wifiConnected == connected) return;
   _wifiConnected = connected;
   drawWifiIcon();
 }
@@ -329,14 +435,18 @@ void HomeScreen::setBatteryVoltage(float voltage) {
   drawBattery();
 }
 
-void HomeScreen::refreshSdState() {
-  _sdMounted = _sdCard.isMounted();
-}
+void HomeScreen::refreshSdState() { _sdMounted = _sdCard.isMounted(); }
 
 void HomeScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::Mounted) {
     setSdState(true);
+    _catalogLoader.requestScan();
   } else if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
     setSdState(false);
+    _catalogLoader.cancel();
+    resetGesture();
+    AppCatalogLoader::clearCatalog(_catalog);
+    rebuildApps();
+    draw();
   }
 }

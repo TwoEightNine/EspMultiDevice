@@ -96,6 +96,7 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
     const cJSON *manifestId = cJSON_GetObjectItemCaseSensitive(root, "id");
     const cJSON *manifestName = cJSON_GetObjectItemCaseSensitive(root, "name");
     const cJSON *sdk = cJSON_GetObjectItemCaseSensitive(root, "sdk");
+    const cJSON *iconBackground = cJSON_GetObjectItemCaseSensitive(root, "app_icon_bg");
     if (!cJSON_IsString(manifestId) || id != manifestId->valuestring) {
       result.error = "Manifest ID differs from folder";
     } else if (!cJSON_IsString(manifestName) || !manifestName->valuestring ||
@@ -107,6 +108,12 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
     } else {
       result.sdk = static_cast<uint8_t>(sdk->valuedouble);
       result.name = manifestName->valuestring;
+      if (cJSON_IsNumber(iconBackground) &&
+          iconBackground->valuedouble >= 0 && iconBackground->valuedouble <= 65535 &&
+          iconBackground->valuedouble == static_cast<double>(iconBackground->valueint)) {
+        result.iconBackground = static_cast<uint16_t>(iconBackground->valueint);
+        result.hasIconBackground = true;
+      }
       if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
         result.error = "SD busy";
       } else {

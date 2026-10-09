@@ -62,6 +62,15 @@ redraw. Source alpha is flattened against black during decode. A missing,
 invalid, or wrong-sized file leaves a black background; there is no scaling,
 cache sidecar, or synchronous UI-task SD decode.
 
+## Lua app artwork
+
+Home treats `/Apps/<id>/logo.png` as package artwork rather than user-openable
+media. The app-catalog worker accepts only non-interlaced 64×64 PNGs that carry
+alpha, validates the PNG CRC, and retains straight RGB565 plus 8-bit alpha in
+PSRAM. The UI composites the pixels over the package's RGB565 circle color.
+There is no scaling or cache sidecar; invalid artwork uses the generic Apps
+glyph and does not invalidate an otherwise runnable package.
+
 ## Audio and recording
 
 The recorder writes 16 kHz mono PCM WAV from the INMP441. The Audio Player streams mono or stereo integer PCM WAV and local MP3. Global volume is persisted through `AudioSettings` and ranges from 0 to 10 (default 5).

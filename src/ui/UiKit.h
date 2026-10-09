@@ -173,6 +173,17 @@ void drawRgba565Icon(TFT_eSPI &tft,
                      const uint8_t *alpha,
                      uint16_t backgroundColor);
 
+// Draws a runtime RGB565/alpha icon from ordinary RAM or PSRAM. This mirrors
+// drawRgba565Icon without using PROGMEM reads and keeps the same 64px bound.
+void drawRgba565IconFromMemory(TFT_eSPI &tft,
+                              int16_t x,
+                              int16_t y,
+                              uint16_t width,
+                              uint16_t height,
+                              const uint16_t *colors,
+                              const uint8_t *alpha,
+                              uint16_t backgroundColor);
+
 // Draws a flash-resident, straight-alpha RGB565 image of any uint16_t
 // dimensions over a solid immediate background. Wide rows are processed in
 // MaxRgba565IconWidth chunks so drawing remains allocation-free. Fully

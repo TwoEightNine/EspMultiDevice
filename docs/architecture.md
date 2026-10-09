@@ -19,7 +19,7 @@ loop:  touch edge -> active Screen::handleTouch()
 
 All screens inherit `Screen`, which receives shared references to `Navigator`, `TouchController`, and `DisplayController`. Screen-specific services are supplied through that screen’s constructor. A screen owns its rendering, touch processing, asynchronous state, and lifecycle.
 
-`Navigator` registers the 23 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. The Apps launcher selects a package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
+`Navigator` registers the 22 `ScreenId` values once and maintains a stack of at most eight entries. It supports `setRoot`, `push`, `replace`, and `pop`. Home selects an SD package ID through an `ExternalApp` screen payload; the reusable app-host screen revalidates that package before starting it.
 
 - `onEnter()` is a normal entry.
 - `onEnter(const ScreenData&)` receives a payload; the default delegates to `onEnter()`.
@@ -59,7 +59,9 @@ Without a card-detect pin, `SdCardController` probes an attached card every 500 
 
 The UI loop must continue to process touch and redraw while expensive work is under way. Files thumbnails, browser inline images, and animated-image cache loading use worker work on the other core; results are returned to the UI task for display updates. Do not let a worker redraw UI directly.
 
-An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its Lua state, bounded app-file transactions, callback limits, and SDK 2 tone queue. SDK 1 publishes fixed-size row scenes; SDK 2 may publish bounded, complete drawing frames. Only the UI task renders them, within a viewport below the shared app bar, and forwards content-relative touch-down coordinates. The worker uses non-blocking speaker writes and stops output during exit or failure. Final navigation is deferred until the worker stops, then its task, queue, and Lua state are released. The launcher scans one package per `tick()` and polls mount state without consuming the single-recipient SD event. See [external-apps.md](external-apps.md) for the SD format and SDK.
+An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its Lua state, bounded app-file transactions, callback limits, and SDK 2 tone queue. SDK 1 publishes fixed-size row scenes; SDK 2 may publish bounded, complete drawing frames. Only the UI task renders them, within a viewport below the shared app bar, and forwards content-relative touch-down coordinates. The worker uses non-blocking speaker writes and stops output during exit or failure. Final navigation is deferred until the worker stops, then its task, queue, and Lua state are released.
+
+Home owns a separate app-catalog worker. It scans bounded `/Apps` entries, validates runnable packages, and decodes exact 64×64 alpha PNG logos into PSRAM under generation cancellation. It publishes only complete catalogs; the UI task merges them with built-ins, sorts and draws them, and passes the selected package ID through `Navigator`. SD reads use `SpiBusLock`, and the worker never draws, consumes the shared SD event, or navigates. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
 Navigator records free/largest internal heap and free/largest PSRAM before and
 after every successful final screen release. This is the hardware audit point
