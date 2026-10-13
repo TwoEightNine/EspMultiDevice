@@ -106,6 +106,8 @@ icon requires the same immediate background color used on its first draw.
 
 The external-app host draws SDK 1 pages with the shared 48px app bar, `drawListCell()` for text, and `drawFilledButton()` for action rows. The complete 40px row is the action hit target. App scripts submit data only; they never call TFT_eSPI or choose a separate navigation icon.
 
+`UiKit::drawFileListCell()` draws a list cell with the Files folder/document icon tinted by `UiKit::FileIcon` family and an optional trailing `ListAction` glyph (More or Close) in the 40×40 action cell. The family tints are the `UiKit::*IconColor` constants that Files also uses. The host renders SDK 4 `esp.ui.list_cell` commands with it; the app hit-tests the row and the action cell.
+
 SDK 2 canvas commands are still rendered by the host UI task. The host clips them below the same app bar and uses `UiText` for app text and `UiKit` for submitted buttons and progress bars. Apps supply the immediate background to smooth drawing primitives and own the full hit rectangles of content controls through `on_touch(x, y)`; the host always owns the close cell.
 
 Rounded controls are fill-only smooth rounded rectangles: use `fillSmoothRoundRect()` with the fill as the edge background, never an outline. Labels default to `UiText::Size::Content`; numeric PIN keys are the sole exception and use `Title`.

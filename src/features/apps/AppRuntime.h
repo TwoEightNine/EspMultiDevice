@@ -7,6 +7,8 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include "../../media/MediaCache.h"
+
 class SdCardController;
 class SpeakerController;
 class AudioSettings;
@@ -40,7 +42,7 @@ public:
     DrawCircle, FillCircle, DrawRoundRect, FillRoundRect, FillTriangle,
     DrawWideLine, DrawSmoothCircle, FillSmoothCircle,
     DrawSmoothRoundRect, FillSmoothRoundRect, DrawSmoothArc,
-    Text, Button, Progress
+    Text, Button, Progress, ListCell
   };
   struct DrawCommand {
     DrawOp op;
@@ -54,14 +56,31 @@ public:
     DrawCommand commands[MaxDrawCommands];
   };
 
+  // A host-screen navigation an SDK 4 app asked for. The worker never
+  // navigates; the host screen takes the request once the app is paused.
+  enum class NavigationKind : uint8_t { None, OpenFile, Prompt };
+  struct Navigation {
+    NavigationKind kind;
+    char path[256];     // OpenFile: validated absolute SD path.
+    char title[41];     // Prompt: keyboard title.
+    char initial[256];  // Prompt: initial text.
+  };
+
   AppRuntime(SdCardController &card, SpeakerController &speaker, AudioSettings &audioSettings,
-             MicController &mic);
+             MicController &mic, MediaCache &mediaCache);
   bool start(const String &id, const Status &initialStatus);
   void requestStop();
   bool stopped() const;
   bool end();
   bool sendAction(const char *id);
   bool sendTouch(uint16_t x, uint16_t y);
+  bool sendTouchEnd(uint16_t x, uint16_t y, uint32_t heldMs);
+  // True once a navigation is requested and the worker has released audio and
+  // stopped callbacks. The app stays paused until resume().
+  bool takeNavigation(Navigation &navigation);
+  // Continues a paused app. `input` is the keyboard result for a prompt, or
+  // null when it was cancelled; it is ignored after OpenFile.
+  void resume(const char *input);
   bool takeScene(Scene &scene, uint32_t &revision);
   bool takeFrame(Frame &frame, uint32_t &revision);
   void publishStatus(const Status &status);
@@ -72,13 +91,32 @@ private:
   static constexpr int64_t CallbackMaxUs = 20000;
   static constexpr uint32_t TickIntervalMs = 100;
   static constexpr uint32_t WorkerStackBytes = 16384;
-  struct Action { char id[33]; uint16_t x; uint16_t y; bool touch; };
+  static constexpr uint16_t MaxFsEntries = 2000;
+  static constexpr uint8_t MaxFsDepth = 16;
+  enum class ActionKind : uint8_t { Button, Touch, TouchEnd };
+  struct Action { char id[33]; uint16_t x; uint16_t y; uint32_t heldMs; ActionKind kind; };
+  struct CallArgs {
+    const char *text = nullptr;
+    bool nil = false;  // Push nil as the first argument instead of text.
+    int64_t number[3] = {0, 0, 0};
+    uint8_t numbers = 0;
+  };
+  struct FsEntry {
+    uint32_t nameOffset;
+    uint32_t size;
+    uint32_t modified;
+    uint8_t format;
+    bool directory;
+  };
+  enum class FsJob : uint8_t { None, Rename, Remove };
+  enum class FsPhase : uint8_t { SourceCleanup, TargetCleanup, Commit, Tree };
   struct Tone { uint16_t frequency; uint16_t durationMs; };
 
   SdCardController &_card;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
   MicController &_mic;
+  MediaCache &_mediaCache;
   String _id;
   String _displayName;
   TaskHandle_t _task = nullptr;
@@ -93,6 +131,41 @@ private:
   bool _frameOpen = false;
   uint32_t _frameCost = 0;
   uint8_t _sdkVersion = 1;
+  bool _filesPermission = false;
+  // Navigation hand-off (SDK 4). `_navigation`, `_input`, and their flags are
+  // guarded by `_mutex`; `_paused` is written only by the worker.
+  Navigation _navigation{};
+  char _input[256]{};
+  bool _navigationPending = false;
+  bool _inputProvided = false;
+  NavigationKind _pausedFor = NavigationKind::None;
+  volatile bool _paused = false;
+  volatile bool _resumeRequested = false;
+  // General SD access (SDK 4 `esp.fs`). Only the worker task touches this.
+  FsEntry *_fsEntries = nullptr;
+  char *_fsNames = nullptr;
+  uint32_t _fsNamesUsed = 0;
+  uint32_t _fsNamesCapacity = 0;
+  uint16_t _fsCount = 0;
+  uint16_t _fsCapacity = 0;
+  fs::File _fsDirectory;
+  String _fsScanPath;
+  String _fsScanError;
+  bool _fsScanning = false;
+  bool _fsScanReady = false;
+  bool _fsTruncated = false;
+  FsJob _fsJob = FsJob::None;
+  FsJob _fsLastJob = FsJob::None;
+  FsPhase _fsPhase = FsPhase::Commit;
+  String _fsJobSource;
+  String _fsJobTarget;
+  String _fsJobError;
+  String _fsStack[MaxFsDepth];
+  uint8_t _fsDepth = 0;
+  uint32_t _fsJobDone = 0;
+  bool _fsJobFinished = false;
+  bool _fsJobCancel = false;
+  MediaCache::Cleanup _fsCleanup;
   Tone _tones[8]{};
   uint8_t _toneHead = 0;
   uint8_t _toneCount = 0;
@@ -140,8 +213,10 @@ private:
   static void taskMain(void *context);
   void run();
   void setError(const String &message);
-  bool invoke(const char *callback, const char *action = nullptr,
-              uint32_t nowMs = 0, uint32_t touchY = 0);
+  bool invoke(const char *callback);
+  bool invoke(const char *callback, const CallArgs &arguments);
+  void pauseForNavigation();
+  bool resumeFromNavigation();
   void registerApi();
   static void *luaAlloc(void *context, void *pointer, size_t oldSize, size_t newSize);
   static void luaHook(lua_State *state, lua_Debug *debug);
@@ -165,6 +240,33 @@ private:
   static int luaPlayFile(lua_State *state);
   static int luaStopFile(lua_State *state);
   static int luaPlaybackStatus(lua_State *state);
+  static int luaListCell(lua_State *state);
+  static int luaPrompt(lua_State *state);
+  static int luaFsScan(lua_State *state);
+  static int luaFsScanStatus(lua_State *state);
+  static int luaFsEntries(lua_State *state);
+  static int luaFsStat(lua_State *state);
+  static int luaFsMkdir(lua_State *state);
+  static int luaFsRename(lua_State *state);
+  static int luaFsRemove(lua_State *state);
+  static int luaFsJob(lua_State *state);
+  static int luaFsCancel(lua_State *state);
+  static int luaFsOpen(lua_State *state);
+  // Reads Lua argument `index` as an app path; on failure pushes the
+  // `false|nil, error` pair and returns false.
+  bool checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,
+                   bool nilOnError, String &path);
+  static void pushFsEntry(lua_State *state, const char *name, bool directory,
+                          uint32_t size, uint32_t modified, uint8_t format);
+  bool startScan(const String &path, String &error);
+  void closeScan(bool keepListing);
+  void serviceScan();
+  bool appendScanEntry(const String &name, bool directory, uint32_t size, uint32_t modified);
+  bool startJob(FsJob job, const String &source, const String &target, String &error);
+  void finishJob(const char *error);
+  void serviceJob();
+  bool stepJob();
+  void releaseFs();
   void clearTones();
   void serviceTones();
   bool ensureDataDirectory();  // Caller holds SpiBusLock.

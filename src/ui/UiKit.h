@@ -24,6 +24,13 @@ constexpr int16_t BatteryGlyphTextWidth = 38;
 constexpr uint16_t MaxRgba565IconWidth = 64;
 constexpr uint16_t AppBarColor = 0x1082;  // #111111 in RGB565.
 constexpr uint16_t DividerColor = TFT_DARKGREY;
+// Tints for the 32px folder/document list icons, by file family.
+constexpr uint16_t FolderIconColor = TFT_YELLOW;
+constexpr uint16_t FileIconColor = TFT_LIGHTGREY;
+constexpr uint16_t ImageFileIconColor = TFT_GREEN;
+constexpr uint16_t AudioFileIconColor = TFT_BLUE;
+constexpr uint16_t VideoFileIconColor = TFT_ORANGE;
+constexpr uint16_t TextFileIconColor = TFT_WHITE;
 
 struct AppBarStyle {
   uint16_t backgroundColor;
@@ -247,6 +254,19 @@ void drawListCell(TFT_eSPI &tft,
                   const uint8_t *iconAlpha,
                   uint16_t iconColor,
                   const String &trailingText = String());
+
+enum class FileIcon : uint8_t { None, Folder, File, Image, Audio, Video, Text };
+enum class ListAction : uint8_t { None, More, Close };
+
+// Draws a list cell with the kit's folder/document icon tinted for its file
+// family and an optional 40x40px trailing action cell. The caller owns hit
+// testing for the row and for the action cell at the right edge.
+void drawFileListCell(TFT_eSPI &tft,
+                      int16_t width,
+                      int16_t y,
+                      const String &label,
+                      FileIcon icon,
+                      ListAction action = ListAction::None);
 
 // Shared fill-only rounded text button. The caller owns hit testing for the
 // complete rectangle and supplies the immediate screen background.

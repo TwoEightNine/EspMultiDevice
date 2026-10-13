@@ -6,6 +6,8 @@
 #include <esp_timer.h>
 #include <math.h>
 
+#include <algorithm>
+
 #include "../../vendor_shims/lua/LuaConfig.h"
 
 extern "C" {
@@ -14,7 +16,10 @@ extern "C" {
 #include "../../../third_party/lua/lualib.h"
 }
 
+#include "../../core/NaturalOrder.h"
 #include "../../core/SpiBusLock.h"
+#include "../../media/FileFormats.h"
+#include "../../services/storage/PathPolicy.h"
 #include "../../services/storage/SdCardController.h"
 #include "../../services/audio/SpeakerController.h"
 #include "../../services/audio/AudioSettings.h"
@@ -35,11 +40,25 @@ void removeGlobal(lua_State *state, const char *name) {
   lua_pushnil(state);
   lua_setglobal(state, name);
 }
+
+String baseName(const String &path) {
+  const int slash = path.lastIndexOf('/');
+  return slash < 0 ? path : path.substring(slash + 1);
+}
+
+// Pushes the SDK's `false|nil, error` failure pair.
+int pushFailure(lua_State *state, bool nilFirst, const char *error) {
+  if (nilFirst) lua_pushnil(state); else lua_pushboolean(state, false);
+  lua_pushstring(state, error);
+  return 2;
+}
 }
 
 AppRuntime::AppRuntime(SdCardController &card, SpeakerController &speaker,
-                       AudioSettings &audioSettings, MicController &mic)
-  : _card(card), _speaker(speaker), _audioSettings(audioSettings), _mic(mic) {}
+                       AudioSettings &audioSettings, MicController &mic,
+                       MediaCache &mediaCache)
+  : _card(card), _speaker(speaker), _audioSettings(audioSettings), _mic(mic),
+    _mediaCache(mediaCache) {}
 
 bool AppRuntime::start(const String &id, const Status &initialStatus) {
   if (_task || !AppPackage::validId(id)) return false;
@@ -52,6 +71,11 @@ bool AppRuntime::start(const String &id, const Status &initialStatus) {
   _frameOpen = false;
   _frameCost = 0;
   _sdkVersion = 1;
+  _filesPermission = false;
+  _navigationPending = _inputProvided = false;
+  _paused = false;
+  _resumeRequested = false;
+  _pausedFor = NavigationKind::None;
   _toneLastWriteMs = 0;
   _recActive = _recToFile = _playActive = _playFinished = false;
   _recError = _playError = String();
@@ -102,6 +126,7 @@ bool AppRuntime::end() {
 bool AppRuntime::sendAction(const char *id) {
   if (!_actions || _cancel || _stopped || !id) return false;
   Action action{};
+  action.kind = ActionKind::Button;
   copyText(action.id, sizeof(action.id), id);
   return xQueueSend(_actions, &action, 0) == pdTRUE;
 }
@@ -109,8 +134,33 @@ bool AppRuntime::sendAction(const char *id) {
 bool AppRuntime::sendTouch(uint16_t x, uint16_t y) {
   if (!_actions || _cancel || _stopped) return false;
   Action action{};
-  action.x = x; action.y = y; action.touch = true;
+  action.x = x; action.y = y; action.kind = ActionKind::Touch;
   return xQueueSend(_actions, &action, 0) == pdTRUE;
+}
+
+bool AppRuntime::sendTouchEnd(uint16_t x, uint16_t y, uint32_t heldMs) {
+  if (!_actions || _cancel || _stopped) return false;
+  Action action{};
+  action.x = x; action.y = y; action.heldMs = heldMs; action.kind = ActionKind::TouchEnd;
+  return xQueueSend(_actions, &action, 0) == pdTRUE;
+}
+
+bool AppRuntime::takeNavigation(Navigation &navigation) {
+  if (!_paused || _stopped || !_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
+  const bool ready = _navigationPending;
+  if (ready) { navigation = _navigation; _navigationPending = false; }
+  xSemaphoreGive(_mutex);
+  return ready;
+}
+
+void AppRuntime::resume(const char *input) {
+  if (!_mutex) return;
+  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    _inputProvided = input != nullptr;
+    copyText(_input, sizeof(_input), input);
+    xSemaphoreGive(_mutex);
+  }
+  _resumeRequested = true;
 }
 
 bool AppRuntime::takeScene(Scene &scene, uint32_t &revision) {
@@ -956,6 +1006,546 @@ void AppRuntime::servicePlayback() {
   }
 }
 
+int AppRuntime::luaListCell(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  if (!runtime->_frameOpen || !runtime->_buildingFrame)
+    return luaL_error(state, "begin_frame required");
+  Frame &frame = *runtime->_buildingFrame;
+  if (frame.count >= MaxDrawCommands) return luaL_error(state, "too many draw commands");
+  static const char *const icons[] = {
+    "none", "folder", "file", "image", "audio", "video", "text", nullptr};
+  static const char *const actions[] = {"none", "more", "close", nullptr};
+  const lua_Integer y = luaL_checkinteger(state, 1);
+  size_t length = 0;
+  const char *label = luaL_checklstring(state, 2, &length);
+  const int icon = luaL_checkoption(state, 3, "none", icons);
+  const int action = luaL_checkoption(state, 4, "none", actions);
+  if (y < -512 || y > 1024) return luaL_error(state, "draw argument out of range");
+  if (!length || length > 96 || memchr(label, 0, length))
+    return luaL_error(state, "invalid draw text");
+  const uint32_t cost = 320UL * 40UL;
+  if (cost > 400000UL - runtime->_frameCost)
+    return luaL_error(state, "frame drawing budget exceeded");
+  runtime->_frameCost += cost;
+  DrawCommand &command = frame.commands[frame.count++];
+  command = DrawCommand{};
+  command.op = DrawOp::ListCell;
+  command.arg[0] = static_cast<int32_t>(y);
+  command.arg[1] = icon;
+  command.arg[2] = action;
+  copyText(command.text, sizeof(command.text), label);
+  return 0;
+}
+
+int AppRuntime::luaPrompt(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  size_t titleLength = 0, initialLength = 0;
+  const char *title = luaL_checklstring(state, 1, &titleLength);
+  const char *initial = luaL_optlstring(state, 2, "", &initialLength);
+  if (!titleLength || titleLength > 40 || memchr(title, 0, titleLength) ||
+      initialLength > 255 || memchr(initial, 0, initialLength))
+    return luaL_error(state, "invalid prompt text");
+  if (runtime->_navigationPending) return pushFailure(state, false, "Navigation pending");
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return pushFailure(state, false, "Host busy");
+  runtime->_navigation = Navigation{};
+  runtime->_navigation.kind = NavigationKind::Prompt;
+  copyText(runtime->_navigation.title, sizeof(runtime->_navigation.title), title);
+  copyText(runtime->_navigation.initial, sizeof(runtime->_navigation.initial), initial);
+  runtime->_navigationPending = true;
+  xSemaphoreGive(runtime->_mutex);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+void AppRuntime::pauseForNavigation() {
+  // The screen about to cover the app may need the speaker or microphone.
+  finishRecording("");
+  finishPlayback(nullptr, false);
+  clearTones();
+  _pausedFor = _navigation.kind;
+  _paused = true;
+}
+
+bool AppRuntime::resumeFromNavigation() {
+  char text[sizeof(_input)];
+  bool provided = false;
+  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    provided = _inputProvided;
+    copyText(text, sizeof(text), _input);
+    // A request the host never took (push failed) is dropped with the pause.
+    _navigationPending = false;
+    xSemaphoreGive(_mutex);
+  }
+  const bool prompt = _pausedFor == NavigationKind::Prompt;
+  _pausedFor = NavigationKind::None;
+  _resumeRequested = false;
+  _paused = false;
+  xQueueReset(_actions);
+  if (prompt) {
+    CallArgs arguments;
+    if (provided) arguments.text = text; else arguments.nil = true;
+    if (!invoke("on_input", arguments)) return false;
+  }
+  return invoke("on_resume");
+}
+
+bool AppRuntime::checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,
+                             bool nilOnError, String &path) {
+  size_t length = 0;
+  const char *value = luaL_checklstring(state, index, &length);
+  const char *error = nullptr;
+  if (memchr(value, 0, length) || !PathPolicy::appPath(value, length, allowRoot, path))
+    error = "Invalid path";
+  else if (mutation && !PathPolicy::appMutable(path)) error = "Path is read-only";
+  else if (!_card.isMounted()) error = "SD card unavailable";
+  if (!error) return true;
+  pushFailure(state, nilOnError, error);
+  return false;
+}
+
+void AppRuntime::pushFsEntry(lua_State *state, const char *name, bool directory,
+                             uint32_t size, uint32_t modified, uint8_t formatValue) {
+  const FileFormats::Format format = static_cast<FileFormats::Format>(formatValue);
+  const char *kind = "other";
+  if (directory) kind = "folder";
+  else if (!FileFormats::isInternal(format)) {
+    switch (FileFormats::group(format)) {
+      case FileFormats::Group::Image: kind = "image"; break;
+      case FileFormats::Group::Audio: kind = "audio"; break;
+      case FileFormats::Group::Video: kind = "video"; break;
+      case FileFormats::Group::Text: kind = "text"; break;
+      default: break;
+    }
+  }
+  lua_createtable(state, 0, 6);
+  lua_pushstring(state, name); lua_setfield(state, -2, "name");
+  lua_pushboolean(state, directory); lua_setfield(state, -2, "dir");
+  lua_pushinteger(state, size); lua_setfield(state, -2, "size");
+  lua_pushinteger(state, modified); lua_setfield(state, -2, "modified");
+  lua_pushstring(state, kind); lua_setfield(state, -2, "kind");
+  lua_pushboolean(state, !directory && FileFormats::isOpenable(format));
+  lua_setfield(state, -2, "openable");
+}
+
+bool AppRuntime::startScan(const String &path, String &error) {
+  closeScan(false);
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  _fsDirectory = SD.open(path.c_str());
+  const bool valid = _fsDirectory && _fsDirectory.isDirectory();
+  if (!valid && _fsDirectory) _fsDirectory.close();
+  SpiBusLock::unlock();
+  if (!valid) { _fsDirectory = File(); error = "Folder not found"; return false; }
+  _fsScanPath = path;
+  _fsScanError = String();
+  _fsScanning = true;
+  return true;
+}
+
+void AppRuntime::closeScan(bool keepListing) {
+  if (_fsDirectory) {
+    if (SpiBusLock::lock(portMAX_DELAY)) { _fsDirectory.close(); SpiBusLock::unlock(); }
+    _fsDirectory = File();
+  }
+  _fsScanning = false;
+  if (keepListing) return;
+  if (_fsEntries) { heap_caps_free(_fsEntries); _fsEntries = nullptr; }
+  if (_fsNames) { heap_caps_free(_fsNames); _fsNames = nullptr; }
+  _fsCount = _fsCapacity = 0;
+  _fsNamesUsed = _fsNamesCapacity = 0;
+  _fsScanReady = _fsTruncated = false;
+}
+
+bool AppRuntime::appendScanEntry(const String &name, bool directory, uint32_t size,
+                                 uint32_t modified) {
+  if (_fsCount == _fsCapacity) {
+    const uint32_t doubled = _fsCapacity * 2UL;
+    const uint16_t capacity = !_fsCapacity ? 64 :
+        static_cast<uint16_t>(doubled < MaxFsEntries ? doubled : MaxFsEntries);
+    FsEntry *entries = static_cast<FsEntry *>(heap_caps_realloc(
+        _fsEntries, capacity * sizeof(FsEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!entries) return false;
+    _fsEntries = entries;
+    _fsCapacity = capacity;
+  }
+  const uint32_t bytes = name.length() + 1;
+  if (_fsNamesUsed + bytes > _fsNamesCapacity) {
+    uint32_t capacity = _fsNamesCapacity ? _fsNamesCapacity * 2 : 4096;
+    while (capacity < _fsNamesUsed + bytes) capacity *= 2;
+    char *names = static_cast<char *>(heap_caps_realloc(
+        _fsNames, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!names) return false;
+    _fsNames = names;
+    _fsNamesCapacity = capacity;
+  }
+  memcpy(_fsNames + _fsNamesUsed, name.c_str(), bytes);
+  FsEntry &entry = _fsEntries[_fsCount++];
+  entry.nameOffset = _fsNamesUsed;
+  entry.size = size;
+  entry.modified = modified;
+  entry.format = static_cast<uint8_t>(directory ? FileFormats::Format::Unknown
+                                                 : FileFormats::fromPath(name));
+  entry.directory = directory;
+  _fsNamesUsed += bytes;
+  return true;
+}
+
+void AppRuntime::serviceScan() {
+  if (!_fsScanning) return;
+  // One directory entry per bus transaction, for a bounded slice of each pass.
+  const int64_t deadline = esp_timer_get_time() + 8000;
+  bool finished = false;
+  while (!finished && !_cancel && esp_timer_get_time() < deadline) {
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return;
+    File entry = _fsDirectory.openNextFile();
+    const bool found = static_cast<bool>(entry);
+    String name;
+    bool directory = false;
+    uint32_t size = 0, modified = 0;
+    if (found) {
+      name = baseName(entry.name());
+      directory = entry.isDirectory();
+      size = directory ? 0 : static_cast<uint32_t>(entry.size());
+      modified = static_cast<uint32_t>(entry.getLastWrite());
+      entry.close();
+    }
+    SpiBusLock::unlock();
+    taskYIELD();
+    if (!found) { finished = true; break; }
+    // Skip what no SDK path could address afterwards.
+    if (PathPolicy::hiddenName(name) ||
+        _fsScanPath.length() + 1 + name.length() > PathPolicy::MaxPathBytes ||
+        (!directory && FileFormats::isInternal(FileFormats::fromPath(name)))) continue;
+    if (_fsCount >= MaxFsEntries) { _fsTruncated = true; finished = true; break; }
+    if (!appendScanEntry(name, directory, size, modified)) {
+      closeScan(false);
+      _fsScanError = "App memory unavailable";
+      return;
+    }
+  }
+  if (!finished) return;
+  closeScan(true);
+  const char *names = _fsNames;
+  std::sort(_fsEntries, _fsEntries + _fsCount, [names](const FsEntry &left, const FsEntry &right) {
+    if (left.directory != right.directory) return left.directory;
+    const char *l = names + left.nameOffset;
+    const char *r = names + right.nameOffset;
+    return NaturalOrder::compare(l, strlen(l), r, strlen(r)) < 0;
+  });
+  _fsScanReady = true;
+}
+
+bool AppRuntime::startJob(FsJob job, const String &source, const String &target, String &error) {
+  if (_fsJob != FsJob::None) { error = "File job active"; return false; }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  File file = SD.open(source.c_str(), FILE_READ);
+  const bool exists = static_cast<bool>(file);
+  const bool directory = exists && file.isDirectory();
+  if (file) file.close();
+  const bool targetExists = job == FsJob::Rename && SD.exists(target.c_str());
+  SpiBusLock::unlock();
+  if (!exists) { error = "File not found"; return false; }
+  if (targetExists) { error = "Target exists"; return false; }
+  // Any mutation makes the current listing stale; the app scans again.
+  closeScan(false);
+  _fsJob = _fsLastJob = job;
+  _fsJobSource = source;
+  _fsJobTarget = target;
+  _fsJobError = String();
+  _fsJobDone = 0;
+  _fsJobFinished = _fsJobCancel = false;
+  _fsDepth = 0;
+  if (!directory) {
+    // Sidecar caches are bound to the source file and must not outlive it.
+    _mediaCache.beginCleanup(source, _fsCleanup);
+    _fsPhase = FsPhase::SourceCleanup;
+  } else if (job == FsJob::Remove) {
+    _fsStack[0] = source;
+    _fsDepth = 1;
+    _fsPhase = FsPhase::Tree;
+  } else {
+    _fsPhase = FsPhase::Commit;
+  }
+  return true;
+}
+
+void AppRuntime::finishJob(const char *error) {
+  _fsJob = FsJob::None;
+  _fsJobError = error ? String(error) : String();
+  _fsJobFinished = error == nullptr;
+  _fsJobCancel = false;
+  for (uint8_t i = 0; i < MaxFsDepth; ++i) _fsStack[i] = String();
+  _fsDepth = 0;
+  _fsCleanup = MediaCache::Cleanup();
+}
+
+// Runs one bounded SD transaction. Returns false when the job ended or the
+// bus was busy, so the caller leaves the rest for the next pass.
+bool AppRuntime::stepJob() {
+  if (_fsJobCancel) { finishJob("Cancelled"); return false; }
+  if (_fsPhase == FsPhase::SourceCleanup || _fsPhase == FsPhase::TargetCleanup) {
+    const MediaCache::Result result = _mediaCache.cleanupStep(_fsCleanup);
+    if (result == MediaCache::Result::Busy) return false;
+    if (result == MediaCache::Result::More) return true;
+    if (result != MediaCache::Result::Complete) { finishJob("Cache cleanup failed"); return false; }
+    if (_fsPhase == FsPhase::SourceCleanup && _fsJob == FsJob::Rename) {
+      // Stale sidecars left under the new name would describe another file.
+      _mediaCache.beginCleanup(_fsJobTarget, _fsCleanup);
+      _fsPhase = FsPhase::TargetCleanup;
+    } else {
+      _fsPhase = FsPhase::Commit;
+    }
+    return true;
+  }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
+  if (_fsPhase == FsPhase::Commit) {
+    const bool done = _fsJob == FsJob::Rename
+        ? !SD.exists(_fsJobTarget.c_str()) && SD.rename(_fsJobSource.c_str(), _fsJobTarget.c_str())
+        : SD.remove(_fsJobSource.c_str());
+    SpiBusLock::unlock();
+    if (done) ++_fsJobDone;
+    finishJob(done ? nullptr : (_fsJob == FsJob::Rename ? "Rename failed" : "Delete failed"));
+    return false;
+  }
+  // Tree delete: remove the first child of the deepest folder, descend into a
+  // child folder, or remove the folder itself once it is empty.
+  const String top = _fsStack[_fsDepth - 1];
+  File directory = SD.open(top.c_str(), FILE_READ);
+  if (!directory || !directory.isDirectory()) {
+    if (directory) directory.close();
+    SpiBusLock::unlock();
+    finishJob("Delete failed");
+    return false;
+  }
+  File child = directory.openNextFile();
+  const bool found = static_cast<bool>(child);
+  const bool childDirectory = found && child.isDirectory();
+  const String childPath = found ? top + "/" + baseName(child.name()) : String();
+  if (child) child.close();
+  directory.close();
+  bool removed = true;
+  if (!found) removed = SD.rmdir(top.c_str());
+  else if (!childDirectory) removed = SD.remove(childPath.c_str());
+  SpiBusLock::unlock();
+  if (!removed) { finishJob("Delete failed"); return false; }
+  if (found && childDirectory) {
+    if (_fsDepth >= MaxFsDepth) { finishJob("Folder too deep"); return false; }
+    _fsStack[_fsDepth++] = childPath;
+    return true;
+  }
+  ++_fsJobDone;
+  if (!found) {
+    _fsStack[--_fsDepth] = String();
+    if (_fsDepth == 0) { finishJob(nullptr); return false; }
+  }
+  return true;
+}
+
+void AppRuntime::serviceJob() {
+  if (_fsJob == FsJob::None) return;
+  if (!_card.isMounted()) { finishJob("SD card removed"); return; }
+  const int64_t deadline = esp_timer_get_time() + 8000;
+  while (stepJob() && !_cancel && esp_timer_get_time() < deadline) taskYIELD();
+}
+
+void AppRuntime::releaseFs() {
+  closeScan(false);
+  finishJob(nullptr);
+  _fsLastJob = FsJob::None;
+  _fsJobFinished = false;
+  _fsJobDone = 0;
+  _fsJobSource = _fsJobTarget = String();
+  _fsScanPath = _fsScanError = String();
+}
+
+int AppRuntime::luaFsScan(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, true, false, false, path)) return 2;
+  if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
+  String error;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->startScan(path, error);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!success) return pushFailure(state, false, error.c_str());
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaFsScanStatus(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  lua_createtable(state, 0, 6);
+  lua_pushboolean(state, runtime->_fsScanning); lua_setfield(state, -2, "scanning");
+  lua_pushboolean(state, runtime->_fsScanReady); lua_setfield(state, -2, "ready");
+  lua_pushinteger(state, runtime->_fsCount); lua_setfield(state, -2, "count");
+  lua_pushboolean(state, runtime->_fsTruncated); lua_setfield(state, -2, "truncated");
+  lua_pushstring(state, runtime->_fsScanPath.c_str()); lua_setfield(state, -2, "path");
+  if (!runtime->_fsScanError.isEmpty()) {
+    lua_pushstring(state, runtime->_fsScanError.c_str()); lua_setfield(state, -2, "error");
+  }
+  return 1;
+}
+
+int AppRuntime::luaFsEntries(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  const lua_Integer offset = luaL_checkinteger(state, 1);
+  const lua_Integer count = luaL_checkinteger(state, 2);
+  if (!runtime->_fsScanReady) return pushFailure(state, true, "No listing");
+  if (offset < 0 || offset > runtime->_fsCount || count < 1 || count > 16)
+    return pushFailure(state, true, "Invalid range");
+  const lua_Integer available = runtime->_fsCount - offset;
+  const int total = static_cast<int>(count < available ? count : available);
+  lua_createtable(state, total, 0);
+  for (int i = 0; i < total; ++i) {
+    const FsEntry &entry = runtime->_fsEntries[offset + i];
+    pushFsEntry(state, runtime->_fsNames + entry.nameOffset, entry.directory,
+                entry.size, entry.modified, entry.format);
+    lua_rawseti(state, -2, i + 1);
+  }
+  return 1;
+}
+
+int AppRuntime::luaFsStat(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, true, false, true, path)) return 2;
+  const int64_t started = esp_timer_get_time();
+  bool found = false, directory = false;
+  uint32_t size = 0, modified = 0;
+  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  if (locked) {
+    File file = SD.open(path.c_str(), FILE_READ);
+    found = static_cast<bool>(file);
+    if (found) {
+      directory = file.isDirectory();
+      size = directory ? 0 : static_cast<uint32_t>(file.size());
+      modified = static_cast<uint32_t>(file.getLastWrite());
+      file.close();
+    }
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!locked) return pushFailure(state, true, "SD busy");
+  if (!found) return pushFailure(state, true, "File not found");
+  const String name = path == "/" ? path : baseName(path);
+  pushFsEntry(state, name.c_str(), directory, size, modified,
+              static_cast<uint8_t>(directory ? FileFormats::Format::Unknown
+                                             : FileFormats::fromPath(name)));
+  return 1;
+}
+
+int AppRuntime::luaFsMkdir(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, false, true, false, path)) return 2;
+  if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
+  const int64_t started = esp_timer_get_time();
+  const char *error = nullptr;
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
+    error = "SD busy";
+  } else {
+    if (SD.exists(path.c_str())) error = "Already exists";
+    else if (!SD.mkdir(path.c_str())) error = "Cannot create folder";
+    SpiBusLock::unlock();
+  }
+  if (!error) runtime->closeScan(false);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (error) return pushFailure(state, false, error);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaFsRename(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  // Raise argument type errors before any String owns heap memory.
+  luaL_checkstring(state, 1);
+  luaL_checkstring(state, 2);
+  String source, target;
+  if (!runtime->checkFsPath(state, 1, false, true, false, source)) return 2;
+  if (!runtime->checkFsPath(state, 2, false, true, false, target)) return 2;
+  if (FileFormats::isInternal(FileFormats::fromPath(target)))
+    return pushFailure(state, false, "Invalid path");
+  if (source.equalsIgnoreCase(target)) return pushFailure(state, false, "Target exists");
+  if (PathPolicy::atOrBelow(target, source))
+    return pushFailure(state, false, "Cannot move a folder into itself");
+  String error;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->startJob(FsJob::Rename, source, target, error);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!success) return pushFailure(state, false, error.c_str());
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaFsRemove(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, false, true, false, path)) return 2;
+  String error;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->startJob(FsJob::Remove, path, String(), error);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!success) return pushFailure(state, false, error.c_str());
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaFsJob(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  lua_createtable(state, 0, 5);
+  lua_pushboolean(state, runtime->_fsJob != FsJob::None); lua_setfield(state, -2, "active");
+  if (runtime->_fsLastJob != FsJob::None) {
+    lua_pushstring(state, runtime->_fsLastJob == FsJob::Rename ? "rename" : "remove");
+    lua_setfield(state, -2, "kind");
+  }
+  lua_pushinteger(state, runtime->_fsJobDone); lua_setfield(state, -2, "done");
+  lua_pushboolean(state, runtime->_fsJobFinished); lua_setfield(state, -2, "finished");
+  if (!runtime->_fsJobError.isEmpty()) {
+    lua_pushstring(state, runtime->_fsJobError.c_str()); lua_setfield(state, -2, "error");
+  }
+  return 1;
+}
+
+int AppRuntime::luaFsCancel(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  const int64_t started = esp_timer_get_time();
+  if (runtime->_fsScanning) runtime->closeScan(false);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (runtime->_fsJob != FsJob::None) runtime->_fsJobCancel = true;
+  return 0;
+}
+
+int AppRuntime::luaFsOpen(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, false, false, false, path)) return 2;
+  if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
+  if (runtime->_navigationPending) return pushFailure(state, false, "Navigation pending");
+  const FileFormats::Format format = FileFormats::fromPath(path);
+  if (!FileFormats::isOpenable(format)) return pushFailure(state, false, "Unsupported file");
+  const int64_t started = esp_timer_get_time();
+  bool found = false;
+  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  if (locked) {
+    File file = SD.open(path.c_str(), FILE_READ);
+    found = file && !file.isDirectory();
+    if (file) file.close();
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!locked) return pushFailure(state, false, "SD busy");
+  if (!found) return pushFailure(state, false, "File not found");
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return pushFailure(state, false, "Host busy");
+  runtime->_navigation = Navigation{};
+  runtime->_navigation.kind = NavigationKind::OpenFile;
+  copyText(runtime->_navigation.path, sizeof(runtime->_navigation.path), path.c_str());
+  runtime->_navigationPending = true;
+  xSemaphoreGive(runtime->_mutex);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
 void AppRuntime::registerApi() {
   luaL_requiref(_lua, "_G", luaopen_base, 1); lua_pop(_lua, 1);
   luaL_requiref(_lua, "table", luaopen_table, 1); lua_pop(_lua, 1);
@@ -1052,6 +1642,27 @@ void AppRuntime::registerApi() {
       lua_setfield(_lua, -2, "mic");
     }
   }
+  if (_sdkVersion >= 4) {
+    lua_getfield(_lua, -1, "ui");
+    lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaListCell, 1);
+    lua_setfield(_lua, -2, "list_cell");
+    lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaPrompt, 1);
+    lua_setfield(_lua, -2, "prompt");
+    lua_pop(_lua, 1);
+    if (_filesPermission) {
+      static const luaL_Reg fsFunctions[] = {
+        {"scan", luaFsScan}, {"scan_status", luaFsScanStatus}, {"entries", luaFsEntries},
+        {"stat", luaFsStat}, {"mkdir", luaFsMkdir}, {"rename", luaFsRename},
+        {"remove", luaFsRemove}, {"job", luaFsJob}, {"cancel", luaFsCancel},
+        {"open", luaFsOpen}, {nullptr, nullptr}};
+      lua_newtable(_lua);
+      for (const luaL_Reg *entry = fsFunctions; entry->name; ++entry) {
+        lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, entry->func, 1);
+        lua_setfield(_lua, -2, entry->name);
+      }
+      lua_setfield(_lua, -2, "fs");
+    }
+  }
   lua_setglobal(_lua, "esp");
 }
 
@@ -1068,8 +1679,9 @@ void AppRuntime::setError(const String &message) {
   }
 }
 
-bool AppRuntime::invoke(const char *callback, const char *action,
-                        uint32_t nowMs, uint32_t touchY) {
+bool AppRuntime::invoke(const char *callback) { return invoke(callback, CallArgs()); }
+
+bool AppRuntime::invoke(const char *callback, const CallArgs &callArguments) {
   lua_rawgeti(_lua, LUA_REGISTRYINDEX, _appRef);
   lua_getfield(_lua, -1, callback);
   if (lua_isnil(_lua, -1)) {
@@ -1079,10 +1691,11 @@ bool AppRuntime::invoke(const char *callback, const char *action,
   }
   if (!lua_isfunction(_lua, -1)) { lua_settop(_lua, 0); setError("Invalid app callback"); return false; }
   int arguments = 0;
-  if (action) { lua_pushstring(_lua, action); arguments = 1; }
-  else if (strcmp(callback, "on_tick") == 0) { lua_pushinteger(_lua, nowMs); arguments = 1; }
-  else if (strcmp(callback, "on_touch") == 0) {
-    lua_pushinteger(_lua, nowMs); lua_pushinteger(_lua, touchY); arguments = 2;
+  if (callArguments.text) { lua_pushstring(_lua, callArguments.text); ++arguments; }
+  else if (callArguments.nil) { lua_pushnil(_lua); ++arguments; }
+  for (uint8_t i = 0; i < callArguments.numbers; ++i) {
+    lua_pushinteger(_lua, static_cast<lua_Integer>(callArguments.number[i]));
+    ++arguments;
   }
   _hookCount = 0;
   _callbackStartedUs = esp_timer_get_time();
@@ -1111,6 +1724,7 @@ void AppRuntime::run() {
   if (!package.valid) { setError(package.error); return; }
   _displayName = package.name;
   _sdkVersion = package.sdk;
+  _filesPermission = package.sdk >= 4 && package.filesPermission;
   char *source = nullptr;
   size_t length = 0;
   String error;
@@ -1146,26 +1760,56 @@ void AppRuntime::run() {
       if (invoke("on_start")) {
         uint32_t lastTick = millis();
         while (!_cancel && _card.isMounted()) {
+          if (_paused) {
+            if (!_resumeRequested) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+            if (!resumeFromNavigation()) break;
+            lastTick = millis();
+            continue;
+          }
+          if (_navigationPending) { pauseForNavigation(); continue; }
           Action action{};
-          const uint32_t waitMs = (_toneRemaining || _toneCount || _audioReady ||
+          const bool fsBusy = _fsScanning || _fsJob != FsJob::None;
+          const uint32_t waitMs = fsBusy ? 1 :
+                                  (_toneRemaining || _toneCount || _audioReady ||
                                    _recActive || _playActive) ? 10 : TickIntervalMs;
           if (xQueueReceive(_actions, &action, pdMS_TO_TICKS(waitMs)) == pdTRUE) {
-            if (action.touch) {
-              if (!invoke("on_touch", nullptr, action.x, action.y)) break;
-            } else if (!invoke("on_action", action.id)) break;
+            CallArgs arguments;
+            const char *callback = "on_action";
+            if (action.kind == ActionKind::Button) {
+              arguments.text = action.id;
+            } else {
+              arguments.number[0] = action.x;
+              arguments.number[1] = action.y;
+              arguments.numbers = 2;
+              callback = "on_touch";
+              if (action.kind == ActionKind::TouchEnd) {
+                arguments.number[2] = action.heldMs;
+                arguments.numbers = 3;
+                callback = "on_touch_end";
+              }
+            }
+            if (action.kind != ActionKind::TouchEnd || _sdkVersion >= 4) {
+              if (!invoke(callback, arguments)) break;
+            }
           }
           serviceTones();
           serviceRecording();
           servicePlayback();
+          serviceScan();
+          serviceJob();
           const uint32_t now = millis();
           if (now - lastTick >= TickIntervalMs) {
             lastTick = now;
-            if (!invoke("on_tick", nullptr, now)) break;
+            CallArgs arguments;
+            arguments.number[0] = now;
+            arguments.numbers = 1;
+            if (!invoke("on_tick", arguments)) break;
           }
         }
       }
     }
   }
+  releaseFs();
   finishRecording("");
   finishPlayback(nullptr, false);
   clearTones();

@@ -8,6 +8,7 @@
 #include "../../core/SpiBusLock.h"
 #include "../../media/FileFormats.h"
 #include "../storage/SdCardController.h"
+#include "../storage/PathPolicy.h"
 #include "../storage/SecretStorage.h"
 
 namespace {
@@ -543,19 +544,7 @@ bool AssistantDeviceTools::selectionValid(uint8_t selectionId) const {
 }
 
 bool AssistantDeviceTools::hiddenOrPrivate(const String &path) {
-  if (!path.startsWith("/") || path == "/" ||
-      path == SecretStorage::Directory || path.startsWith(String(SecretStorage::Directory) + "/"))
-    return true;
-  int16_t start = 1;
-  while (start < path.length()) {
-    const int16_t slash = path.indexOf('/', start);
-    const String segment = path.substring(start, slash < 0 ? path.length() : slash);
-    if (segment.startsWith(".") || segment == "" || segment.endsWith(".tmp") ||
-        segment == ".configs") return true;
-    if (slash < 0) break;
-    start = slash + 1;
-  }
-  return false;
+  return PathPolicy::hiddenOrPrivate(path);
 }
 
 String AssistantDeviceTools::baseName(const String &path) {

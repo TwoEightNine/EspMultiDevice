@@ -16,6 +16,8 @@ struct AppPackage {
   uint8_t sdk = 0;
   uint16_t iconBackground = DefaultIconBackground;
   bool hasIconBackground = false;
+  // SDK 4 manifest grant for `esp.fs` general SD access.
+  bool filesPermission = false;
   bool valid = false;
 
   static bool validId(const String &value);

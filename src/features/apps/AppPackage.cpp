@@ -103,7 +103,8 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
                !manifestName->valuestring[0] || strlen(manifestName->valuestring) > 40) {
       result.error = "Invalid app name";
     } else if (!cJSON_IsNumber(sdk) ||
-               (sdk->valuedouble != 1 && sdk->valuedouble != 2 && sdk->valuedouble != 3)) {
+               (sdk->valuedouble != 1 && sdk->valuedouble != 2 && sdk->valuedouble != 3 &&
+                sdk->valuedouble != 4)) {
       result.error = "Unsupported SDK version";
     } else {
       result.sdk = static_cast<uint8_t>(sdk->valuedouble);
@@ -113,6 +114,14 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
           iconBackground->valuedouble == static_cast<double>(iconBackground->valueint)) {
         result.iconBackground = static_cast<uint16_t>(iconBackground->valueint);
         result.hasIconBackground = true;
+      }
+      const cJSON *permissions = cJSON_GetObjectItemCaseSensitive(root, "permissions");
+      const cJSON *permission = nullptr;
+      if (result.sdk >= 4 && cJSON_IsArray(permissions)) {
+        cJSON_ArrayForEach(permission, permissions) {
+          if (cJSON_IsString(permission) && permission->valuestring &&
+              strcmp(permission->valuestring, "files") == 0) result.filesPermission = true;
+        }
       }
       if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
         result.error = "SD busy";

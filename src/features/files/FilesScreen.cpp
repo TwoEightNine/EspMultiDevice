@@ -1,6 +1,7 @@
 #include "FilesScreen.h"
 
 #include "../../app/Navigator.h"
+#include "../../core/NaturalOrder.h"
 #include "../../core/SpiBusLock.h"
 #include "../../ui/icons.h"
 
@@ -24,12 +25,12 @@
 using File = fs::File;
 
 namespace {
-const uint16_t FolderColor = TFT_YELLOW;
-const uint16_t FileColor = TFT_LIGHTGREY;
-const uint16_t ImageFileColor = TFT_GREEN;
-const uint16_t AudioFileColor = TFT_BLUE;
-const uint16_t VideoFileColor = TFT_ORANGE;
-const uint16_t TextFileColor = TFT_WHITE;
+const uint16_t FolderColor = UiKit::FolderIconColor;
+const uint16_t FileColor = UiKit::FileIconColor;
+const uint16_t ImageFileColor = UiKit::ImageFileIconColor;
+const uint16_t AudioFileColor = UiKit::AudioFileIconColor;
+const uint16_t VideoFileColor = UiKit::VideoFileIconColor;
+const uint16_t TextFileColor = UiKit::TextFileIconColor;
 const uint16_t MenuColor = 0x2104;
 const uint16_t DangerColor = TFT_RED;
 const uint16_t FooterButtonColor = 0x2965;
@@ -1694,43 +1695,11 @@ void FilesScreen::finishListingMutation() {
 }
 
 char FilesScreen::folded(char value) {
-  return value >= 'A' && value <= 'Z' ? (char)(value + ('a' - 'A')) : value;
+  return NaturalOrder::folded(value);
 }
 
 int FilesScreen::naturalCompare(const String &left, const String &right) {
-  uint16_t l = 0;
-  uint16_t r = 0;
-  while (l < left.length() && r < right.length()) {
-    const char lc = left[l];
-    const char rc = right[r];
-    if (lc >= '0' && lc <= '9' && rc >= '0' && rc <= '9') {
-      uint16_t lStart = l;
-      uint16_t rStart = r;
-      while (l < left.length() && left[l] == '0') l++;
-      while (r < right.length() && right[r] == '0') r++;
-      uint16_t lDigits = l;
-      uint16_t rDigits = r;
-      while (l < left.length() && left[l] >= '0' && left[l] <= '9') l++;
-      while (r < right.length() && right[r] >= '0' && right[r] <= '9') r++;
-      const uint16_t lLength = l - lDigits;
-      const uint16_t rLength = r - rDigits;
-      if (lLength != rLength) return lLength < rLength ? -1 : 1;
-      for (uint16_t i = 0; i < lLength; i++) {
-        if (left[lDigits + i] != right[rDigits + i]) return left[lDigits + i] < right[rDigits + i] ? -1 : 1;
-      }
-      const uint16_t lZeros = lDigits - lStart;
-      const uint16_t rZeros = rDigits - rStart;
-      if (lZeros != rZeros) return lZeros < rZeros ? -1 : 1;
-      continue;
-    }
-    const char lFolded = folded(lc);
-    const char rFolded = folded(rc);
-    if (lFolded != rFolded) return lFolded < rFolded ? -1 : 1;
-    l++;
-    r++;
-  }
-  if (l != left.length() || r != right.length()) return l == left.length() ? -1 : 1;
-  return left.compareTo(right);
+  return NaturalOrder::compare(left, right);
 }
 
 int FilesScreen::compareEntries(const Entry &left, const Entry &right) {

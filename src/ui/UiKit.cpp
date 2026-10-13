@@ -751,6 +751,35 @@ void drawListCell(TFT_eSPI &tft,
                     width - ContentPadding - ListTextWithIconX, DividerColor);
 }
 
+void drawFileListCell(TFT_eSPI &tft,
+                      int16_t width,
+                      int16_t y,
+                      const String &label,
+                      FileIcon icon,
+                      ListAction action) {
+  // Blank trailing text reserves the action cell so the label ellipsizes
+  // before it, matching the Files screen.
+  const String reserved = action == ListAction::None ? String() : String(F("            "));
+  if (icon == FileIcon::None) {
+    drawListCell(tft, width, y, label, reserved);
+  } else {
+    const bool folder = icon == FileIcon::Folder;
+    const uint16_t color = folder ? FolderIconColor
+                         : icon == FileIcon::Image ? ImageFileIconColor
+                         : icon == FileIcon::Audio ? AudioFileIconColor
+                         : icon == FileIcon::Video ? VideoFileIconColor
+                         : icon == FileIcon::Text ? TextFileIconColor : FileIconColor;
+    drawListCell(tft, width, y, label,
+                 folder ? ic_folder_width : ic_file_width,
+                 folder ? ic_folder_height : ic_file_height,
+                 folder ? ic_folder_alpha : ic_file_alpha, color, reserved);
+  }
+  const int16_t centerX = width - ListCellHeight / 2;
+  const int16_t centerY = y + ListCellHeight / 2;
+  if (action == ListAction::More) drawListMoreIcon(tft, centerX, centerY, TFT_LIGHTGREY, TFT_BLACK);
+  else if (action == ListAction::Close) drawListCloseIcon(tft, centerX, centerY, TFT_LIGHTGREY, TFT_BLACK);
+}
+
 void drawFilledButton(TFT_eSPI &tft,
                       int16_t x,
                       int16_t y,

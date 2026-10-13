@@ -52,7 +52,17 @@ def recorder_logo():
     save(image, "examples/apps/recorder/logo.png")
 
 
+def files_logo():
+    image = canvas()
+    draw = ImageDraw.Draw(image)
+    white = (255, 255, 255, 255)
+    draw.rounded_rectangle((40, 64, 132, 110), radius=16, fill=white)
+    draw.rounded_rectangle((40, 86, 216, 198), radius=18, fill=white)
+    save(image, "examples/apps/files/logo.png")
+
+
 if __name__ == "__main__":
     counter_logo()
     workout_logo()
     recorder_logo()
+    files_logo()
