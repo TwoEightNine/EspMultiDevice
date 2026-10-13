@@ -24,7 +24,8 @@ public:
   uint32_t sampleRate() const;
   const String &lastError() const;
 
-  size_t readPcm16(int16_t *samples, size_t maxSamples);
+  // A zero timeout returns only samples already captured by DMA.
+  size_t readPcm16(int16_t *samples, size_t maxSamples, uint32_t timeoutMs = 10);
 
 private:
   static const size_t RawChunkSamples = 128;

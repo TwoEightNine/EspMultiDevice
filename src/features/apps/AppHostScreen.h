@@ -8,13 +8,15 @@ class SdCardController;
 class WiFiController;
 class SpeakerController;
 class AudioSettings;
+class MicController;
 
 class AppHostScreen : public Screen {
 public:
   AppHostScreen(Navigator &navigator, TouchController &touch,
                 DisplayController &display, SdCardController &card,
                 WiFiController &wifi, BatteryHistoryService &batteryHistory,
-                SpeakerController &speaker, AudioSettings &audioSettings);
+                SpeakerController &speaker, AudioSettings &audioSettings,
+                MicController &mic);
   void onEnter(const ScreenData &data) override;
   void onExit() override;
   bool releaseResources() override;

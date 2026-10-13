@@ -115,7 +115,7 @@ const String &MicController::lastError() const {
   return _lastError;
 }
 
-size_t MicController::readPcm16(int16_t *samples, size_t maxSamples) {
+size_t MicController::readPcm16(int16_t *samples, size_t maxSamples, uint32_t timeoutMs) {
   if (!_recording || !_driverInstalled || !samples || maxSamples == 0 || !isPowered()) {
     return 0;
   }
@@ -129,7 +129,7 @@ size_t MicController::readPcm16(int16_t *samples, size_t maxSamples) {
     raw,
     samplesToRead * sizeof(raw[0]),
     &bytesRead,
-    10 / portTICK_PERIOD_MS
+    timeoutMs / portTICK_PERIOD_MS
   );
 
   if (result != ESP_OK || bytesRead == 0) {

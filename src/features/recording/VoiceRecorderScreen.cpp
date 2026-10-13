@@ -1,35 +1,11 @@
 #include "VoiceRecorderScreen.h"
 
 #include "../../app/Navigator.h"
+#include "../../services/audio/WavFormat.h"
 #include "../../ui/UiKit.h"
 
 #include <SD.h>
 #include <string.h>
-
-namespace {
-void putLe16(uint8_t *buffer, uint16_t value) {
-  buffer[0] = value & 0xff;
-  buffer[1] = (value >> 8) & 0xff;
-}
-
-void putLe32(uint8_t *buffer, uint32_t value) {
-  buffer[0] = value & 0xff;
-  buffer[1] = (value >> 8) & 0xff;
-  buffer[2] = (value >> 16) & 0xff;
-  buffer[3] = (value >> 24) & 0xff;
-}
-
-uint16_t readLe16(const uint8_t *buffer) {
-  return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
-}
-
-uint32_t readLe32(const uint8_t *buffer) {
-  return (uint32_t)buffer[0]
-    | ((uint32_t)buffer[1] << 8)
-    | ((uint32_t)buffer[2] << 16)
-    | ((uint32_t)buffer[3] << 24);
-}
-}
 
 const char *VoiceRecorderScreen::RecordingPath = "/voice_last.wav";
 
@@ -445,23 +421,8 @@ void VoiceRecorderScreen::playChunk() {
 }
 
 bool VoiceRecorderScreen::writeWavHeader(fs::File &file, uint32_t dataBytes) {
-  uint8_t header[44];
-  memset(header, 0, sizeof(header));
-
-  memcpy(header + 0, "RIFF", 4);
-  putLe32(header + 4, 36 + dataBytes);
-  memcpy(header + 8, "WAVE", 4);
-  memcpy(header + 12, "fmt ", 4);
-  putLe32(header + 16, 16);
-  putLe16(header + 20, 1);
-  putLe16(header + 22, 1);
-  putLe32(header + 24, _mic.sampleRate());
-  putLe32(header + 28, _mic.sampleRate() * 2);
-  putLe16(header + 32, 2);
-  putLe16(header + 34, 16);
-  memcpy(header + 36, "data", 4);
-  putLe32(header + 40, dataBytes);
-
+  uint8_t header[WavFormat::HeaderBytes];
+  WavFormat::makeHeader(header, _mic.sampleRate(), dataBytes);
   return file.write(header, sizeof(header)) == sizeof(header);
 }
 
@@ -485,27 +446,14 @@ bool VoiceRecorderScreen::openWavForPlayback(uint32_t &sampleRate) {
     return false;
   }
 
-  uint8_t header[44];
-  if (_playbackFile.read(header, sizeof(header)) != sizeof(header)) {
+  uint8_t header[WavFormat::HeaderBytes];
+  uint32_t dataBytes = 0;
+  if (_playbackFile.read(header, sizeof(header)) != sizeof(header)
+      || !WavFormat::parseHeader(header, sampleRate, dataBytes)) {
     _playbackFile.close();
     return false;
   }
 
-  bool valid = memcmp(header + 0, "RIFF", 4) == 0
-    && memcmp(header + 8, "WAVE", 4) == 0
-    && memcmp(header + 12, "fmt ", 4) == 0
-    && memcmp(header + 36, "data", 4) == 0
-    && readLe16(header + 20) == 1
-    && readLe16(header + 22) == 1
-    && readLe16(header + 34) == 16
-    && readLe32(header + 40) > 0;
-
-  if (!valid) {
-    _playbackFile.close();
-    return false;
-  }
-
-  sampleRate = readLe32(header + 24);
   return true;
 }
 

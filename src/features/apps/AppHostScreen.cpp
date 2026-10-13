@@ -14,9 +14,10 @@
 AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
                              DisplayController &display, SdCardController &card,
                              WiFiController &wifi, BatteryHistoryService &batteryHistory,
-                             SpeakerController &speaker, AudioSettings &audioSettings)
+                             SpeakerController &speaker, AudioSettings &audioSettings,
+                             MicController &mic)
   : Screen(navigator, touch, display), _card(card), _wifi(wifi),
-    _batteryHistory(batteryHistory), _runtime(card, speaker, audioSettings) {}
+    _batteryHistory(batteryHistory), _runtime(card, speaker, audioSettings, mic) {}
 
 void AppHostScreen::onEnter(const ScreenData &data) {
   _lastTouchDown = false;

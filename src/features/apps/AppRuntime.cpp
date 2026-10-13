@@ -18,6 +18,8 @@ extern "C" {
 #include "../../services/storage/SdCardController.h"
 #include "../../services/audio/SpeakerController.h"
 #include "../../services/audio/AudioSettings.h"
+#include "../../services/audio/MicController.h"
+#include "../../services/audio/WavFormat.h"
 #include "AppPackage.h"
 
 namespace {
@@ -36,8 +38,8 @@ void removeGlobal(lua_State *state, const char *name) {
 }
 
 AppRuntime::AppRuntime(SdCardController &card, SpeakerController &speaker,
-                       AudioSettings &audioSettings)
-  : _card(card), _speaker(speaker), _audioSettings(audioSettings) {}
+                       AudioSettings &audioSettings, MicController &mic)
+  : _card(card), _speaker(speaker), _audioSettings(audioSettings), _mic(mic) {}
 
 bool AppRuntime::start(const String &id, const Status &initialStatus) {
   if (_task || !AppPackage::validId(id)) return false;
@@ -51,6 +53,10 @@ bool AppRuntime::start(const String &id, const Status &initialStatus) {
   _frameCost = 0;
   _sdkVersion = 1;
   _toneLastWriteMs = 0;
+  _recActive = _recToFile = _playActive = _playFinished = false;
+  _recError = _playError = String();
+  _recBytes = _recPending = _recLevel = 0;
+  _playWrittenBytes = 0;
   _buildingFrame = static_cast<Frame *>(heap_caps_calloc(1, sizeof(Frame), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   _publishedFrame = static_cast<Frame *>(heap_caps_calloc(1, sizeof(Frame), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (!_buildingFrame || !_publishedFrame) {
@@ -249,18 +255,22 @@ bool AppRuntime::readData(const char *name, char *&data, size_t &length, String 
   return true;
 }
 
+bool AppRuntime::ensureDataDirectory() {
+  const String directory = dataDirectory(_id);
+  return (SD.exists("/.system") || SD.mkdir("/.system")) &&
+         (SD.exists("/.system/appdata") || SD.mkdir("/.system/appdata")) &&
+         (SD.exists(directory.c_str()) || SD.mkdir(directory.c_str()));
+}
+
 bool AppRuntime::writeData(const char *name, const char *data, size_t length, String &error) {
   if (!AppPackage::validDataName(name) || length > AppPackage::MaxDataBytes) {
     error = "Invalid file name or size"; return false;
   }
   if (!_card.isMounted()) { error = "SD card unavailable"; return false; }
-  const String directory = dataDirectory(_id);
   const String path = dataPath(_id, name);
   const String temp = path + ".tmp";
   if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
-  bool ready = (SD.exists("/.system") || SD.mkdir("/.system")) &&
-               (SD.exists("/.system/appdata") || SD.mkdir("/.system/appdata")) &&
-               (SD.exists(directory.c_str()) || SD.mkdir(directory.c_str()));
+  bool ready = ensureDataDirectory();
   if (ready) SD.remove(temp.c_str());
   File file = ready ? SD.open(temp.c_str(), FILE_WRITE) : File();
   SpiBusLock::unlock();
@@ -355,8 +365,8 @@ int AppRuntime::luaMillis(lua_State *state) {
 
 int AppRuntime::luaBeginFrame(lua_State *state) {
   AppRuntime *runtime = self(state);
-  if (runtime->_sdkVersion != 2 || !runtime->_buildingFrame)
-    return luaL_error(state, "SDK 2 frame unavailable");
+  if (runtime->_sdkVersion < 2 || !runtime->_buildingFrame)
+    return luaL_error(state, "SDK 2+ frame unavailable");
   const lua_Integer background = luaL_checkinteger(state, 1);
   if (background < 0 || background > 65535) return luaL_error(state, "invalid background color");
   size_t titleLength = 0;
@@ -513,6 +523,9 @@ int AppRuntime::luaPlayTone(lua_State *state) {
   if (frequency < 100 || frequency > 4000 || duration < 10 || duration > 2000) {
     lua_pushboolean(state, false); lua_pushliteral(state, "tone out of range"); return 2;
   }
+  if (runtime->_recActive || runtime->_playActive) {
+    lua_pushboolean(state, false); lua_pushliteral(state, "audio busy"); return 2;
+  }
   if (runtime->_toneCount >= 8) {
     lua_pushboolean(state, false); lua_pushliteral(state, "tone queue full"); return 2;
   }
@@ -586,6 +599,363 @@ void AppRuntime::serviceTones() {
   _tonePhase -= _toneStep * (count - written);
 }
 
+int AppRuntime::luaStorageSize(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  size_t nameLength = 0;
+  const char *name = luaL_checklstring(state, 1, &nameLength);
+  if (nameLength > 64 || !AppPackage::validDataName(name)) {
+    lua_pushnil(state); lua_pushliteral(state, "Invalid file name"); return 2;
+  }
+  if (!runtime->_card.isMounted()) {
+    lua_pushnil(state); lua_pushliteral(state, "SD card unavailable"); return 2;
+  }
+  const int64_t started = esp_timer_get_time();
+  bool found = false;
+  size_t size = 0;
+  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  if (locked) {
+    File file = SD.open(dataPath(runtime->_id, name).c_str(), FILE_READ);
+    found = file && !file.isDirectory();
+    size = found ? static_cast<size_t>(file.size()) : 0;
+    if (file) file.close();
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!locked) { lua_pushnil(state); lua_pushliteral(state, "SD busy"); return 2; }
+  if (!found) { lua_pushnil(state); lua_pushliteral(state, "File not found"); return 2; }
+  lua_pushinteger(state, static_cast<lua_Integer>(size));
+  return 1;
+}
+
+int AppRuntime::luaMicStatus(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  if (!runtime->_mic.isReady()) runtime->_mic.begin();
+  const uint64_t bytesPerSecond = static_cast<uint64_t>(runtime->_mic.sampleRate()) * 2;
+  lua_createtable(state, 0, 7);
+  lua_pushboolean(state, runtime->_mic.isReady()); lua_setfield(state, -2, "ready");
+  lua_pushboolean(state, runtime->_mic.isPowered()); lua_setfield(state, -2, "powered");
+  lua_pushboolean(state, runtime->_recActive); lua_setfield(state, -2, "recording");
+  lua_pushinteger(state, static_cast<lua_Integer>(
+      static_cast<uint64_t>(runtime->_recBytes) * 1000 / bytesPerSecond));
+  lua_setfield(state, -2, "elapsed_ms");
+  lua_pushinteger(state, runtime->_recBytes); lua_setfield(state, -2, "bytes");
+  lua_pushinteger(state, runtime->_recActive ? runtime->_recLevel : 0);
+  lua_setfield(state, -2, "level");
+  if (!runtime->_recError.isEmpty()) {
+    lua_pushstring(state, runtime->_recError.c_str()); lua_setfield(state, -2, "error");
+  }
+  return 1;
+}
+
+int AppRuntime::luaMicStart(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  const char *name = nullptr;
+  if (!lua_isnoneornil(state, 1)) {
+    size_t nameLength = 0;
+    name = luaL_checklstring(state, 1, &nameLength);
+    if (nameLength > 64 || memchr(name, 0, nameLength)) {
+      lua_pushboolean(state, false); lua_pushliteral(state, "Invalid file name"); return 2;
+    }
+  }
+  const lua_Integer seconds = luaL_optinteger(state, 2, 600);
+  if (seconds < 1 || seconds > 600) {
+    lua_pushboolean(state, false); lua_pushliteral(state, "duration out of range"); return 2;
+  }
+  String error;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->startRecording(name, static_cast<uint32_t>(seconds), error);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  lua_pushboolean(state, success);
+  if (!success) { lua_pushstring(state, error.c_str()); return 2; }
+  return 1;
+}
+
+int AppRuntime::luaMicStop(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  if (!runtime->_recActive) {
+    lua_pushboolean(state, false); lua_pushliteral(state, "Not recording"); return 2;
+  }
+  uint32_t bytes = 0;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->finishRecording("", &bytes);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  lua_pushboolean(state, success);
+  if (!success) { lua_pushstring(state, runtime->_recError.c_str()); return 2; }
+  lua_pushinteger(state, bytes);
+  return 2;
+}
+
+int AppRuntime::luaPlayFile(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  size_t nameLength = 0;
+  const char *name = luaL_checklstring(state, 1, &nameLength);
+  if (nameLength > 64 || memchr(name, 0, nameLength)) {
+    lua_pushboolean(state, false); lua_pushliteral(state, "Invalid file name"); return 2;
+  }
+  String error;
+  const int64_t started = esp_timer_get_time();
+  const bool success = runtime->startPlayback(name, error);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  lua_pushboolean(state, success);
+  if (!success) { lua_pushstring(state, error.c_str()); return 2; }
+  return 1;
+}
+
+int AppRuntime::luaStopFile(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  const int64_t started = esp_timer_get_time();
+  runtime->finishPlayback(nullptr, false);
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  return 0;
+}
+
+int AppRuntime::luaPlaybackStatus(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  const uint64_t bytesPerSecond = static_cast<uint64_t>(runtime->_playSampleRate) * 2;
+  lua_createtable(state, 0, 4);
+  lua_pushboolean(state, runtime->_playActive); lua_setfield(state, -2, "playing");
+  lua_pushboolean(state, runtime->_playFinished); lua_setfield(state, -2, "finished");
+  lua_pushinteger(state, static_cast<lua_Integer>(
+      static_cast<uint64_t>(runtime->_playWrittenBytes) * 1000 / bytesPerSecond));
+  lua_setfield(state, -2, "elapsed_ms");
+  if (!runtime->_playError.isEmpty()) {
+    lua_pushstring(state, runtime->_playError.c_str()); lua_setfield(state, -2, "error");
+  }
+  return 1;
+}
+
+bool AppRuntime::startRecording(const char *name, uint32_t maxSeconds, String &error) {
+  if (_recActive) { error = "Already recording"; return false; }
+  if (name && !AppPackage::validDataName(name)) { error = "Invalid file name"; return false; }
+  if (name && !_card.isMounted()) { error = "SD card unavailable"; return false; }
+  if (!_mic.isReady() && !_mic.begin()) { error = _mic.lastError(); return false; }
+  if (!_mic.isPowered()) { error = "Turn mic power switch on"; return false; }
+  if (_mic.isRecording()) { error = "Microphone busy"; return false; }
+  // The microphone and speaker share clock pins; release the speaker first.
+  finishPlayback(nullptr, false);
+  clearTones();
+
+  const uint32_t sampleRate = _mic.sampleRate();
+  if (name) {
+    _recPath = dataPath(_id, name);
+    _recTempPath = _recPath + ".tmp";
+    if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+    const bool ready = ensureDataDirectory();
+    if (ready) SD.remove(_recTempPath.c_str());
+    _recFile = ready ? SD.open(_recTempPath.c_str(), FILE_WRITE) : File();
+    uint8_t header[WavFormat::HeaderBytes];
+    WavFormat::makeHeader(header, sampleRate, 0);
+    const bool wrote = _recFile && _recFile.write(header, sizeof(header)) == sizeof(header);
+    if (_recFile && !wrote) { _recFile.close(); SD.remove(_recTempPath.c_str()); }
+    SpiBusLock::unlock();
+    if (!wrote) { _recFile = File(); error = "Cannot create recording"; return false; }
+  }
+  if (!_mic.start()) {
+    error = _mic.lastError();
+    if (name && SpiBusLock::lock(portMAX_DELAY)) {
+      _recFile.close();
+      SD.remove(_recTempPath.c_str());
+      SpiBusLock::unlock();
+    }
+    _recFile = File();
+    return false;
+  }
+  _recToFile = name != nullptr;
+  _recBytes = _recPending = _recFlushedBytes = 0;
+  _recMaxBytes = maxSeconds * sampleRate * 2;
+  _recError = String();
+  _recLevel = 0;
+  _recLevelMs = millis();
+  _recActive = true;
+  return true;
+}
+
+bool AppRuntime::finishRecording(const char *reason, uint32_t *bytes) {
+  if (!_recActive) return false;
+  _recActive = false;
+  _mic.stop();
+  bool saved = true;
+  if (_recToFile) {
+    const bool mounted = _card.isMounted();
+    saved = false;
+    if (SpiBusLock::lock(portMAX_DELAY)) {
+      if (mounted && _recBytes > 0) {
+        uint8_t header[WavFormat::HeaderBytes];
+        WavFormat::makeHeader(header, _mic.sampleRate(), _recBytes);
+        saved = _recFile.seek(0) && _recFile.write(header, sizeof(header)) == sizeof(header);
+        _recFile.flush();
+      }
+      _recFile.close();
+      if (mounted) {
+        if (saved) {
+          if (SD.exists(_recPath.c_str())) SD.remove(_recPath.c_str());
+          saved = SD.rename(_recTempPath.c_str(), _recPath.c_str());
+        }
+        if (!saved) SD.remove(_recTempPath.c_str());
+      }
+      SpiBusLock::unlock();
+    }
+    _recFile = File();
+  }
+  _recPending = 0;
+  _recLevel = 0;
+  if (reason && *reason) _recError = reason;
+  else if (!saved) _recError = _recBytes == 0 ? "Recording was empty" : "Recording could not be saved";
+  else _recError = String();
+  if (bytes) *bytes = _recBytes;
+  return saved;
+}
+
+void AppRuntime::serviceRecording() {
+  if (!_recActive) return;
+  if (_recToFile && !_card.isMounted()) { finishRecording("SD card removed"); return; }
+  if (!_mic.isPowered()) { finishRecording("Mic switch turned off"); return; }
+
+  // Drain what DMA already captured; never wait for samples here.
+  const size_t capacity = sizeof(_recBuffer) / sizeof(_recBuffer[0]);
+  const size_t room = (_recMaxBytes - _recBytes) / 2;
+  const size_t want = room < capacity ? room : capacity;
+  size_t total = _recPending;
+  int32_t peak = 0;
+  while (total < want) {
+    const size_t count = _mic.readPcm16(_recBuffer + total, want - total, 0);
+    if (!count) break;
+    for (size_t i = 0; i < count; ++i) {
+      const int32_t magnitude = abs(static_cast<int32_t>(_recBuffer[total + i]));
+      if (magnitude > peak) peak = magnitude;
+    }
+    total += count;
+  }
+
+  // Peak level on a 60 dB scale with a roughly 0.8 s fall time.
+  const uint32_t now = millis();
+  const uint32_t decay = (now - _recLevelMs) / 8;
+  _recLevelMs = now;
+  _recLevel = _recLevel > decay ? static_cast<uint8_t>(_recLevel - decay) : 0;
+  if (peak > 0) {
+    float level = (20.0f * log10f(static_cast<float>(peak) / 32768.0f) + 60.0f) * (100.0f / 60.0f);
+    if (level < 0.0f) level = 0.0f;
+    if (level > 100.0f) level = 100.0f;
+    if (level > _recLevel) _recLevel = static_cast<uint8_t>(level + 0.5f);
+  }
+
+  if (total) {
+    if (!_recToFile) {
+      _recBytes += total * 2;
+      total = 0;
+    } else if (SpiBusLock::lock(pdMS_TO_TICKS(20))) {
+      const size_t bytesToWrite = total * 2;
+      const size_t written = _recFile.write(reinterpret_cast<const uint8_t *>(_recBuffer), bytesToWrite);
+      if (written == bytesToWrite && _recBytes + written - _recFlushedBytes >= 8192) {
+        _recFile.flush();
+        _recFlushedBytes = _recBytes + written;
+      }
+      SpiBusLock::unlock();
+      if (written != bytesToWrite) { finishRecording("SD write failed"); return; }
+      _recBytes += written;
+      total = 0;
+    }
+    // A busy SD bus keeps samples buffered for the next pass.
+    _recPending = static_cast<uint16_t>(total);
+  }
+  if (_recBytes >= _recMaxBytes) finishRecording("Recording limit reached");
+}
+
+bool AppRuntime::startPlayback(const char *name, String &error) {
+  if (!AppPackage::validDataName(name)) { error = "Invalid file name"; return false; }
+  if (!_card.isMounted()) { error = "SD card unavailable"; return false; }
+  if (_recActive || _mic.isRecording()) { error = "Microphone is recording"; return false; }
+  finishPlayback(nullptr, false);
+  clearTones();
+
+  uint8_t header[WavFormat::HeaderBytes];
+  uint32_t sampleRate = 0, dataBytes = 0;
+  size_t fileSize = 0;
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  _playFile = SD.open(dataPath(_id, name).c_str(), FILE_READ);
+  bool opened = _playFile && !_playFile.isDirectory();
+  if (opened) {
+    fileSize = static_cast<size_t>(_playFile.size());
+    opened = _playFile.read(header, sizeof(header)) == sizeof(header);
+  }
+  if (!opened && _playFile) _playFile.close();
+  SpiBusLock::unlock();
+  if (!opened) { _playFile = File(); error = "File not found"; return false; }
+
+  if (!WavFormat::parseHeader(header, sampleRate, dataBytes) ||
+      sampleRate < 8000 || sampleRate > 44100) {
+    error = "Unsupported WAV format";
+  } else {
+    // Trust the file size over a header that was never finalized.
+    const size_t available = fileSize - sizeof(header);
+    if (dataBytes > available) dataBytes = static_cast<uint32_t>(available);
+    dataBytes &= ~1U;
+    if (!dataBytes) error = "Unsupported WAV format";
+  }
+  if (error.isEmpty() && !_speaker.start(sampleRate)) error = _speaker.lastError();
+  if (!error.isEmpty()) {
+    if (SpiBusLock::lock(portMAX_DELAY)) { _playFile.close(); SpiBusLock::unlock(); }
+    _playFile = File();
+    return false;
+  }
+  _playSampleRate = sampleRate;
+  _playRemainingBytes = dataBytes;
+  _playWrittenBytes = 0;
+  _playPendingSamples = _playPendingOffset = 0;
+  _playLastWriteMs = millis();
+  _playEndedMs = 0;
+  _playError = String();
+  _playFinished = false;
+  _playActive = true;
+  return true;
+}
+
+void AppRuntime::finishPlayback(const char *error, bool finished) {
+  if (!_playActive) return;
+  _playActive = false;
+  if (SpiBusLock::lock(portMAX_DELAY)) { _playFile.close(); SpiBusLock::unlock(); }
+  _playFile = File();
+  _speaker.stop();
+  _playPendingSamples = _playPendingOffset = 0;
+  _playFinished = finished;
+  _playError = error ? String(error) : String();
+}
+
+void AppRuntime::servicePlayback() {
+  if (!_playActive) return;
+  if (!_card.isMounted()) { finishPlayback("SD card removed", false); return; }
+  const size_t capacity = sizeof(_toneBuffer);
+  for (int pass = 0; pass < 4; ++pass) {
+    const uint32_t now = millis();
+    if (_playPendingOffset >= _playPendingSamples) {
+      _playPendingOffset = _playPendingSamples = 0;
+      if (!_playRemainingBytes) {
+        // Let the speaker's DMA queue (about 200 ms) play out before muting.
+        if (!_playEndedMs) _playEndedMs = now ? now : 1;
+        if (now - _playEndedMs >= 300) finishPlayback(nullptr, true);
+        return;
+      }
+      const size_t chunk = _playRemainingBytes < capacity ? _playRemainingBytes : capacity;
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return;
+      size_t count = _playFile.read(reinterpret_cast<uint8_t *>(_toneBuffer), chunk);
+      SpiBusLock::unlock();
+      count &= ~static_cast<size_t>(1);
+      if (!count) { _playRemainingBytes = 0; return; }
+      _playPendingSamples = static_cast<uint16_t>(count / 2);
+      _playRemainingBytes -= count;
+    }
+    const size_t written = _speaker.tryWritePcm16(_toneBuffer + _playPendingOffset,
+                                                  _playPendingSamples - _playPendingOffset);
+    if (!written) {
+      if (now - _playLastWriteMs > 1000) finishPlayback("Speaker stalled", false);
+      return;
+    }
+    _playPendingOffset += written;
+    _playWrittenBytes += written * 2;
+    _playLastWriteMs = now;
+  }
+}
+
 void AppRuntime::registerApi() {
   luaL_requiref(_lua, "_G", luaopen_base, 1); lua_pop(_lua, 1);
   luaL_requiref(_lua, "table", luaopen_table, 1); lua_pop(_lua, 1);
@@ -604,6 +974,10 @@ void AppRuntime::registerApi() {
   lua_newtable(_lua);
   lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaRead, 1); lua_setfield(_lua, -2, "read");
   lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaWrite, 1); lua_setfield(_lua, -2, "write");
+  if (_sdkVersion >= 3) {
+    lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaStorageSize, 1);
+    lua_setfield(_lua, -2, "size");
+  }
   lua_setfield(_lua, -2, "storage");
   lua_newtable(_lua);
   lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaStatus, 1); lua_setfield(_lua, -2, "status");
@@ -611,7 +985,7 @@ void AppRuntime::registerApi() {
   lua_newtable(_lua);
   lua_pushcfunction(_lua, luaMillis); lua_setfield(_lua, -2, "millis");
   lua_setfield(_lua, -2, "time");
-  if (_sdkVersion == 2) {
+  if (_sdkVersion >= 2) {
     lua_newtable(_lua);
     lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaBeginFrame, 1);
     lua_setfield(_lua, -2, "begin_frame");
@@ -656,7 +1030,27 @@ void AppRuntime::registerApi() {
     lua_setfield(_lua, -2, "volume");
     lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, luaSetVolume, 1);
     lua_setfield(_lua, -2, "set_volume");
+    if (_sdkVersion >= 3) {
+      static const luaL_Reg fileFunctions[] = {
+        {"play_file", luaPlayFile}, {"stop_file", luaStopFile},
+        {"playback", luaPlaybackStatus}, {nullptr, nullptr}};
+      for (const luaL_Reg *entry = fileFunctions; entry->name; ++entry) {
+        lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, entry->func, 1);
+        lua_setfield(_lua, -2, entry->name);
+      }
+    }
     lua_setfield(_lua, -2, "audio");
+    if (_sdkVersion >= 3) {
+      static const luaL_Reg micFunctions[] = {
+        {"status", luaMicStatus}, {"start", luaMicStart}, {"stop", luaMicStop},
+        {nullptr, nullptr}};
+      lua_newtable(_lua);
+      for (const luaL_Reg *entry = micFunctions; entry->name; ++entry) {
+        lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, entry->func, 1);
+        lua_setfield(_lua, -2, entry->name);
+      }
+      lua_setfield(_lua, -2, "mic");
+    }
   }
   lua_setglobal(_lua, "esp");
 }
@@ -753,13 +1147,16 @@ void AppRuntime::run() {
         uint32_t lastTick = millis();
         while (!_cancel && _card.isMounted()) {
           Action action{};
-          const uint32_t waitMs = (_toneRemaining || _toneCount || _audioReady) ? 10 : TickIntervalMs;
+          const uint32_t waitMs = (_toneRemaining || _toneCount || _audioReady ||
+                                   _recActive || _playActive) ? 10 : TickIntervalMs;
           if (xQueueReceive(_actions, &action, pdMS_TO_TICKS(waitMs)) == pdTRUE) {
             if (action.touch) {
               if (!invoke("on_touch", nullptr, action.x, action.y)) break;
             } else if (!invoke("on_action", action.id)) break;
           }
           serviceTones();
+          serviceRecording();
+          servicePlayback();
           const uint32_t now = millis();
           if (now - lastTick >= TickIntervalMs) {
             lastTick = now;
@@ -769,6 +1166,8 @@ void AppRuntime::run() {
       }
     }
   }
+  finishRecording("");
+  finishPlayback(nullptr, false);
   clearTones();
   lua_close(_lua);
   _lua = nullptr;

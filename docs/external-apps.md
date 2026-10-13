@@ -1,4 +1,4 @@
-# SD card apps (SDK 1 and 2)
+# SD card apps (SDK 1, 2, and 3)
 
 Copy a folder such as `examples/apps/counter` to `/Apps/counter` on a FAT32 SD card. **Counter** appears directly in Home's combined built-in/Lua app grid. Home scans up to 128 entries in `/Apps`, shows up to 32 runnable packages, sorts all tiles case-insensitively by display name, and keeps duplicate names. Drag horizontally between nine-tile pages; the grid follows the finger, advances after 48 px or a short fast flick, and rubber-bands without wrapping at either end. The catalog refreshes when Home opens or the card is remounted. Identical rescans leave the retained Home cache untouched; a changed catalog redraws only grid positions whose sorted tile content changed. A package can be updated by replacing its files on SD; no firmware flash is needed. USB Drive transfer still uses its normal isolated boot and restart.
 
@@ -6,9 +6,9 @@ Copy a folder such as `examples/apps/counter` to `/Apps/counter` on a FAT32 SD c
 
 An app is `/Apps/<id>/manifest.json` plus `/Apps/<id>/main.lua` and normally `/Apps/<id>/logo.png`. The manifest is UTF-8 JSON with `id`, `name`, integer `sdk`, and integer RGB565 `app_icon_bg` fields. `app_icon_bg` ranges from 0 through 65535. The logo is an exact 64×64, non-interlaced PNG with alpha; Home composites it over the 80px circle using `app_icon_bg`. A missing or invalid background uses the standard purple Apps color, while a missing, corrupt, wrong-sized, interlaced, non-alpha, or undecodable logo uses the white generic Apps glyph. These visual fallbacks do not prevent an otherwise valid package from running.
 
-SDK 1 and 2 are accepted; the original counter example remains SDK 1 and `examples/apps/workout` uses SDK 2. The ID must match its lowercase folder name and match `[a-z][a-z0-9_-]{0,31}`. Names are 1–40 UTF-8 bytes. The manifest is at most 2 KiB and `main.lua` at most 64 KiB. Only Lua source text is accepted; bytecode and additional Lua modules are unavailable. Home omits packages that fail these core checks or have a missing/oversized `main.lua`.
+SDK 1, 2, and 3 are accepted; the original counter example remains SDK 1, `examples/apps/workout` uses SDK 2, and `examples/apps/recorder` uses SDK 3. The ID must match its lowercase folder name and match `[a-z][a-z0-9_-]{0,31}`. Names are 1–40 UTF-8 bytes. The manifest is at most 2 KiB and `main.lua` at most 64 KiB. Only Lua source text is accepted; bytecode and additional Lua modules are unavailable. Home omits packages that fail these core checks or have a missing/oversized `main.lua`.
 
-`main.lua` returns a table with a required `on_start()` function and optional `on_action(id)` and `on_tick(now_ms)` functions. SDK 2 additionally permits `on_touch(x, y)` for touch-down edges inside a presented canvas, with coordinates relative to the area below the app bar. `on_tick` runs about every 100 ms while the app is open. Each callback has a 100,000-instruction and 20 ms script-execution limit; bounded host file I/O and saved-volume writes do not count toward the time limit. The Lua state has a 512 KiB PSRAM allocation limit. A limit or script error stops callbacks and displays an error; closing releases its task and memory.
+`main.lua` returns a table with a required `on_start()` function and optional `on_action(id)` and `on_tick(now_ms)` functions. SDK 2 and later additionally permit `on_touch(x, y)` for touch-down edges inside a presented canvas, with coordinates relative to the area below the app bar. `on_tick` runs about every 100 ms while the app is open. Each callback has a 100,000-instruction and 20 ms script-execution limit; bounded host file I/O and saved-volume writes do not count toward the time limit. The Lua state has a 512 KiB PSRAM allocation limit. A limit or script error stops callbacks and displays an error; closing releases its task and memory.
 
 SDK 1 provides:
 
@@ -20,7 +20,7 @@ SDK 1 provides:
 | `esp.device.status()` | Return smooth `battery_voltage_mv`, `wifi_connected`, `sd_mounted`, and `epoch_seconds` (zero until time is valid). Voltage alone does not establish state of charge or charging state. |
 | `esp.time.millis()` | Return the device's monotonic millisecond counter. |
 
-Storage names are 1–64 ASCII bytes using letters, digits, `_`, `-`, or `.`; `.` and `..` are rejected. They address only `/.system/appdata/<id>/<name>`. An app cannot access package source files, other apps' data, the general SD filesystem, or `SecretStorage` through either SDK. The host loads selected safe Lua libraries (`table`, `string`, `math`, and `utf8`); Lua file, OS, package, debug, dynamic load, and native-module interfaces are unavailable. These limits are for personal or trusted apps in the firmware process, not hostile-code isolation.
+Storage names are 1–64 ASCII bytes using letters, digits, `_`, `-`, or `.`; `.` and `..` are rejected. They address only `/.system/appdata/<id>/<name>`. An app cannot access package source files, other apps' data, the general SD filesystem, or `SecretStorage` through any SDK. The host loads selected safe Lua libraries (`table`, `string`, `math`, and `utf8`); Lua file, OS, package, debug, dynamic load, and native-module interfaces are unavailable. These limits are for personal or trusted apps in the firmware process, not hostile-code isolation.
 
 Apps run only while open. Closing an app or removing its SD card stops callbacks and releases the Lua state. Reinsert the card and reopen the app to start again. App work uses a separate task; the UI task owns touch and drawing. Each SD transaction takes the shared `SpiBusLock` and releases it between bounded chunks.
 
@@ -56,6 +56,24 @@ Canvas text and button labels are limited to 96 bytes. Text uses `UiText` sizes 
 
 Closing an app, a callback error, or SD removal stops its tones. The built-in Workout screen and other audio users retain their normal screen ownership; an app uses the speaker only while its host screen is active.
 
+## SDK 3 microphone and WAV files
+
+SDK 3 keeps every SDK 2 operation and adds a microphone, WAV playback, and a file-size query. Raw audio never crosses into Lua: the app's worker task drains the microphone, writes the file, and feeds the speaker, while Lua starts, stops, and polls. Recordings are 16 kHz mono 16-bit PCM WAV files in the app's own data folder, so names follow the storage rules above and the 16 KiB `esp.storage.read` limit does not apply to them (read them only through `esp.audio.play_file`).
+
+| Operation | Contract |
+| --- | --- |
+| `esp.storage.size(name)` | Return the byte size of an app data file, or `nil, error` (`File not found`, `SD busy`, …). |
+| `esp.mic.status()` | Return `ready`, `powered` (the physical mic switch; always true when the board has no sense line), `recording`, `elapsed_ms`, `bytes`, `level`, and, when the previous recording ended abnormally or empty, `error`. `level` is 0–100 and is zero when not recording. |
+| `esp.mic.start([name [, max_seconds]])` | Start capturing for 1–600 seconds (default 600). With `name`, write `<name>` through `<name>.tmp` and rename on stop, so a failed recording keeps the previous file. Without `name`, only measure `level`/`elapsed_ms` and write nothing. Return `true` or `false, error` (`Turn mic power switch on`, `Microphone busy`, `SD card unavailable`, …). |
+| `esp.mic.stop()` | Finalize and rename the file, returning `true, bytes`, or `false, error` (`Not recording`, `Recording was empty`, `Recording could not be saved`). |
+| `esp.audio.play_file(name)` | Play a mono 16-bit PCM WAV of 8–44.1 kHz written with a 44-byte header (the format `esp.mic.start` produces). A header that claims more data than the file holds is clamped to the file size. Return `true` or `false, error`. |
+| `esp.audio.stop_file()` | Stop file playback. |
+| `esp.audio.playback()` | Return `playing`, `finished` (true after natural completion until the next start), `elapsed_ms`, and, after a failure, `error`. |
+
+`level` is the peak of the most recent samples on a 60 dB scale (0 at −60 dBFS, 100 at full scale) with a fall time of about 0.8 s. The microphone and speaker share clock pins and never run together: `esp.mic.start` stops tones and file playback, while `esp.audio.play_tone`, `esp.audio.play_file`, and tone service refuse to start (`audio busy` / `Microphone is recording`) during a recording. The host also refuses to start if the Assistant or another component is already capturing. A recording ends by itself, keeping the captured audio, when the mic switch turns off (`Mic switch turned off`), the time limit is reached (`Recording limit reached`), or a write fails; an SD removal closes the app. A callback error, closing the app, or leaving it finalizes the file and releases the microphone. SD work inside `mic.start`/`mic.stop`/`play_file` does not count toward the callback time limit; capture and playback chunks lock `SpiBusLock` for at most 1 KiB at a time and keep up to 1 KiB buffered when the bus is busy. A long SD stall can still overrun the microphone's roughly 64 ms DMA buffer and drop samples.
+
+`examples/apps/recorder` rebuilds the built-in Voice Recorder (Rec/Stop/Play, mic-switch handling, storage and detail lines) with `esp.mic`, `esp.audio.play_file`, and a level meter, saving to `/.system/appdata/recorder/voice_last.wav`. It does not use the name-less monitor mode.
+
 ## Future SDK versions
 
-Extend the versioned `esp` API through controller-owned services. LED and Wi-Fi/network, microphone, recording, and media remain future candidates. Built-in browser and assistant operations and the exclusive USB Drive transition need explicit host workflows. Never expose raw GPIO/SPI controllers or protected files as pointers or unrestricted paths. Add an example, device verification, and an updated contract here for each version.
+Extend the versioned `esp` API through controller-owned services. LED, Wi-Fi/network, and media remain future candidates. Built-in browser and assistant operations and the exclusive USB Drive transition need explicit host workflows. Never expose raw GPIO/SPI controllers or protected files as pointers or unrestricted paths. Add an example, device verification, and an updated contract here for each version.

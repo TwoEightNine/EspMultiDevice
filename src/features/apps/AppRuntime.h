@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -9,6 +10,7 @@
 class SdCardController;
 class SpeakerController;
 class AudioSettings;
+class MicController;
 struct lua_State;
 struct lua_Debug;
 
@@ -52,7 +54,8 @@ public:
     DrawCommand commands[MaxDrawCommands];
   };
 
-  AppRuntime(SdCardController &card, SpeakerController &speaker, AudioSettings &audioSettings);
+  AppRuntime(SdCardController &card, SpeakerController &speaker, AudioSettings &audioSettings,
+             MicController &mic);
   bool start(const String &id, const Status &initialStatus);
   void requestStop();
   bool stopped() const;
@@ -75,6 +78,7 @@ private:
   SdCardController &_card;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
+  MicController &_mic;
   String _id;
   String _displayName;
   TaskHandle_t _task = nullptr;
@@ -97,7 +101,34 @@ private:
   uint32_t _toneStep = 0;
   uint32_t _toneLastWriteMs = 0;
   bool _audioReady = false;
+  // Also the WAV playback staging buffer; tones and file playback never overlap.
   int16_t _toneBuffer[256]{};
+  // Microphone recording (SDK 3). Only the worker task touches this state.
+  bool _recActive = false;
+  bool _recToFile = false;
+  fs::File _recFile;
+  String _recPath;
+  String _recTempPath;
+  String _recError;
+  uint32_t _recBytes = 0;
+  uint32_t _recMaxBytes = 0;
+  uint32_t _recFlushedBytes = 0;
+  uint32_t _recLevelMs = 0;
+  uint8_t _recLevel = 0;
+  uint16_t _recPending = 0;
+  int16_t _recBuffer[512]{};
+  // WAV file playback (SDK 3).
+  bool _playActive = false;
+  bool _playFinished = false;
+  fs::File _playFile;
+  String _playError;
+  uint32_t _playSampleRate = 16000;
+  uint32_t _playRemainingBytes = 0;
+  uint32_t _playWrittenBytes = 0;
+  uint16_t _playPendingSamples = 0;
+  uint16_t _playPendingOffset = 0;
+  uint32_t _playLastWriteMs = 0;
+  uint32_t _playEndedMs = 0;
   Status _status{};
   uint32_t _revision = 0;
   size_t _luaBytes = 0;
@@ -127,8 +158,23 @@ private:
   static int luaStopTones(lua_State *state);
   static int luaVolume(lua_State *state);
   static int luaSetVolume(lua_State *state);
+  static int luaStorageSize(lua_State *state);
+  static int luaMicStatus(lua_State *state);
+  static int luaMicStart(lua_State *state);
+  static int luaMicStop(lua_State *state);
+  static int luaPlayFile(lua_State *state);
+  static int luaStopFile(lua_State *state);
+  static int luaPlaybackStatus(lua_State *state);
   void clearTones();
   void serviceTones();
+  bool ensureDataDirectory();  // Caller holds SpiBusLock.
+  bool startRecording(const char *name, uint32_t maxSeconds, String &error);
+  // Finalizes any open recording; `reason` is empty for an app-requested stop.
+  bool finishRecording(const char *reason, uint32_t *bytes = nullptr);
+  void serviceRecording();
+  bool startPlayback(const char *name, String &error);
+  void finishPlayback(const char *error, bool finished);
+  void servicePlayback();
   bool readData(const char *name, char *&data, size_t &length, String &error);
   bool writeData(const char *name, const char *data, size_t length, String &error);
 };
