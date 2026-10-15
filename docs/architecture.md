@@ -63,6 +63,8 @@ An external Lua app has one screen-owned worker on core 0. `AppRuntime` owns its
 
 An SDK 4 app never navigates. `esp.fs.open` and `esp.ui.prompt` record a request; after the callback returns the worker releases the microphone and speaker and pauses, and only then does `AppHostScreen::tick()` take the request and push the viewer or keyboard with an ordinary `ScreenData` payload. For such a push the host's `onExit()` leaves the paused runtime alive; `onResume()` redraws the last frame or scene and resumes it, delivering the keyboard `ScreenResult` as `on_input`. Any other cover still stops the app, and the host closes it on return. `releaseResources()` ends the runtime in every case.
 
+`ImageView` is the image pipeline behind both the Image Viewer screen and SDK 5 `esp.image`: one instance is built in the composition root and has one owner at a time, which drives it from the UI task and supplies the app bar through a painter callback. An SDK 5 app only records the layer it wants (path, zoom, bar); `AppHostScreen::tick()` reconciles that with `ImageView`, publishes a status snapshot back to the worker, and forwards the bar's Close and Zoom targets and the image touches to Lua. The host releases the pipeline when the app stops and before it pushes a viewer or keyboard over a paused app.
+
 Home owns a separate app-catalog worker. It scans bounded `/Apps` entries, validates runnable packages, and decodes exact 64×64 alpha PNG logos into PSRAM under generation cancellation. It publishes only complete catalogs; the UI task merges them with built-ins, sorts and draws them, and passes the selected package ID through `Navigator`. SD reads use `SpiBusLock`, and the worker never draws, consumes the shared SD event, or navigates. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
 Home's UI task renders the combined catalog into a 16-bit PSRAM sprite strip
@@ -102,7 +104,7 @@ SD and touch share clock/data lines. Long media reads are deliberately chunked, 
 
 USB MSC callbacks run outside the UI task. They never draw, navigate, or restart. Each 512-byte SD sector transaction takes `SpiBusLock` and releases it before the next sector so touch polling can proceed. Safe eject, disconnect, and I/O failures are published as state and acted on by the USB Drive screen. Local FatFs is fully unmounted before raw media becomes present to the host; normal and host filesystem ownership never overlap.
 
-`MediaCache` is constructed once in the composition root and shared by Files, Image Viewer, and Audio Player. Its reader, writer, cleanup, and relocation operations report busy separately from failure. Screen work retries incremental cleanup or relocation from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
+`MediaCache` is constructed once in the composition root and shared by Files, the `ImageView` pipeline, and Audio Player. Its reader, writer, cleanup, and relocation operations report busy separately from failure. Screen work retries incremental cleanup or relocation from `tick()`, and cache workers yield between bounded transfers; the service never decodes media, paints, or navigates.
 
 `TextViewerScreen` owns read-only paging for local text files. It retains only
 the visible wrapped page plus 64 recent page offsets. Source reads are at most

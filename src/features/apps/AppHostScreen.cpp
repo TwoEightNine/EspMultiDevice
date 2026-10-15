@@ -11,14 +11,16 @@
 #include "../../media/FileFormats.h"
 #include "../../ui/UiKit.h"
 #include "../../ui/UiText.h"
+#include "../image_viewer/ImageView.h"
 
 AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
                              DisplayController &display, SdCardController &card,
                              WiFiController &wifi, BatteryHistoryService &batteryHistory,
                              SpeakerController &speaker, AudioSettings &audioSettings,
-                             MicController &mic, MediaCache &mediaCache)
+                             MicController &mic, MediaCache &mediaCache,
+                             ImageView &imageView)
   : Screen(navigator, touch, display), _card(card), _wifi(wifi),
-    _batteryHistory(batteryHistory),
+    _batteryHistory(batteryHistory), _imageView(imageView),
     _runtime(card, speaker, audioSettings, mic, mediaCache) {}
 
 void AppHostScreen::onEnter(const ScreenData &data) {
@@ -31,6 +33,11 @@ void AppHostScreen::onEnter(const ScreenData &data) {
   _touchActive = false;
   _promptText = String();
   _lastStatusMs = 0;
+  _imageRevision = 0;
+  _imageSerial = 0;
+  _imageShown = false;
+  _image = AppRuntime::ImageLayer{};
+  _imageStatus = AppRuntime::ImageStatus{};
   _scene = AppRuntime::Scene{};
   snprintf(_scene.title, sizeof(_scene.title), "Apps");
   _scene.count = 1;
@@ -49,10 +56,12 @@ void AppHostScreen::onExit() {
   // A screen this host pushed for the app only covers it; the paused app
   // keeps its Lua state until onResume().
   if (!_covering) _runtime.requestStop();
+  hideImage();
 }
 
 bool AppHostScreen::releaseResources() {
   if (!_runtime.end()) return false;
+  hideImage();
   _running = false;
   _covering = _promptPending = _promptAnswered = _resumePending = false;
   _promptText = String();
@@ -102,6 +111,9 @@ void AppHostScreen::openNavigation() {
   _promptAnswered = false;
   _promptText = String();
   _covering = true;
+  // The paused app already dropped its image; free the shared pipeline for
+  // the built-in viewer before it enters.
+  hideImage();
   if (valid && _navigator.push(target, data)) return;
   // Nothing covered the app; continue it as if the screen had been closed.
   _covering = false;
@@ -117,23 +129,37 @@ void AppHostScreen::handleTouch(const TouchPoint &point) {
     }
     return;
   }
+  // An image layer covers the whole display, so its touches may lie above
+  // the canvas; a visible bar still owns its own 48px.
+  const int16_t touchTop = !_imageShown ? UiKit::AppBarHeight
+                           : _imageView.chromeVisible() ? UiKit::AppBarHeight : 0;
   if (_lastTouchDown) {
     if (_touchActive && point.x >= 0 && point.x < _display.width() &&
-        point.y >= UiKit::AppBarHeight && point.y < _display.height()) {
+        point.y >= touchTop && point.y < _display.height()) {
       _touchX = point.x;
       _touchY = point.y - UiKit::AppBarHeight;
     }
     return;
   }
   _lastTouchDown = true;
-  if (UiKit::navigationIconContains(point.x, point.y)) {
+  if (_imageShown && point.y < touchTop) {
+    // The app decides what Close and Zoom mean while it shows an image.
+    if (UiKit::navigationIconContains(point.x, point.y)) {
+      _runtime.sendAction("image.close");
+    } else if (_imageView.zoomAvailable() &&
+               UiKit::appBarActionContains(point.x, point.y, _display.width())) {
+      _runtime.sendAction("image.zoom");
+    }
+    return;
+  }
+  if (!_imageShown && UiKit::navigationIconContains(point.x, point.y)) {
     _closeRequested = true;
     _runtime.requestStop();
     return;
   }
-  if (_canvasMode) {
-    if (!_closeRequested && point.x < _display.width() &&
-        point.y >= UiKit::AppBarHeight && point.y < _display.height()) {
+  if (_canvasMode || _imageShown) {
+    if (!_closeRequested && point.x >= 0 && point.x < _display.width() &&
+        point.y >= touchTop && point.y < _display.height()) {
       _touchX = point.x;
       _touchY = point.y - UiKit::AppBarHeight;
       _touchStartedMs = millis();
@@ -162,10 +188,16 @@ void AppHostScreen::tick(uint32_t nowMs) {
     _promptPending = _promptAnswered = false;
     _promptText = String();
   }
-  if (_runtime.takeFrame(_frame, _frameRevision)) { _canvasMode = true; drawFrame(); }
+  serviceImage(nowMs);
+  // Frames and scenes published under an image layer are kept for its close.
+  if (_runtime.takeFrame(_frame, _frameRevision)) {
+    _canvasMode = true;
+    if (!_imageShown) drawFrame();
+  }
   AppRuntime::Scene scene{};
   if (_runtime.takeScene(scene, _revision)) {
-    _canvasMode = false; _scene = scene; draw();
+    _canvasMode = false; _scene = scene;
+    if (!_imageShown) draw();
   }
   if (_closeRequested) {
     if (_runtime.stopped()) _navigator.pop();
@@ -193,7 +225,70 @@ AppRuntime::Status AppHostScreen::statusSnapshot() {
 }
 
 void AppHostScreen::redraw() {
-  if (_canvasMode) drawFrame(); else draw();
+  if (_imageShown) _imageView.redraw();
+  else if (_canvasMode) drawFrame();
+  else draw();
+}
+
+void AppHostScreen::serviceImage(uint32_t nowMs) {
+  if (_runtime.stopped()) {
+    // A stopped app can no longer answer the bar; return it to the host.
+    if (_imageShown) { hideImage(); redraw(); }
+    return;
+  }
+  (void)_runtime.takeImage(_image, _imageRevision);
+  if (!_image.shown) {
+    if (_imageShown) { hideImage(); redraw(); }
+    return;
+  }
+  if (!_imageShown || _image.serial != _imageSerial) {
+    _imageShown = true;
+    _imageSerial = _image.serial;
+    _imageView.setChromePainter(paintImageChrome, this);
+    _imageView.open(_image.path, false, _image.barVisible);
+  } else {
+    if (_image.barVisible != _imageView.chromeVisible())
+      _imageView.setChromeVisible(_image.barVisible);
+    if (_image.zoom != _imageView.cropZoom() && _imageView.zoomAvailable())
+      _imageView.setCropZoom(_image.zoom);
+    _imageView.tick(nowMs);
+  }
+  AppRuntime::ImageStatus status{};
+  status.serial = _imageSerial;
+  status.state = _imageView.failed() ? AppRuntime::ImageState::Error
+                 : _imageView.ready() ? AppRuntime::ImageState::Ready
+                 : AppRuntime::ImageState::Loading;
+  status.width = _imageView.sourceWidth();
+  status.height = _imageView.sourceHeight();
+  status.animated = _imageView.animated();
+  status.zoom = _imageView.cropZoom();
+  status.zoomAvailable = _imageView.zoomAvailable();
+  snprintf(status.format, sizeof(status.format), "%s", _imageView.formatName());
+  snprintf(status.error, sizeof(status.error), "%s",
+           _imageView.failed() ? _imageView.error().c_str() : "");
+  if (memcmp(&status, &_imageStatus, sizeof(status)) != 0) {
+    _imageStatus = status;
+    _runtime.publishImage(status);
+  }
+}
+
+void AppHostScreen::hideImage() {
+  if (!_imageShown) return;
+  _imageShown = false;
+  _imageView.close();
+  _imageView.setChromePainter(nullptr, nullptr);
+  _imageStatus = AppRuntime::ImageStatus{};
+  _runtime.publishImage(_imageStatus);
+}
+
+void AppHostScreen::paintImageChrome(void *context) {
+  AppHostScreen *host = static_cast<AppHostScreen *>(context);
+  const ImageView &view = host->_imageView;
+  UiKit::drawTopAppBar(host->_display.tft(), host->_display.width(), view.filename(),
+                       UiKit::NavigationIcon::Close,
+                       view.zoomAvailable() ? (view.cropZoom() ? UiKit::AppBarAction::ZoomOut
+                                                               : UiKit::AppBarAction::ZoomIn)
+                                            : UiKit::AppBarAction::None);
 }
 
 void AppHostScreen::draw() {

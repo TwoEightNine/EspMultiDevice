@@ -168,6 +168,7 @@ AudioSettingsScreen *audioSettingsScreen = nullptr;
 LedScreen *ledScreen = nullptr;
 BatteryInfoScreen *batteryInfoScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
+ImageView *imageView = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
 AudioPlayerScreen *audioPlayerScreen = nullptr;
 VideoPlayerScreen *videoPlayerScreen = nullptr;
@@ -418,7 +419,8 @@ void setup() {
   ledScreen = new LedScreen(*navigator, *touch, *display, *ledSettings);
   batteryInfoScreen = new BatteryInfoScreen(*navigator, *touch, *display, *batteryHistory);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
-  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
+  imageView = new ImageView(*display, *sdCard, *secretStorage, *mediaCache);
+  imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *imageView);
   audioPlayerScreen = new AudioPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *audioSettings, *secretStorage, *mediaCache);
   videoPlayerScreen = new VideoPlayerScreen(*navigator, *touch, *display, *sdCard, *speaker, *secretStorage);
   textViewerScreen = new TextViewerScreen(*navigator, *touch, *display, *sdCard, *secretStorage);
@@ -436,7 +438,8 @@ void setup() {
   );
   appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
                                     *wifiController, *batteryHistory,
-                                    *speaker, *audioSettings, *mic, *mediaCache);
+                                    *speaker, *audioSettings, *mic, *mediaCache,
+                                    *imageView);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));

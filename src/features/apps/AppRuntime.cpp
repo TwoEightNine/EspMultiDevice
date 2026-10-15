@@ -76,6 +76,10 @@ bool AppRuntime::start(const String &id, const Status &initialStatus) {
   _paused = false;
   _resumeRequested = false;
   _pausedFor = NavigationKind::None;
+  _image = ImageLayer{};
+  _image.barVisible = true;
+  _imageStatus = ImageStatus{};
+  _imageRevision = 0;
   _toneLastWriteMs = 0;
   _recActive = _recToFile = _playActive = _playFinished = false;
   _recError = _playError = String();
@@ -131,14 +135,14 @@ bool AppRuntime::sendAction(const char *id) {
   return xQueueSend(_actions, &action, 0) == pdTRUE;
 }
 
-bool AppRuntime::sendTouch(uint16_t x, uint16_t y) {
+bool AppRuntime::sendTouch(int16_t x, int16_t y) {
   if (!_actions || _cancel || _stopped) return false;
   Action action{};
   action.x = x; action.y = y; action.kind = ActionKind::Touch;
   return xQueueSend(_actions, &action, 0) == pdTRUE;
 }
 
-bool AppRuntime::sendTouchEnd(uint16_t x, uint16_t y, uint32_t heldMs) {
+bool AppRuntime::sendTouchEnd(int16_t x, int16_t y, uint32_t heldMs) {
   if (!_actions || _cancel || _stopped) return false;
   Action action{};
   action.x = x; action.y = y; action.heldMs = heldMs; action.kind = ActionKind::TouchEnd;
@@ -182,6 +186,20 @@ bool AppRuntime::takeFrame(Frame &frame, uint32_t &revision) {
 void AppRuntime::publishStatus(const Status &status) {
   if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return;
   _status = status;
+  xSemaphoreGive(_mutex);
+}
+
+bool AppRuntime::takeImage(ImageLayer &layer, uint32_t &revision) {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return false;
+  const bool changed = _imageRevision != revision;
+  if (changed) { layer = _image; revision = _imageRevision; }
+  xSemaphoreGive(_mutex);
+  return changed;
+}
+
+void AppRuntime::publishImage(const ImageStatus &status) {
+  if (!_mutex || xSemaphoreTake(_mutex, 0) != pdTRUE) return;
+  _imageStatus = status;
   xSemaphoreGive(_mutex);
 }
 
@@ -1063,6 +1081,8 @@ void AppRuntime::pauseForNavigation() {
   finishRecording("");
   finishPlayback(nullptr, false);
   clearTones();
+  // The covering screen may be the built-in viewer, which shares the pipeline.
+  closeImage();
   _pausedFor = _navigation.kind;
   _paused = true;
 }
@@ -1546,6 +1566,124 @@ int AppRuntime::luaFsOpen(lua_State *state) {
   return 1;
 }
 
+int AppRuntime::luaImageOpen(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkFsPath(state, 1, false, false, false, path)) return 2;
+  if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
+  const FileFormats::Format format = FileFormats::fromPath(path);
+  if (!FileFormats::isImage(format) || !FileFormats::isOpenable(format))
+    return pushFailure(state, false, "Unsupported file");
+  const int64_t started = esp_timer_get_time();
+  bool found = false;
+  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  if (locked) {
+    File file = SD.open(path.c_str(), FILE_READ);
+    found = file && !file.isDirectory();
+    if (file) file.close();
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  if (!locked) return pushFailure(state, false, "SD busy");
+  if (!found) return pushFailure(state, false, "File not found");
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return pushFailure(state, false, "Host busy");
+  runtime->_image.shown = true;
+  runtime->_image.zoom = false;
+  ++runtime->_image.serial;
+  copyText(runtime->_image.path, sizeof(runtime->_image.path), path.c_str());
+  ++runtime->_imageRevision;
+  xSemaphoreGive(runtime->_mutex);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaImageStatus(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  ImageLayer layer{};
+  ImageStatus status{};
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    layer = runtime->_image;
+    status = runtime->_imageStatus;
+    xSemaphoreGive(runtime->_mutex);
+  }
+  // Until the host reports on the latest open, that image is still loading.
+  if (!layer.shown) status = ImageStatus{};
+  else if (status.serial != layer.serial || status.state == ImageState::None) {
+    status = ImageStatus{};
+    status.state = ImageState::Loading;
+  }
+  const char *name = "none";
+  if (status.state == ImageState::Loading) name = "loading";
+  else if (status.state == ImageState::Ready) name = "ready";
+  else if (status.state == ImageState::Error) name = "error";
+  lua_newtable(state);
+  lua_pushstring(state, name); lua_setfield(state, -2, "state");
+  lua_pushstring(state, layer.shown ? layer.path : ""); lua_setfield(state, -2, "path");
+  lua_pushinteger(state, status.width); lua_setfield(state, -2, "width");
+  lua_pushinteger(state, status.height); lua_setfield(state, -2, "height");
+  lua_pushstring(state, status.format); lua_setfield(state, -2, "format");
+  lua_pushboolean(state, status.animated); lua_setfield(state, -2, "animated");
+  lua_pushboolean(state, status.zoom); lua_setfield(state, -2, "zoom");
+  lua_pushboolean(state, status.zoomAvailable); lua_setfield(state, -2, "zoom_available");
+  lua_pushboolean(state, layer.barVisible); lua_setfield(state, -2, "bar");
+  if (status.state == ImageState::Error) {
+    lua_pushstring(state, status.error); lua_setfield(state, -2, "error");
+  }
+  return 1;
+}
+
+int AppRuntime::luaImageSetZoom(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  luaL_checktype(state, 1, LUA_TBOOLEAN);
+  const bool zoom = lua_toboolean(state, 1);
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return pushFailure(state, false, "Host busy");
+  const char *error = nullptr;
+  if (!runtime->_image.shown) error = "No image";
+  else if (runtime->_imageStatus.serial != runtime->_image.serial ||
+           !runtime->_imageStatus.zoomAvailable) error = "Zoom unavailable";
+  if (!error && runtime->_image.zoom != zoom) {
+    runtime->_image.zoom = zoom;
+    ++runtime->_imageRevision;
+  }
+  xSemaphoreGive(runtime->_mutex);
+  if (error) return pushFailure(state, false, error);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaImageSetBar(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  luaL_checktype(state, 1, LUA_TBOOLEAN);
+  const bool visible = lua_toboolean(state, 1);
+  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return pushFailure(state, false, "Host busy");
+  if (runtime->_image.barVisible != visible) {
+    runtime->_image.barVisible = visible;
+    ++runtime->_imageRevision;
+  }
+  xSemaphoreGive(runtime->_mutex);
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+int AppRuntime::luaImageClose(lua_State *state) {
+  self(state)->closeImage();
+  return 0;
+}
+
+void AppRuntime::closeImage() {
+  if (!_mutex || xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  if (_image.shown || !_image.barVisible) {
+    _image.shown = false;
+    _image.zoom = false;
+    _image.barVisible = true;
+    ++_imageRevision;
+  }
+  xSemaphoreGive(_mutex);
+}
+
 void AppRuntime::registerApi() {
   luaL_requiref(_lua, "_G", luaopen_base, 1); lua_pop(_lua, 1);
   luaL_requiref(_lua, "table", luaopen_table, 1); lua_pop(_lua, 1);
@@ -1661,6 +1799,17 @@ void AppRuntime::registerApi() {
         lua_setfield(_lua, -2, entry->name);
       }
       lua_setfield(_lua, -2, "fs");
+      if (_sdkVersion >= 5) {
+        static const luaL_Reg imageFunctions[] = {
+          {"open", luaImageOpen}, {"status", luaImageStatus}, {"set_zoom", luaImageSetZoom},
+          {"set_bar", luaImageSetBar}, {"close", luaImageClose}, {nullptr, nullptr}};
+        lua_newtable(_lua);
+        for (const luaL_Reg *entry = imageFunctions; entry->name; ++entry) {
+          lua_pushlightuserdata(_lua, this); lua_pushcclosure(_lua, entry->func, 1);
+          lua_setfield(_lua, -2, entry->name);
+        }
+        lua_setfield(_lua, -2, "image");
+      }
     }
   }
   lua_setglobal(_lua, "esp");

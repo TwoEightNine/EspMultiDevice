@@ -1,12 +1,12 @@
-# SD card apps (SDK 1 through 4)
+# SD card apps (SDK 1 through 5)
 
 Copy a folder such as `examples/apps/counter` to `/Apps/counter` on a FAT32 SD card. **Counter** appears directly in Home's combined built-in/Lua app grid. Home scans up to 128 entries in `/Apps`, shows up to 32 runnable packages, sorts all tiles case-insensitively by display name, and keeps duplicate names. Drag horizontally between nine-tile pages; the grid follows the finger, advances after 48 px or a short fast flick, and rubber-bands without wrapping at either end. The catalog refreshes when Home opens or the card is remounted. Identical rescans leave the retained Home cache untouched; a changed catalog redraws only grid positions whose sorted tile content changed. A package can be updated by replacing its files on SD; no firmware flash is needed. USB Drive transfer still uses its normal isolated boot and restart.
 
 ## Package contract
 
-An app is `/Apps/<id>/manifest.json` plus `/Apps/<id>/main.lua` and normally `/Apps/<id>/logo.png`. The manifest is UTF-8 JSON with `id`, `name`, integer `sdk`, and integer RGB565 `app_icon_bg` fields, plus an optional `permissions` string array that only SDK 4 reads. `app_icon_bg` ranges from 0 through 65535. The logo is an exact 64×64, non-interlaced PNG with alpha; Home composites it over the 80px circle using `app_icon_bg`. A missing or invalid background uses the standard purple Apps color, while a missing, corrupt, wrong-sized, interlaced, non-alpha, or undecodable logo uses the white generic Apps glyph. These visual fallbacks do not prevent an otherwise valid package from running.
+An app is `/Apps/<id>/manifest.json` plus `/Apps/<id>/main.lua` and normally `/Apps/<id>/logo.png`. The manifest is UTF-8 JSON with `id`, `name`, integer `sdk`, and integer RGB565 `app_icon_bg` fields, plus an optional `permissions` string array that SDK 4 and later read. `app_icon_bg` ranges from 0 through 65535. The logo is an exact 64×64, non-interlaced PNG with alpha; Home composites it over the 80px circle using `app_icon_bg`. A missing or invalid background uses the standard purple Apps color, while a missing, corrupt, wrong-sized, interlaced, non-alpha, or undecodable logo uses the white generic Apps glyph. These visual fallbacks do not prevent an otherwise valid package from running.
 
-SDK 1 through 4 are accepted; the original counter example remains SDK 1, `examples/apps/workout` uses SDK 2, `examples/apps/recorder` uses SDK 3, and `examples/apps/files` uses SDK 4. The ID must match its lowercase folder name and match `[a-z][a-z0-9_-]{0,31}`. Names are 1–40 UTF-8 bytes. The manifest is at most 2 KiB and `main.lua` at most 64 KiB. Only Lua source text is accepted; bytecode and additional Lua modules are unavailable. Home omits packages that fail these core checks or have a missing/oversized `main.lua`.
+SDK 1 through 5 are accepted; the original counter example remains SDK 1, `examples/apps/workout` uses SDK 2, `examples/apps/recorder` uses SDK 3, `examples/apps/files` uses SDK 4, and `examples/apps/images` uses SDK 5. The ID must match its lowercase folder name and match `[a-z][a-z0-9_-]{0,31}`. Names are 1–40 UTF-8 bytes. The manifest is at most 2 KiB and `main.lua` at most 64 KiB. Only Lua source text is accepted; bytecode and additional Lua modules are unavailable. Home omits packages that fail these core checks or have a missing/oversized `main.lua`.
 
 `main.lua` returns a table with a required `on_start()` function and optional `on_action(id)` and `on_tick(now_ms)` functions. SDK 2 and later additionally permit `on_touch(x, y)` for touch-down edges inside a presented canvas, with coordinates relative to the area below the app bar. SDK 4 adds `on_touch_end(x, y, held_ms)`, `on_input(text)`, and `on_resume()`. `on_tick` runs about every 100 ms while the app is open. Each callback has a 100,000-instruction and 20 ms script-execution limit; bounded host file I/O and saved-volume writes do not count toward the time limit. The Lua state has a 512 KiB PSRAM allocation limit. A limit or script error stops callbacks and displays an error; closing releases its task and memory.
 
@@ -20,7 +20,7 @@ SDK 1 provides:
 | `esp.device.status()` | Return smooth `battery_voltage_mv`, `wifi_connected`, `sd_mounted`, and `epoch_seconds` (zero until time is valid). Voltage alone does not establish state of charge or charging state. |
 | `esp.time.millis()` | Return the device's monotonic millisecond counter. |
 
-Storage names are 1–64 ASCII bytes using letters, digits, `_`, `-`, or `.`; `.` and `..` are rejected. They address only `/.system/appdata/<id>/<name>`. An SDK 1–3 app cannot access package source files, other apps' data, or the general SD filesystem; SDK 4 opens ordinary SD storage only to a package that declares the `files` permission (see below). No SDK reaches `SecretStorage`, `/.system` outside the app's own data folder, or other hidden folders. The host loads selected safe Lua libraries (`table`, `string`, `math`, and `utf8`); Lua file, OS, package, debug, dynamic load, and native-module interfaces are unavailable. These limits are for personal or trusted apps in the firmware process, not hostile-code isolation.
+Storage names are 1–64 ASCII bytes using letters, digits, `_`, `-`, or `.`; `.` and `..` are rejected. They address only `/.system/appdata/<id>/<name>`. An SDK 1–3 app cannot access package source files, other apps' data, or the general SD filesystem; SDK 4 and later open ordinary SD storage only to a package that declares the `files` permission (see below). No SDK reaches `SecretStorage`, `/.system` outside the app's own data folder, or other hidden folders. The host loads selected safe Lua libraries (`table`, `string`, `math`, and `utf8`); Lua file, OS, package, debug, dynamic load, and native-module interfaces are unavailable. These limits are for personal or trusted apps in the firmware process, not hostile-code isolation.
 
 Apps run only while open. Closing an app or removing its SD card stops callbacks and releases the Lua state. Reinsert the card and reopen the app to start again. App work uses a separate task; the UI task owns touch and drawing. Each SD transaction takes the shared `SpiBusLock` and releases it between bounded chunks.
 
@@ -127,6 +127,30 @@ A request is carried out after the current callback returns. The worker first fi
 The app owns hit testing: the whole 40px row, and the whole trailing 40×40 cell when it draws an action.
 
 `examples/apps/files` rebuilds the Files screen for ordinary storage with these operations: an eight-row paged listing, opening folders and media, New folder and Rename through the keyboard, Move by choosing a destination folder, and hold-to-delete. It has no thumbnails and no secret storage.
+
+## SDK 5 host image layer
+
+SDK 5 keeps every SDK 4 operation and adds `esp.image`, which shows one image file on the whole display through the same pipeline as the built-in Image Viewer. `esp.image` exists only when the manifest declares both `"sdk": 5` and `"permissions": ["files"]`. Pixels never cross into Lua: the host decodes, scales, caches, and animates, while Lua chooses the file, the bar state, and the zoom, and decides what the bar's targets and the image touches do.
+
+| Operation | Contract |
+| --- | --- |
+| `esp.image.open(path)` | Show the image layer and start loading `path`, aspect-fit and unzoomed, replacing any image already shown. The path follows the `esp.fs` rules and must be an openable image per `FileFormats`. Return `true` once the request is accepted, or `false, error` (`Invalid path`, `Unsupported file`, `File not found`, `File job active`, `SD busy`). A file that cannot be decoded is reported through `status`, not here. |
+| `esp.image.status()` | Return `state` (`"none"`, `"loading"`, `"ready"`, or `"error"`), `path`, source `width` and `height`, `format` (`"BMP"`, `"PNG"`, `"JPEG"`, `"GIF"`, `"WebP"`, or `"unknown"`), `animated`, `zoom`, `zoom_available`, `bar`, and `error` in the error state. |
+| `esp.image.set_zoom(on)` | Switch centered crop-to-fill zoom on or off. Return `true`, or `false, error` (`No image`, `Zoom unavailable`). |
+| `esp.image.set_bar(visible)` | Show the app bar over the image (informative mode) or hide it (full screen) without reloading. The setting carries over to the next `open`. |
+| `esp.image.close()` | Remove the layer, release its buffers, and redraw the app's latest frame or page. The bar setting returns to visible. |
+
+Formats, limits, and caches are those of the built-in viewer (see [media.md](media.md)): still images fill the 320×480 display aspect-fit, animations play in the centered 320×240 photo viewport, and the layer reads and writes the same validated `.cache` sidecars, so an image first opened by either viewer is a cache hit in the other. `zoom_available` is true for a loaded still image whose aspect ratio differs from the display's by more than 10%. The host draws the loading progress and, for a file it cannot show, the viewer's error panel.
+
+While the layer is shown:
+
+- Frames and pages the app publishes are kept but not drawn until `close`.
+- A visible bar shows the file name, the Close icon, and the zoom glyph when zoom is available. Their 48px targets call `on_action("image.close")` and `on_action("image.zoom")`; the host neither closes the app nor zooms by itself. An app that shows an image must therefore handle `image.close`. The rest of the bar is inert.
+- Every other touch-down calls `on_touch(x, y)` in the usual canvas coordinates. With the bar hidden the top 48px of the display are part of the image and report `y` from −48 to −1. `on_touch_end` follows the same rule.
+
+Requests are carried out by the UI task after the callback returns, so `status` reports `"loading"` until the host has processed the latest `open`. PNG, JPEG, and still WebP decode in one step: callbacks keep running, but the host presents nothing and takes no touch until the image appears. The host closes the layer when the app stops and when `esp.fs.open` or `esp.ui.prompt` covers the app; after such a cover `status().state` is `"none"` in `on_resume()`. Scans, jobs, and audio may run while an image loads; each side holds `SpiBusLock` for one transaction at a time. Images in secret storage are not reachable.
+
+`examples/apps/images` rebuilds the Image Viewer with these operations. Because Home starts an app without a file, it begins with a folder picker that lists folders and openable images, eight rows per page, and remembers the last folder in its app data. In the viewer a tap on either 48px edge moves to the previous or next image of the folder with wrap, keeping the bar state and resetting zoom; a tap in between toggles informative and full-screen mode; the bar's zoom target toggles crop zoom; Close returns to the picker page holding that image.
 
 ## Future SDK versions
 

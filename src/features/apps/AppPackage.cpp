@@ -104,7 +104,7 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
       result.error = "Invalid app name";
     } else if (!cJSON_IsNumber(sdk) ||
                (sdk->valuedouble != 1 && sdk->valuedouble != 2 && sdk->valuedouble != 3 &&
-                sdk->valuedouble != 4)) {
+                sdk->valuedouble != 4 && sdk->valuedouble != 5)) {
       result.error = "Unsupported SDK version";
     } else {
       result.sdk = static_cast<uint8_t>(sdk->valuedouble);

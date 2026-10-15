@@ -10,6 +10,7 @@ class SpeakerController;
 class AudioSettings;
 class MicController;
 class MediaCache;
+class ImageView;
 
 class AppHostScreen : public Screen {
 public:
@@ -17,7 +18,7 @@ public:
                 DisplayController &display, SdCardController &card,
                 WiFiController &wifi, BatteryHistoryService &batteryHistory,
                 SpeakerController &speaker, AudioSettings &audioSettings,
-                MicController &mic, MediaCache &mediaCache);
+                MicController &mic, MediaCache &mediaCache, ImageView &imageView);
   void onEnter(const ScreenData &data) override;
   void onExit() override;
   bool releaseResources() override;
@@ -31,6 +32,7 @@ private:
   SdCardController &_card;
   WiFiController &_wifi;
   BatteryHistoryService &_batteryHistory;
+  ImageView &_imageView;
   AppRuntime _runtime;
   AppRuntime::Scene _scene{};
   AppRuntime::Frame _frame{};
@@ -51,8 +53,14 @@ private:
   // Canvas touch tracked from touch-down to release for `on_touch_end`.
   bool _touchActive = false;
   uint32_t _touchStartedMs = 0;
-  uint16_t _touchX = 0;
-  uint16_t _touchY = 0;
+  int16_t _touchX = 0;
+  int16_t _touchY = 0;
+  // SDK 5: the full-display image layer this screen drives for the app.
+  AppRuntime::ImageLayer _image{};
+  AppRuntime::ImageStatus _imageStatus{};
+  uint32_t _imageRevision = 0;
+  uint32_t _imageSerial = 0;
+  bool _imageShown = false;
 
   AppRuntime::Status statusSnapshot();
   void publishStatus();
@@ -60,4 +68,7 @@ private:
   void openNavigation();
   void draw();
   void drawFrame();
+  void serviceImage(uint32_t nowMs);
+  void hideImage();
+  static void paintImageChrome(void *context);
 };

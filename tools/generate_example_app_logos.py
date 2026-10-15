@@ -61,8 +61,19 @@ def files_logo():
     save(image, "examples/apps/files/logo.png")
 
 
+def images_logo():
+    image = canvas()
+    draw = ImageDraw.Draw(image)
+    white = (255, 255, 255, 255)
+    draw.rounded_rectangle((36, 52, 220, 204), radius=22, outline=white, width=16)
+    draw.ellipse((70, 82, 106, 118), fill=white)
+    draw.polygon(((58, 184), (112, 126), (142, 156), (166, 132), (198, 184)), fill=white)
+    save(image, "examples/apps/images/logo.png")
+
+
 if __name__ == "__main__":
     counter_logo()
     workout_logo()
     recorder_logo()
     files_logo()
+    images_logo()

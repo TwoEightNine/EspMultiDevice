@@ -66,6 +66,29 @@ public:
     char initial[256];  // Prompt: initial text.
   };
 
+  // The host image layer an SDK 5 app asked for. The worker only records what
+  // it wants; the host screen opens, zooms, and closes the shared `ImageView`
+  // on the UI task and reports back through `publishImage`.
+  struct ImageLayer {
+    bool shown;
+    bool zoom;
+    bool barVisible;
+    uint32_t serial;  // Changes with every `esp.image.open`.
+    char path[256];
+  };
+  enum class ImageState : uint8_t { None, Loading, Ready, Error };
+  struct ImageStatus {
+    ImageState state;
+    uint32_t serial;  // The `ImageLayer::serial` this status describes.
+    uint32_t width;
+    uint32_t height;
+    bool animated;
+    bool zoom;
+    bool zoomAvailable;
+    char format[8];
+    char error[64];
+  };
+
   AppRuntime(SdCardController &card, SpeakerController &speaker, AudioSettings &audioSettings,
              MicController &mic, MediaCache &mediaCache);
   bool start(const String &id, const Status &initialStatus);
@@ -73,8 +96,10 @@ public:
   bool stopped() const;
   bool end();
   bool sendAction(const char *id);
-  bool sendTouch(uint16_t x, uint16_t y);
-  bool sendTouchEnd(uint16_t x, uint16_t y, uint32_t heldMs);
+  // Canvas coordinates; `y` is negative above the canvas while an image
+  // layer hides the app bar.
+  bool sendTouch(int16_t x, int16_t y);
+  bool sendTouchEnd(int16_t x, int16_t y, uint32_t heldMs);
   // True once a navigation is requested and the worker has released audio and
   // stopped callbacks. The app stays paused until resume().
   bool takeNavigation(Navigation &navigation);
@@ -84,6 +109,8 @@ public:
   bool takeScene(Scene &scene, uint32_t &revision);
   bool takeFrame(Frame &frame, uint32_t &revision);
   void publishStatus(const Status &status);
+  bool takeImage(ImageLayer &layer, uint32_t &revision);
+  void publishImage(const ImageStatus &status);
 
 private:
   static constexpr size_t LuaMemoryLimit = 512 * 1024;
@@ -94,7 +121,7 @@ private:
   static constexpr uint16_t MaxFsEntries = 2000;
   static constexpr uint8_t MaxFsDepth = 16;
   enum class ActionKind : uint8_t { Button, Touch, TouchEnd };
-  struct Action { char id[33]; uint16_t x; uint16_t y; uint32_t heldMs; ActionKind kind; };
+  struct Action { char id[33]; int16_t x; int16_t y; uint32_t heldMs; ActionKind kind; };
   struct CallArgs {
     const char *text = nullptr;
     bool nil = false;  // Push nil as the first argument instead of text.
@@ -141,6 +168,10 @@ private:
   NavigationKind _pausedFor = NavigationKind::None;
   volatile bool _paused = false;
   volatile bool _resumeRequested = false;
+  // Host image layer (SDK 5 `esp.image`), guarded by `_mutex`.
+  ImageLayer _image{};
+  ImageStatus _imageStatus{};
+  uint32_t _imageRevision = 0;
   // General SD access (SDK 4 `esp.fs`). Only the worker task touches this.
   FsEntry *_fsEntries = nullptr;
   char *_fsNames = nullptr;
@@ -252,6 +283,12 @@ private:
   static int luaFsJob(lua_State *state);
   static int luaFsCancel(lua_State *state);
   static int luaFsOpen(lua_State *state);
+  static int luaImageOpen(lua_State *state);
+  static int luaImageStatus(lua_State *state);
+  static int luaImageSetZoom(lua_State *state);
+  static int luaImageSetBar(lua_State *state);
+  static int luaImageClose(lua_State *state);
+  void closeImage();
   // Reads Lua argument `index` as an app path; on failure pushes the
   // `false|nil, error` pair and returns false.
   bool checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,
