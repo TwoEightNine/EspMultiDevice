@@ -140,7 +140,7 @@ SDK 5 keeps every SDK 4 operation and adds `esp.image`, which shows one image fi
 | `esp.image.set_bar(visible)` | Show the app bar over the image (informative mode) or hide it (full screen) without reloading. The setting carries over to the next `open`. |
 | `esp.image.close()` | Remove the layer, release its buffers, and redraw the app's latest frame or page. The bar setting returns to visible. |
 
-Formats, limits, and caches are those of the built-in viewer (see [media.md](media.md)): still images fill the 320×480 display aspect-fit, animations play in the centered 320×240 photo viewport, and the layer reads and writes the same validated `.cache` sidecars, so an image first opened by either viewer is a cache hit in the other. `zoom_available` is true for a loaded still image whose aspect ratio differs from the display's by more than 10%. The host draws the loading progress and, for a file it cannot show, the viewer's error panel.
+Formats, limits, and caches are those of the built-in viewer (see [media.md](media.md)): still images fill the 320×480 display aspect-fit, animations play in the centered 320×240 photo viewport, and the layer reads and writes the same validated `.cache` sidecars, so an image first opened by either viewer is a cache hit in the other. GIFs stream from their source with no sidecar, and `state` stays `"loading"` until the first frame is shown. `zoom_available` is true for a loaded still image whose aspect ratio differs from the display's by more than 10%. The host draws the loading progress and, for a file it cannot show, the viewer's error panel.
 
 While the layer is shown:
 

@@ -162,7 +162,12 @@ ImageView::ImageView(DisplayController &display,
     _rleFileRow(0),
     _rleX(0),
     _rlePendingBlankRows(0),
-    _rleDone(false) {
+    _rleDone(false),
+    _stream(_secretStorage, _gif),
+    _streamSlot(AnimationStreamWorker::NoSlot),
+    _streamPixels(nullptr),
+    _streamLoadingAtMs(0),
+    _streamLoadingDrawnMs(0) {
   // reset() releases any decoder-owned buffers, including on the first
   // screen entry. Initialize the decoder before that first release so its
   // frame-buffer pointer is null rather than indeterminate.
@@ -219,13 +224,14 @@ void ImageView::open(const String &path, bool secretAccess, bool chromeVisible) 
   if (isGifSource()) {
     _format = ImageFormat::Gif;
     _animationSource = true;
-    if (!prepareCachePaths(FileFormats::Format::Emga)) {
-      _error = F("Invalid cache path");
+    if (!startGifStream()) {
+      if (_error.length() == 0) _error = F("Could not start animation");
+      stopGifStream();
       drawError();
-      return;
     }
-    if (loadAnimationCache()) return;
-  } else if (isWebpSource()) {
+    return;
+  }
+  if (isWebpSource()) {
     _format = ImageFormat::Webp;
     if (!inspectWebpSource()) {
       if (_error.length() == 0) _error = F("Invalid WebP image");
@@ -315,6 +321,14 @@ void ImageView::close() {
 }
 
 void ImageView::tick(uint32_t nowMs) {
+  if (_stream.active()) {
+    if (!tickGifStream(nowMs)) {
+      if (_error.length() == 0) _error = F("GIF playback error");
+      stopGifStream();
+      drawError();
+    }
+    return;
+  }
   if (_gifState == GifState::Building) {
     bool built = _format == ImageFormat::Webp ? buildWebpFrame() : buildGifFrame();
     if (!built) {
@@ -360,6 +374,9 @@ void ImageView::tick(uint32_t nowMs) {
 }
 
 void ImageView::reset() {
+  // The stream worker borrows _gif; stop it before anything below touches
+  // the decoder or frees its slots.
+  stopGifStream();
   bool removeGifTemp = _gifState == GifState::Building;
   _rendering = false;
   _gifState = GifState::None;
@@ -493,6 +510,10 @@ void ImageView::redraw() {
     drawError();
   } else if (isStaticImage() && _frameBuffer) {
     presentStaticFrame();
+  } else if (_stream.active()) {
+    draw();
+    if (_streamPixels) presentStreamFrameNow();
+    else _streamLoadingAtMs = 0;
   } else {
     draw();
     if (_gifDisplayedFrame) presentGifFullFrame(_gifDisplayedFrame);
@@ -1963,6 +1984,152 @@ void ImageView::releaseGifBuffers() {
   _gifStatsAtMs = 0;
   _gifWaitingForFrame = false;
   _gifNextLoaded = false;
+}
+
+bool ImageView::startGifStream() {
+  uint8_t header[10] = {};
+  if (!lockedSeek(_file, 0) || lockedRead(_file, header, sizeof(header)) != sizeof(header)) {
+    _error = F("Unable to read GIF header");
+    return false;
+  }
+  _sourceWidth = readLe16(header + 6);
+  _sourceHeight = readLe16(header + 8);
+  if (_sourceWidth == 0 || _sourceHeight == 0) {
+    _error = F("GIF has invalid dimensions");
+    return false;
+  }
+  if (!psramFound()) {
+    _error = F("GIF viewer requires PSRAM");
+    return false;
+  }
+  prepareGifDrawRect();
+  if (_drawWidth == 0) _drawWidth = 1;
+  if (_drawHeight == 0) _drawHeight = 1;
+  _left = (int16_t)((_display.width() - _drawWidth) / 2);
+  _top = (int16_t)((_display.height() - _drawHeight) / 2);
+  _streamSlot = AnimationStreamWorker::NoSlot;
+  _streamPixels = nullptr;
+  _streamLoadingAtMs = 0;
+  return _stream.start(_path, _secretAccess, _sourceWidth, _sourceHeight, _drawWidth, _drawHeight,
+                       _error);
+}
+
+bool ImageView::tickGifStream(uint32_t nowMs) {
+  String workerError;
+  const AnimationStreamWorker::Stats stats = _stream.stats(&workerError);
+  if (stats.phase == AnimationStreamWorker::Phase::Error) {
+    _error = workerError;
+    return false;
+  }
+  // Finish the frame on its way to the panel before taking another one.
+  if (_gifPresentActive) {
+    tickStreamPresentation();
+    logStreamStats(nowMs);
+    return true;
+  }
+  AnimationStreamWorker::Frame frame;
+  if (!_stream.takeDueFrame(nowMs, frame)) {
+    if (_streamSlot == AnimationStreamWorker::NoSlot) drawStreamLoading(nowMs);
+    logStreamStats(nowMs);
+    return true;
+  }
+  if (_streamSlot == AnimationStreamWorker::NoSlot) {
+    clearStreamLoading();
+    _stream.startTimeline(nowMs - frame.dueMs);
+    _imageReady = true;
+    _gifPresentedFrames = 0;
+    _gifStatsAtMs = nowMs;
+    Serial.printf("[Anim] first frame %lu ms after open\n", (unsigned long)(nowMs - _openedAtMs));
+  } else {
+    // The panel no longer needs the previous slot once the new frame starts.
+    _stream.releaseFrame(_streamSlot);
+  }
+  _streamSlot = frame.slot;
+  _streamPixels = frame.pixels;
+  _gifPresentedFrames++;
+  _gifPresentY = streamFirstVisibleRow();
+  _gifPresentActive = true;
+  tickStreamPresentation();
+  logStreamStats(nowMs);
+  return true;
+}
+
+void ImageView::stopGifStream() {
+  if (_streamSlot != AnimationStreamWorker::NoSlot) logStreamStats(millis(), true);
+  _stream.stop();
+  _streamSlot = AnimationStreamWorker::NoSlot;
+  _streamPixels = nullptr;
+  _streamLoadingAtMs = 0;
+  _gifPresentActive = false;
+  _gifPresentY = 0;
+}
+
+uint16_t ImageView::streamFirstVisibleRow() const {
+  // Rows under the informative app bar are never sent, so the bar does not
+  // flicker as frames change.
+  if (_viewMode != ViewMode::Informative || _top >= (int16_t)UiKit::AppBarHeight) return 0;
+  const uint16_t hidden = (uint16_t)(UiKit::AppBarHeight - _top);
+  return hidden < _drawHeight ? hidden : _drawHeight;
+}
+
+void ImageView::tickStreamPresentation() {
+  if (!_gifPresentActive || !_streamPixels || !_display.isReady() || _gifPresentY >= _drawHeight) {
+    _gifPresentActive = false;
+    return;
+  }
+  // One band per loop pass lets touch polling observe press and release
+  // edges while a frame is sent.
+  uint16_t rows = _drawHeight - _gifPresentY;
+  if (rows > StreamPresentBandRows) rows = StreamPresentBandRows;
+  _display.tft().pushImage(_left, _top + _gifPresentY, _drawWidth, rows,
+                           const_cast<uint16_t *>(_streamPixels + (size_t)_gifPresentY * _drawWidth));
+  _gifPresentY += rows;
+  if (_gifPresentY >= _drawHeight) _gifPresentActive = false;
+}
+
+void ImageView::presentStreamFrameNow() {
+  _gifPresentY = streamFirstVisibleRow();
+  _gifPresentActive = true;
+  while (_gifPresentActive) tickStreamPresentation();
+}
+
+void ImageView::drawStreamLoading(uint32_t nowMs) {
+  if (!_display.isReady() || (uint32_t)(nowMs - _openedAtMs) < StreamLoadingDelayMs) return;
+  const bool first = _streamLoadingAtMs == 0;
+  if (!first && (uint32_t)(nowMs - _streamLoadingDrawnMs) < StreamLoadingRefreshMs) return;
+  TFT_eSPI &tft = _display.tft();
+  const int16_t centerX = _display.width() / 2;
+  const int16_t centerY = _display.height() / 2;
+  if (first) {
+    _streamLoadingAtMs = nowMs;
+    tft.fillRect(centerX - 130, centerY - 26, 260, 52, TFT_BLACK);
+    UiText::draw(tft, F("Loading animation"), centerX, centerY - 11, TFT_WHITE, TFT_BLACK,
+                 UiText::Size::Compact, MC_DATUM);
+  }
+  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, 0, true, TFT_BLUE, TFT_DARKGREY,
+                         TFT_BLACK, first, nowMs - _streamLoadingAtMs);
+  _streamLoadingDrawnMs = nowMs;
+}
+
+void ImageView::clearStreamLoading() {
+  if (_streamLoadingAtMs == 0 || !_display.isReady()) return;
+  _display.tft().fillRect(_display.width() / 2 - 130, _display.height() / 2 - 26, 260, 52, TFT_BLACK);
+  _streamLoadingAtMs = 0;
+}
+
+void ImageView::logStreamStats(uint32_t nowMs, bool force) {
+  if (_streamSlot == AnimationStreamWorker::NoSlot) return;
+  if (!force && (uint32_t)(nowMs - _gifStatsAtMs) < StreamStatsIntervalMs) return;
+  _gifStatsAtMs = nowMs;
+  const AnimationStreamWorker::Stats stats = _stream.stats();
+  if (!force && stats.phase != AnimationStreamWorker::Phase::Running) return;
+  Serial.printf("[Anim] dec=%lu pres=%lu drop=%lu decMs=%lu.%lu/%lu scaleMs=%lu.%lu psram=%lu/%lu\n",
+                (unsigned long)stats.decoded, (unsigned long)_gifPresentedFrames,
+                (unsigned long)stats.dropped, (unsigned long)(stats.decodeAverageUs / 1000),
+                (unsigned long)((stats.decodeAverageUs / 100) % 10),
+                (unsigned long)(stats.decodeMaxUs / 1000), (unsigned long)(stats.scaleAverageUs / 1000),
+                (unsigned long)((stats.scaleAverageUs / 100) % 10), (unsigned long)ESP.getFreePsram(),
+                (unsigned long)ESP.getMaxAllocPsram());
 }
 
 void ImageView::releaseGifDecoder() {

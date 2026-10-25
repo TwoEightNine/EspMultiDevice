@@ -28,6 +28,7 @@ using File = fs::File;
 #include "../../services/storage/SdCardController.h"
 #include "../../services/storage/SecretStorage.h"
 #include "../../media/MediaCache.h"
+#include "AnimationStreamWorker.h"
 
 // The image pipeline shared by the built-in Image Viewer and the Lua app
 // host: source decode, aspect-fit and crop-zoom rendering, validated cache
@@ -89,6 +90,12 @@ private:
   static const bool EnableBackgroundGifLoader = true;
   static const uint8_t GifPresentBandRows = 16;
   static const uint16_t GifLoaderReadChunkBytes = 2048;
+  // Streamed frames are packed, so a band goes to TFT_eSPI without staging.
+  static const uint16_t StreamPresentBandRows = 48;
+  // Fast opens show their first frame without flashing the loading panel.
+  static const uint32_t StreamLoadingDelayMs = 150;
+  static const uint32_t StreamLoadingRefreshMs = 50;
+  static const uint32_t StreamStatsIntervalMs = 2000;
 
   enum class Compression : uint32_t {
     Rgb = 0,
@@ -260,6 +267,12 @@ private:
   PNG _png;
   JPEGDEC _jpeg;
   AnimatedGIF _gif;
+  // GIFs stream through this worker, which borrows _gif while it runs.
+  AnimationStreamWorker _stream;
+  uint8_t _streamSlot;
+  const uint16_t *_streamPixels;
+  uint32_t _streamLoadingAtMs;
+  uint32_t _streamLoadingDrawnMs;
   static ImageView *_decoderOwner;
 
   void reset();
@@ -321,6 +334,15 @@ private:
   bool writeAnimationCacheHeader(uint32_t frameCount, int32_t loopCount);
   void releaseGifBuffers();
   void releaseGifDecoder();
+  bool startGifStream();
+  bool tickGifStream(uint32_t nowMs);
+  void stopGifStream();
+  void tickStreamPresentation();
+  void presentStreamFrameNow();
+  void drawStreamLoading(uint32_t nowMs);
+  void clearStreamLoading();
+  void logStreamStats(uint32_t nowMs, bool force = false);
+  uint16_t streamFirstVisibleRow() const;
   bool isGifSource();
   bool isWebpSource();
   bool prepareWebpSource();
