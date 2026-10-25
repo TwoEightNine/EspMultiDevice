@@ -50,7 +50,7 @@ The decode, scaling, cache, and animation code lives in `ImageView` (`src/featur
 
 From Files, tapping the left or right 48px edge moves to the previous or next supported image from the naturally sorted folder listing; navigation wraps. The Image Viewer itself has no navigation arrows.
 
-Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; smaller images are never upscaled. Animation support includes transparency, disposal/blending, and loop metadata. Insufficient PSRAM produces an error instead of synchronous SD fallback.
+Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; smaller images are never upscaled. Animation support includes transparency, disposal/blending, and loop metadata. Insufficient PSRAM produces an error instead of synchronous SD fallback. Playback logs `[Anim]` serial lines: conversion time, time from open to first frame, and every 2 s the presented/dropped frame, underrun, and PSRAM counts. Use `tools/generate_animation_fixtures.py` to generate the GIF/WebP fixtures under `tests/animation/fixtures/`; their expected results and the measurement procedure are in `tests/animation/README.md`.
 
 Visible image files may receive 32×32 Files thumbnails. They are worker-decoded, retained for the Files visit, and persist as validated `.cache/*.eth1` sidecars. Unsupported variants, oversized WebP input, and memory failures retain a normal file icon.
 

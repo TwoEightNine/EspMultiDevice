@@ -233,6 +233,10 @@ private:
   uint32_t _gifLoadedFrames;
   uint32_t _gifUnderruns;
   uint32_t _gifDroppedFrames;
+  // Baseline playback measurements for the animation streaming migration.
+  uint32_t _gifPresentedFrames;
+  uint32_t _gifStatsAtMs;
+  uint32_t _openedAtMs;
   bool _gifWaitingForFrame;
   bool _gifActiveIsA;
   bool _gifNextLoaded;

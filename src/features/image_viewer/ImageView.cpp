@@ -146,6 +146,9 @@ ImageView::ImageView(DisplayController &display,
     _gifLoadedFrames(0),
     _gifUnderruns(0),
     _gifDroppedFrames(0),
+    _gifPresentedFrames(0),
+    _gifStatsAtMs(0),
+    _openedAtMs(0),
     _gifWaitingForFrame(false),
     _gifActiveIsA(true),
     _gifNextLoaded(false),
@@ -180,6 +183,7 @@ StorageFile ImageView::openSource(const char *path) {
 
 void ImageView::open(const String &path, bool secretAccess, bool chromeVisible) {
   reset();
+  _openedAtMs = millis();
   _secretAccess = secretAccess;
   _viewMode = chromeVisible ? ViewMode::Informative : ViewMode::FullScreen;
   if (path.length() == 0) {
@@ -416,6 +420,9 @@ void ImageView::reset() {
   _gifLoadedFrames = 0;
   _gifUnderruns = 0;
   _gifDroppedFrames = 0;
+  _gifPresentedFrames = 0;
+  _gifStatsAtMs = 0;
+  _openedAtMs = 0;
   _gifWaitingForFrame = false;
   _gifActiveIsA = true;
   _gifNextLoaded = false;
@@ -1168,6 +1175,8 @@ bool ImageView::finishGifBuild() {
     _mediaCache.abort(_cacheWriter);
     return false;
   }
+  Serial.printf("[Anim] converted %lu frame(s) in %lu ms\n", (unsigned long)_gifBuildFrame,
+                (unsigned long)(millis() - _openedAtMs));
   releaseGifDecoder();
   releaseBuffers();
   CachePaths paths;
@@ -1753,6 +1762,10 @@ bool ImageView::beginGifResidentPlayback() {
   _imageReady = true;
   draw();
   presentGifFrame(gifResidentFrame(0), nullptr, true);
+  _gifPresentedFrames = 1;
+  _gifStatsAtMs = millis();
+  Serial.printf("[Anim] first frame %lu ms after open\n",
+                (unsigned long)(_gifStatsAtMs - _openedAtMs));
   _gifNextFrameAt = millis() + (_gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs);
   _gifCyclesCompleted = 0;
   _gifState = GifState::Playing;
@@ -1808,6 +1821,13 @@ bool ImageView::tickGifTwoFrameLoad() {
 }
 
 bool ImageView::tickGifPlayback(uint32_t nowMs) {
+  if ((uint32_t)(nowMs - _gifStatsAtMs) >= 2000) {
+    _gifStatsAtMs = nowMs;
+    Serial.printf("[Anim] pres=%lu drop=%lu underruns=%lu psram=%lu/%lu\n",
+                  (unsigned long)_gifPresentedFrames, (unsigned long)_gifDroppedFrames,
+                  (unsigned long)_gifUnderruns, (unsigned long)ESP.getFreePsram(),
+                  (unsigned long)ESP.getMaxAllocPsram());
+  }
   if (_gifPresentActive) return tickGifPresentation();
   if (_gifResidentFrames) {
     if (_gifLoaderTask) {
@@ -1858,6 +1878,7 @@ bool ImageView::tickGifPlayback(uint32_t nowMs) {
       if (!_gifFullResident) _gifResidentStates[previousSlot] = (uint8_t)GifSlotState::Free;
     }
     presentGifFrame(next, gifResidentFrame(previousSlot), false);
+    _gifPresentedFrames++;
     _gifNextFrameAt += _gifPlaybackDelay ? _gifPlaybackDelay : GifMinimumDelayMs;
     return startNextGifRingLoad();
   }
@@ -1938,6 +1959,8 @@ void ImageView::releaseGifBuffers() {
   _gifLoadedFrames = 0;
   _gifUnderruns = 0;
   _gifDroppedFrames = 0;
+  _gifPresentedFrames = 0;
+  _gifStatsAtMs = 0;
   _gifWaitingForFrame = false;
   _gifNextLoaded = false;
 }
@@ -2208,6 +2231,8 @@ bool ImageView::finishWebpBuild() {
     _mediaCache.abort(_cacheWriter);
     return false;
   }
+  Serial.printf("[Anim] converted %lu frame(s) in %lu ms\n", (unsigned long)_gifBuildFrame,
+                (unsigned long)(millis() - _openedAtMs));
   releaseWebpDecoder();
   releaseBuffers();
   CachePaths paths;

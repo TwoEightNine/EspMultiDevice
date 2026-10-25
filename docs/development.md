@@ -222,6 +222,7 @@ retain at least 8 KiB.
 | `tools/generate_browser_freesans_font.py` | Reproducibly generates `src/ui/fonts/BrowserFreeSans.h` from redistributable GNU FreeSans. Preserve `LICENSE.FreeFont`. |
 | `tools/generate_assistant_noto_sans_sc_font.py` | Reproducibly generates the assistant-only GB2312-level 18 px `AssistantNotoSansSC18.h` from OFL-licensed Noto Sans CJK SC. Preserve `LICENSE.NotoSansCJKSC`. |
 | `tools/generate_legacy_video_fixtures.sh` | With FFmpeg 9.0.1, creates native-display, 640×360 adaptive-size, fast-start/moov-last H.264/AAC, H.263, MPEG-4 Part 2, and 1280×720 PSRAM-limit candidate fixtures in `tests/video/fixtures/`. |
+| `tools/generate_animation_fixtures.py` | With Pillow 12.3.0 (libwebp 1.6.0), creates deterministic GIF/WebP fixtures and verifies them by decoding again. Writes to `tests/animation/fixtures/`. Covers viewport-size, downscaled, odd-size, textured worst-case, delay, loop, truncation, disposal/transparency, alpha, and static-WebP routing cases. GIFs use the script's own encoder; `tests/animation/README.md` lists expected results and the baseline procedure. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
 | `tools/generate_example_app_logos.py` | Regenerates the transparent 64×64 PNG logos shipped with the example Lua packages. |
