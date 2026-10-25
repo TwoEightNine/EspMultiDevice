@@ -43,6 +43,7 @@ USBMSC *usbMsc = nullptr;
 #include "src/services/assistant/AssistantBackendConfigLoader.h"
 #include "src/services/assistant/AssistantController.h"
 #include "src/features/assistant/AssistantScreen.h"
+#include "src/features/settings/AboutScreen.h"
 #include "src/features/settings/AudioSettingsScreen.h"
 #include "src/features/settings/BatteryInfoScreen.h"
 #include "src/features/settings/LedScreen.h"
@@ -167,6 +168,7 @@ SettingsScreen *settingsScreen = nullptr;
 AudioSettingsScreen *audioSettingsScreen = nullptr;
 LedScreen *ledScreen = nullptr;
 BatteryInfoScreen *batteryInfoScreen = nullptr;
+AboutScreen *aboutScreen = nullptr;
 TouchCalibrationScreen *touchCalibrationScreen = nullptr;
 ImageView *imageView = nullptr;
 ImageViewerScreen *imageViewerScreen = nullptr;
@@ -418,6 +420,7 @@ void setup() {
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
   ledScreen = new LedScreen(*navigator, *touch, *display, *ledSettings);
   batteryInfoScreen = new BatteryInfoScreen(*navigator, *touch, *display, *batteryHistory);
+  aboutScreen = new AboutScreen(*navigator, *touch, *display);
   touchCalibrationScreen = new TouchCalibrationScreen(*navigator, *touch, *display);
   imageView = new ImageView(*display, *sdCard, *secretStorage, *mediaCache);
   imageViewerScreen = new ImageViewerScreen(*navigator, *touch, *display, *imageView);
@@ -464,6 +467,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::BatteryInfo, *batteryInfoScreen)) {
     Serial.println(F("Navigator failed to register Battery Info screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::About, *aboutScreen)) {
+    Serial.println(F("Navigator failed to register About screen."));
   }
   if (!navigator->registerScreen(ScreenId::WiFi, *wifiScreen)) {
     Serial.println(F("Navigator failed to register Wi-Fi screen."));

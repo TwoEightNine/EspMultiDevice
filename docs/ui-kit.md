@@ -74,7 +74,10 @@ direct static rendering if allocation fails.
 Wide full-colour compile-time artwork uses `UiKit::drawRgba565Image()` with the
 same generated colour and alpha arrays. The helper processes each row in
 bounded 64-pixel chunks, so assets such as the splash logo do not require a
-width-sized stack or heap allocation. As with icons, pass the actual solid
+width-sized stack or heap allocation. The TwoEightNine brand logo is drawn only through
+`UiKit::drawLogo()` (280×93, `UiKit::LogoWidth`/`LogoHeight`), which Splash
+and About share; do not include the generated `logo.h` in a screen, because
+each including translation unit would link its own copy of the arrays. As with icons, pass the actual solid
 background colour and clear or redraw that background before drawing.
 
 For a monochrome icon that needs runtime tinting, use its 8-bit alpha array

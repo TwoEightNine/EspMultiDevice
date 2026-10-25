@@ -233,6 +233,10 @@ retain at least 8 KiB.
 
 Regenerate a derived asset only through its corresponding tool, review the generated diff, and preserve source/license information. Do not hand-edit generated browser-font headers.
 
+## Firmware version
+
+`src/core/FirmwareVersion.h` is the single source of the firmware's semantic version (`MAJOR.MINOR.PATCH`, currently 0.1.0). Edit only the three numeric macros; `FirmwareVersion::Text` is derived from them. Settings → About shows it. Bump the patch for fixes, the minor version for new features or persistent-format changes, and the major version for incompatible changes to the SD app SDK or stored data.
+
 ## Change checklist
 
 - Keep `FileFormats`, decoder behavior, cache format documentation, and browser download behavior in sync when adding a media type.

@@ -13,7 +13,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 - Direct MP4/3GP video streaming for H.264, H.263, and MPEG-4 Part 2 at the source's full decodable size, downscaled to the portrait or on-demand landscape display at the best rate the device sustains, with AAC-LC, MP3, or AMR-NB audio where compatible. Complete local H.264/AAC fragmented MP4 files are also supported. A second-core scheduler decouples video decoding from non-blocking buffered audio output and does not create an SD cache.
 - Wi-Fi management with a bounded Cloudflare internet speed test, a verified SD read/write speed test, UTC+4 SNTP time, a lightweight HTTP/HTTPS browser, and an interval-workout timer with audio cues.
 - A stack-scoped Xiaozhi voice assistant with a persistent multi-turn WSS session that stays connected under screens it opens and closes only from its app-bar X, verified HTTPS/WSS, half-duplex Opus audio, authenticated device status/settings commands, normal-SD media search/open commands, file-location and paged directory-listing answers, and Browser search handoffs.
-- Runtime SD-card removal/reinsertion handling, touch mesh calibration, battery reporting, and a shared non-blocking screen/navigation model.
+- Runtime SD-card removal/reinsertion handling, touch mesh calibration, battery reporting, an About screen with the firmware version, and a shared non-blocking screen/navigation model.
 - SD-loaded Lua apps appear directly in Home's alphabetized, swipe-paged grid, with versioned drawing, tone, microphone/WAV, app-file, permission-gated SD file management, host-rendered image viewing, and device-status APIs. Installing an app requires no firmware upload.
 
 ## Hardware profile

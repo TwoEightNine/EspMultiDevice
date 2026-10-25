@@ -3,7 +3,6 @@
 #include "../../services/network/WiFiController.h"
 #include "../../services/storage/BatteryHistoryService.h"
 #include "../../ui/UiKit.h"
-#include "../../ui/logo.h"
 
 namespace {
 constexpr uint32_t SplashDurationMs = 3000;
@@ -23,12 +22,10 @@ void SplashScreen::onEnter() {
   _transitioned = false;
   _display.clear(TFT_BLACK);
   const int16_t startX = static_cast<int16_t>(
-    (static_cast<int32_t>(_display.width()) - logo_width) / 2);
+    (static_cast<int32_t>(_display.width()) - UiKit::LogoWidth) / 2);
   const int16_t startY = static_cast<int16_t>(
-    (static_cast<int32_t>(_display.height()) - logo_height) / 2);
-  UiKit::drawRgba565Image(_display.tft(), startX, startY,
-                          logo_width, logo_height, logo_colors, logo_alpha,
-                          TFT_BLACK);
+    (static_cast<int32_t>(_display.height()) - UiKit::LogoHeight) / 2);
+  UiKit::drawLogo(_display.tft(), startX, startY, TFT_BLACK);
 
   // Reconnect saved credentials while the splash remains visible. Avoid an
   // unsolicited scan on devices that have not been configured yet.

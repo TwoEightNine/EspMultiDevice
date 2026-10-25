@@ -46,6 +46,8 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
       _navigator.push(ScreenId::BatteryInfo);
     } else if (option == 5) {
       _navigator.push(ScreenId::TouchCalibration);
+    } else if (option == 6) {
+      _navigator.push(ScreenId::About);
     }
     return;
   }

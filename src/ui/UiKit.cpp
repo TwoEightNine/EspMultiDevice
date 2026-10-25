@@ -1,6 +1,7 @@
 #include "UiKit.h"
 
 #include "icons.h"
+#include "logo.h"
 
 namespace UiKit {
 
@@ -653,6 +654,13 @@ void drawRgba565Image(TFT_eSPI &tft,
     }
   }
   tft.endWrite();
+}
+
+void drawLogo(TFT_eSPI &tft, int16_t x, int16_t y, uint16_t backgroundColor) {
+  static_assert(logo_width == LogoWidth && logo_height == LogoHeight,
+                "UiKit logo constants must match the generated logo.h");
+  drawRgba565Image(tft, x, y, logo_width, logo_height, logo_colors, logo_alpha,
+                   backgroundColor);
 }
 
 void drawAlphaIcon(TFT_eSPI &tft,

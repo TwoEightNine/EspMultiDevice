@@ -224,6 +224,12 @@ void drawRgba565Image(TFT_eSPI &tft,
                       const uint8_t *alpha,
                       uint16_t backgroundColor);
 
+// TwoEightNine brand logo (generated `logo.h`), shared by Splash and About.
+// Kept behind UiKit so the flash-resident arrays are linked only once.
+constexpr uint16_t LogoWidth = 280;
+constexpr uint16_t LogoHeight = 93;
+void drawLogo(TFT_eSPI &tft, int16_t x, int16_t y, uint16_t backgroundColor);
+
 // Draws a flash-resident alpha mask with a caller-selected foreground colour.
 // Fully transparent pixels are left untouched. `alpha` contains width * height
 // 8-bit opacity entries. Icons wider than MaxRgba565IconWidth are rejected so
