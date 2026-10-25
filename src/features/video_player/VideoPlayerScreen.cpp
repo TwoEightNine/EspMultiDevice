@@ -82,8 +82,51 @@ bool readFragmentedMp4(uint32_t offset, void *buffer, uint32_t bytes, void *toke
   return readMp4(offset, buffer, bytes, token) == 0;
 }
 
-uint8_t clampChannel(int value) {
-  return value < 0 ? 0 : (value > 255 ? 255 : (uint8_t)value);
+// BT.601 limited-range YUV to RGB565. Each table maps one 8.8 fixed-point
+// channel sum, shifted down, to its already-masked RGB565 bits; the offset
+// covers the full [-278, 535] range reachable from 8-bit Y/U/V, so the pixel
+// loop needs no clamping branches.
+constexpr int ColorTableOffset = 384;
+constexpr int ColorTableSize = 1024;
+}  // namespace
+
+// Declared outside the anonymous namespace because VideoStreamWorker holds it.
+struct ColorTables {
+  uint16_t red[ColorTableSize];
+  uint16_t green[ColorTableSize];
+  uint16_t blue[ColorTableSize];
+};
+
+namespace {
+
+void buildColorTables(ColorTables &tables) {
+  for (int index = 0; index < ColorTableSize; ++index) {
+    const int value = index - ColorTableOffset;
+    const uint8_t channel = value < 0 ? 0 : (value > 255 ? 255 : (uint8_t)value);
+    tables.red[index] = (uint16_t)(channel & 0xf8) << 8;
+    tables.green[index] = (uint16_t)(channel & 0xfc) << 3;
+    tables.blue[index] = channel >> 3;
+  }
+}
+
+struct ChromaTerms {
+  int red;
+  int green;
+  int blue;
+};
+
+inline ChromaTerms chromaTerms(uint8_t u, uint8_t v) {
+  const int d = u - 128;
+  const int e = v - 128;
+  return {409 * e, -100 * d - 208 * e, 516 * d};
+}
+
+inline uint16_t packPixel(const ColorTables &tables, uint8_t y, const ChromaTerms &chroma) {
+  // 298 * (Y - 16) plus the rounding term shared by all three channels.
+  const int luma = 298 * (y - 16) + 128;
+  return tables.red[((luma + chroma.red) >> 8) + ColorTableOffset] |
+         tables.green[((luma + chroma.green) >> 8) + ColorTableOffset] |
+         tables.blue[((luma + chroma.blue) >> 8) + ColorTableOffset];
 }
 
 const __FlashStringHelper *avcProfileName(unsigned profile) {
@@ -366,6 +409,7 @@ public:
         _lastProgressLogMs(0), _lastPresentedAtMs(0), _decodedSinceLog(0), _presentedSinceLog(0),
         _droppedSinceLog(0), _i2sZeroWrites(0), _sdReadCount(0), _sdReadBytes(0),
         _videoDecodeUs(0), _videoDecodeCount(0), _scaleUs(0), _scaleCount(0), _audioUnderrun(false),
+        _colorTables(nullptr), _scaleColumns(nullptr), _scaleColumnCount(0),
         _ended(false), _slots{}, _snapshot{} {
     for (uint8_t index = 0; index < FrameSlots; ++index) _slots[index] = {};
   }
@@ -560,6 +604,11 @@ private:
   uint64_t _videoDecodeUs, _scaleUs;
   uint32_t _videoDecodeCount, _scaleCount;
   bool _audioUnderrun;
+  // Scaler lookups, kept in internal RAM when available: RGB565 saturation
+  // tables and the source column for each packed destination column.
+  ColorTables *_colorTables;
+  uint16_t *_scaleColumns;
+  uint16_t _scaleColumnCount;
   volatile bool _ended;
   Slot _slots[FrameSlots];
   Snapshot _snapshot;
@@ -983,8 +1032,40 @@ private:
       }
       _slots[index].state = SlotState::Free;
     }
+    if (!prepareScaler()) {
+      setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Video scaler tables need memory")));
+      return false;
+    }
     Serial.printf("[Video] presentation rect=%u,%u %ux%u slotBytes=%lu\n", _drawX, _drawY,
                   _drawWidth, _drawHeight, static_cast<unsigned long>(bytes));
+    return true;
+  }
+
+  static void *allocateScalerMemory(size_t bytes) {
+    void *memory = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return memory ? memory : ps_malloc(bytes);
+  }
+
+  bool prepareScaler() {
+    if (!_colorTables) {
+      _colorTables = static_cast<ColorTables *>(allocateScalerMemory(sizeof(ColorTables)));
+      if (!_colorTables) return false;
+      buildColorTables(*_colorTables);
+    }
+    if (_scaleColumnCount != _drawWidth) {
+      free(_scaleColumns);
+      _scaleColumnCount = 0;
+      _scaleColumns = static_cast<uint16_t *>(allocateScalerMemory((size_t)_drawWidth * sizeof(uint16_t)));
+      if (!_scaleColumns) return false;
+      _scaleColumnCount = _drawWidth;
+    }
+    // 16.16 nearest-neighbour mapping, identical to the per-row source rows.
+    const uint32_t xStep = ((uint32_t)_sourceWidth << 16) / _drawWidth;
+    uint32_t sourceXFixed = 0;
+    for (uint16_t x = 0; x < _drawWidth; ++x) {
+      _scaleColumns[x] = (uint16_t)min<uint32_t>(_sourceWidth - 1, sourceXFixed >> 16);
+      sourceXFixed += xStep;
+    }
     return true;
   }
 
@@ -1215,28 +1296,77 @@ private:
   }
 
   void scaleFrame(const VideoH264::Frame &frame, uint16_t *destination) {
-    const uint32_t sourceW = frame.width, sourceH = frame.height;
-    const uint32_t xStep = (sourceW << 16) / _drawWidth;
+    if (frame.width == _drawWidth && frame.height == _drawHeight) {
+      convertFrame(frame, destination);
+      return;
+    }
+    const ColorTables &tables = *_colorTables;
+    const uint16_t *columns = _scaleColumns;
+    const uint32_t sourceH = frame.height;
     const uint32_t yStep = (sourceH << 16) / _drawHeight;
     uint32_t sourceYFixed = 0;
+    uint32_t previousSourceY = UINT32_MAX;
     for (uint32_t y = 0; y < _drawHeight; ++y) {
-      // 16.16 nearest-neighbour mapping keeps aspect ratio without division
-      // in the pixel loop. This is materially faster on ESP32-S3.
       const uint32_t sourceY = min<uint32_t>(sourceH - 1, sourceYFixed >> 16);
-      uint32_t sourceXFixed = 0;
-      for (uint32_t x = 0; x < _drawWidth; ++x) {
-        const uint32_t sourceX = min<uint32_t>(sourceW - 1, sourceXFixed >> 16);
-        const int c = frame.y[sourceY * frame.yStride + sourceX] - 16;
-        const int d = frame.u[(sourceY / 2) * frame.uStride + sourceX / 2] - 128;
-        const int e = frame.v[(sourceY / 2) * frame.vStride + sourceX / 2] - 128;
-        const uint8_t r = clampChannel((298 * c + 409 * e + 128) >> 8);
-        const uint8_t g = clampChannel((298 * c - 100 * d - 208 * e + 128) >> 8);
-        const uint8_t b = clampChannel((298 * c + 516 * d + 128) >> 8);
-        destination[y * _drawWidth + x] = ((uint16_t)(r & 0xf8) << 8) |
-                                          ((uint16_t)(g & 0xfc) << 3) | (b >> 3);
-        sourceXFixed += xStep;
-      }
       sourceYFixed += yStep;
+      uint16_t *output = destination + y * _drawWidth;
+      if (sourceY == previousSourceY) {
+        // An upscaled row repeats the previous source row exactly.
+        memcpy(output, output - _drawWidth, _drawWidth * sizeof(uint16_t));
+        continue;
+      }
+      previousSourceY = sourceY;
+      const uint8_t *luma = frame.y + sourceY * frame.yStride;
+      const uint8_t *u = frame.u + (sourceY / 2) * frame.uStride;
+      const uint8_t *v = frame.v + (sourceY / 2) * frame.vStride;
+      // Adjacent destination columns usually share a chroma sample; compute
+      // its terms once per run rather than once per pixel.
+      uint32_t chromaX = UINT32_MAX;
+      ChromaTerms chroma{};
+      for (uint32_t x = 0; x < _drawWidth; ++x) {
+        const uint32_t sourceX = columns[x];
+        if ((sourceX >> 1) != chromaX) {
+          chromaX = sourceX >> 1;
+          chroma = chromaTerms(u[chromaX], v[chromaX]);
+        }
+        output[x] = packPixel(tables, luma[sourceX], chroma);
+      }
+    }
+  }
+
+  // Native-size frames convert in 2x2 blocks that share one chroma sample.
+  void convertFrame(const VideoH264::Frame &frame, uint16_t *destination) {
+    const ColorTables &tables = *_colorTables;
+    const uint32_t width = _drawWidth;
+    const uint32_t evenWidth = width & ~1U;
+    for (uint32_t y = 0; y < _drawHeight; y += 2) {
+      const bool secondRow = y + 1 < _drawHeight;
+      const uint8_t *luma0 = frame.y + y * frame.yStride;
+      const uint8_t *luma1 = luma0 + frame.yStride;
+      const uint8_t *u = frame.u + (y / 2) * frame.uStride;
+      const uint8_t *v = frame.v + (y / 2) * frame.vStride;
+      uint16_t *output0 = destination + y * width;
+      uint16_t *output1 = output0 + width;
+      if (secondRow) {
+        for (uint32_t x = 0; x < evenWidth; x += 2) {
+          const ChromaTerms chroma = chromaTerms(u[x / 2], v[x / 2]);
+          output0[x] = packPixel(tables, luma0[x], chroma);
+          output0[x + 1] = packPixel(tables, luma0[x + 1], chroma);
+          output1[x] = packPixel(tables, luma1[x], chroma);
+          output1[x + 1] = packPixel(tables, luma1[x + 1], chroma);
+        }
+      } else {
+        for (uint32_t x = 0; x < evenWidth; x += 2) {
+          const ChromaTerms chroma = chromaTerms(u[x / 2], v[x / 2]);
+          output0[x] = packPixel(tables, luma0[x], chroma);
+          output0[x + 1] = packPixel(tables, luma0[x + 1], chroma);
+        }
+      }
+      if (evenWidth != width) {
+        const ChromaTerms chroma = chromaTerms(u[evenWidth / 2], v[evenWidth / 2]);
+        output0[evenWidth] = packPixel(tables, luma0[evenWidth], chroma);
+        if (secondRow) output1[evenWidth] = packPixel(tables, luma1[evenWidth], chroma);
+      }
     }
   }
 
@@ -1698,6 +1828,8 @@ private:
     free(_audioBuffer); _audioBuffer = nullptr; _audioBufferBytes = 0;
     free(_readWindow); _readWindow = nullptr; _readWindowStart = _readWindowBytes = 0;
     free(_audioScratch); _audioScratch = nullptr;
+    free(_colorTables); _colorTables = nullptr;
+    free(_scaleColumns); _scaleColumns = nullptr; _scaleColumnCount = 0;
     free(_pcmRing); _pcmRing = nullptr; _pcmRead = _pcmWrite = _pcmCount = 0;
     releaseFrameSlots();
     _videoCodec = VideoCodec::None;
