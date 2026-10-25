@@ -1,5 +1,6 @@
 // The upstream build picks an x86 or ARM selector at build-system level.
 // ESP32-S3 instead always uses its portable generic function table.
+#include "Lib264BuildConfig.h"
 #include "../../../third_party/lib264/decoder/ih264d_structs.h"
 #include "../../../third_party/lib264/decoder/ih264d_function_selector.h"
 
