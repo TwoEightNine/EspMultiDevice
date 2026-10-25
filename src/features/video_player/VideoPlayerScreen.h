@@ -37,6 +37,7 @@ private:
   static constexpr uint16_t PlaybackControlSize = 40;
   static constexpr uint16_t PlaybackControlUnderlaySize = PlaybackControlSize + 4;
   static constexpr uint32_t AutoFullScreenDelayMs = 2000;
+  static constexpr uint8_t NoTransferSlot = 0xff;
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   SecretStorage &_secretStorage;
@@ -62,6 +63,8 @@ private:
   uint16_t _viewportHeight;
   uint16_t _sourceWidth;
   uint16_t _sourceHeight;
+  // Worker frame slot borrowed by an in-flight DMA display transfer.
+  uint8_t _transferSlot;
   int16_t _playButtonUnderlayX;
   int16_t _playButtonUnderlayY;
   uint16_t _playButtonUnderlay[PlaybackControlUnderlaySize * PlaybackControlUnderlaySize];
@@ -82,6 +85,7 @@ private:
   void scheduleAutoFullScreen();
   void updateStream(uint32_t nowMs);
   void presentFrames();
+  void completeFrameTransfer(bool drawChrome);
   void handleSdCardEvent(SdCardEvent event);
   void draw(bool full = true);
   void drawEmbeddedChrome();

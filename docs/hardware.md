@@ -66,6 +66,8 @@ TFT_eSPI reads its library-level `User_Setup.h`, not a project-local copy. In `/
 #define TFT_D7   11
 ```
 
+Video frames bypass TFT_eSPI's bit-banged GPIO writes: `DisplayDmaBlitter` drives the same `TFT_D0`–`TFT_D7`, `TFT_DC`, and `TFT_WR` pins with the ESP32-S3 LCD_CAM i80 peripheral at a 20 MHz write clock (`PixelClockHz` in `src/core/DisplayDmaBlitter.cpp`), routed through the GPIO matrix only for the duration of each transfer, so no rewiring is needed. `TFT_CS` remains a GPIO and is high whenever the routing changes. Lower the clock if long data wires show corrupted rows during video; a failed DMA transfer logs `[Display] DMA blit disabled` and video falls back to TFT_eSPI.
+
 Supply the display and SD module according to their module documentation. A pin marked `LED`, `LED_A`, or `A` is normally raw backlight supply, not a GPIO control.
 
 ## Audio connections

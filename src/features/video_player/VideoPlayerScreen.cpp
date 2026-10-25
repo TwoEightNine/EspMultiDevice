@@ -18,6 +18,7 @@ extern "C" {
 #include "../../media/VideoLegacy.h"
 
 #include <esp32-hal-psram.h>
+#include <esp_heap_caps.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <stdlib.h>
@@ -26,6 +27,8 @@ extern "C" {
 namespace {
 constexpr uint8_t FrameSlots = 2;
 constexpr uint16_t IoChunkBytes = 8192;
+// LCD_CAM GDMA reads presented slots directly from PSRAM in 64-byte bursts.
+constexpr size_t FrameSlotAlignment = 64;
 constexpr uint16_t PcmFrames = 512;
 constexpr uint32_t AudioRingFrames = 16384;
 // A H.264 access unit plus RGB conversion can occupy this worker for more
@@ -970,8 +973,10 @@ private:
       _drawX = (_viewportWidth - _drawWidth) / 2;
     }
     const size_t bytes = (size_t)_drawWidth * _drawHeight * sizeof(uint16_t);
+    const size_t allocationBytes = (bytes + FrameSlotAlignment - 1) & ~(FrameSlotAlignment - 1);
     for (uint8_t index = 0; index < FrameSlots; ++index) {
-      _slots[index].pixels = static_cast<uint16_t *>(ps_malloc(bytes));
+      _slots[index].pixels = static_cast<uint16_t *>(
+          heap_caps_aligned_alloc(FrameSlotAlignment, allocationBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
       if (!_slots[index].pixels) {
         setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Display frame buffers need PSRAM")));
         return false;
@@ -1726,13 +1731,15 @@ VideoPlayerScreen::VideoPlayerScreen(Navigator &navigator, TouchController &touc
       _closeRequested(false), _autoPlay(false), _viewModeChangePending(false),
       _playButtonUnderlayValid(false), _durationMs(0), _elapsedMs(0), _lastDrawMs(0),
       _autoFullScreenAtMs(0), _viewportWidth(0), _viewportHeight(0), _sourceWidth(0),
-      _sourceHeight(0), _playButtonUnderlayX(0), _playButtonUnderlayY(0), _playButtonUnderlay{} {}
+      _sourceHeight(0), _transferSlot(NoTransferSlot), _playButtonUnderlayX(0), _playButtonUnderlayY(0),
+      _playButtonUnderlay{} {}
 
 VideoPlayerScreen::~VideoPlayerScreen() {
   delete _stream;
 }
 
 void VideoPlayerScreen::onEnter(const ScreenData &data) {
+  completeFrameTransfer(false);
   resetView();
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _sdMounted = _sdCard.isMounted();
@@ -1766,15 +1773,19 @@ void VideoPlayerScreen::onEnter(const ScreenData &data) {
 }
 
 void VideoPlayerScreen::onExit() {
+  completeFrameTransfer(false);
   if (_stream && !_closeRequested) _stream->pause();
   restorePortraitOrientation();
 }
 
 bool VideoPlayerScreen::releaseResources() {
-  if (!_stream) return true;
-  if (!_stream->end()) return false;
-  delete _stream;
-  _stream = nullptr;
+  completeFrameTransfer(false);
+  if (_stream) {
+    if (!_stream->end()) return false;
+    delete _stream;
+    _stream = nullptr;
+  }
+  _display.endDmaImages();
   restorePortraitOrientation();
   return true;
 }
@@ -1817,6 +1828,8 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
     else if (_state == State::Finished) {
       Serial.println(F("[Video] UI replay"));
       _autoPlay = true;
+      // Replay frees the worker's frame slots before reopening the source.
+      completeFrameTransfer(false);
       _stream->replay();
       scheduleAutoFullScreen();
     }
@@ -1830,6 +1843,7 @@ void VideoPlayerScreen::handleTouch(const TouchPoint &point) {
 
 void VideoPlayerScreen::setOrientation(Orientation orientation, bool configureStream) {
   if (_orientation == orientation) return;
+  completeFrameTransfer(false);
   _orientation = orientation;
   const uint8_t rotation = landscape() ? DisplayOrientation::Landscape
                                        : DisplayOrientation::Portrait;
@@ -1950,6 +1964,8 @@ void VideoPlayerScreen::requestClose() {
   _state = State::Closing;
   _autoFullScreenAtMs = 0;
   Serial.println(F("[Video] UI close"));
+  // The worker frees its frame slots while stopping; GDMA must be done first.
+  completeFrameTransfer(false);
   if (_stream) _stream->requestStop();
   draw();
 }
@@ -1971,6 +1987,7 @@ void VideoPlayerScreen::updateStream(uint32_t nowMs) {
     case VideoStreamWorker::Phase::Paused: _state = State::Paused; presentFrames(); break;
     case VideoStreamWorker::Phase::Finished: _state = State::Finished; presentFrames(); break;
     case VideoStreamWorker::Phase::Error:
+      completeFrameTransfer(false);
       _state = State::Error;
       _error = snapshot.error;
       useEmbeddedErrorMode();
@@ -1986,6 +2003,12 @@ void VideoPlayerScreen::updateStream(uint32_t nowMs) {
 
 void VideoPlayerScreen::presentFrames() {
   if (!_stream || (_state != State::Playing && _state != State::Paused && _state != State::Finished)) return;
+  // An in-flight transfer keeps its slot borrowed while the worker decodes
+  // into the other one; the UI loop keeps polling touch meanwhile.
+  if (_transferSlot != NoTransferSlot) {
+    if (_display.dmaImageActive()) return;
+    completeFrameTransfer(true);
+  }
   VideoStreamWorker::Frame newest;
   bool haveFrame = false;
   VideoStreamWorker::Frame frame;
@@ -2000,13 +2023,27 @@ void VideoPlayerScreen::presentFrames() {
   if (!haveFrame) return;
   if (_viewModeChangePending) applyViewMode(_pendingViewMode, true);
   if (newest.pixels && newest.width && newest.height) {
-    _display.tft().pushImage(newest.x, viewportTop() + newest.y, newest.width, newest.height,
+    const int16_t frameY = viewportTop() + newest.y;
+    capturePlayButtonUnderlay(newest.pixels, newest.x, frameY, newest.width, newest.height);
+    if (_display.beginDmaImage(newest.x, frameY, newest.width, newest.height, newest.pixels)) {
+      // Embedded chrome is drawn over the frame once the transfer completes.
+      _transferSlot = newest.slot;
+      return;
+    }
+    _display.tft().pushImage(newest.x, frameY, newest.width, newest.height,
                              const_cast<uint16_t *>(newest.pixels));
-    capturePlayButtonUnderlay(newest.pixels, newest.x, viewportTop() + newest.y,
-                              newest.width, newest.height);
   }
   _stream->releaseFrame(newest.slot, false);
   if (_viewMode == ViewMode::Embedded) drawEmbeddedChrome();
+}
+
+void VideoPlayerScreen::completeFrameTransfer(bool drawChrome) {
+  if (_transferSlot == NoTransferSlot) return;
+  _display.finishDmaImage();
+  const uint8_t slot = _transferSlot;
+  _transferSlot = NoTransferSlot;
+  if (_stream) _stream->releaseFrame(slot, false);
+  if (drawChrome && _viewMode == ViewMode::Embedded) drawEmbeddedChrome();
 }
 
 void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
@@ -2014,6 +2051,7 @@ void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::Mounted) { _sdMounted = true; return; }
   _sdMounted = false;
   Serial.printf("[Video] SD event=%u\n", static_cast<unsigned>(event));
+  completeFrameTransfer(false);
   if (_stream) _stream->requestStop();
   _state = State::Error;
   _error = event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable");
@@ -2023,10 +2061,9 @@ void VideoPlayerScreen::handleSdCardEvent(SdCardEvent event) {
 
 void VideoPlayerScreen::draw(bool full) {
   if (!_display.isReady()) return;
-  TFT_eSPI &tft = _display.tft();
-  if (full) {
-    tft.fillScreen(TFT_BLACK);
-  }
+  // Full-screen periodic redraws draw nothing, so they must not wait for an
+  // in-flight frame transfer through tft().
+  if (full) _display.clear(TFT_BLACK);
   if (_viewMode == ViewMode::Embedded) drawEmbeddedChrome();
   if (_state == State::Error) drawError();
 }
