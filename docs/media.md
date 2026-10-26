@@ -54,7 +54,7 @@ Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; s
 
 Animated GIF and WebP stream directly from their source and never read or write an `.emga` sidecar; existing sidecars remain orphaned cache files until Files deletes or renames their source. `ImageView` routes a WebP to streaming when its first chunk is `VP8X` with the animation flag set, reading the canvas size from that header. Simple (`VP8 `/`VP8L`) and non-animated extended WebP stay on the cached still path.
 - **Worker:** `AnimationStreamWorker` runs on the core the Arduino loop does not use and owns the source file and the decoder while it runs. It scales each frame, nearest-neighbour with precomputed row and column maps, into one of three packed RGB565 PSRAM slots sized to the draw rectangle.
-  - **GIF** decodes into AnimatedGIF's cooked PSRAM canvas, which holds five bytes per source pixel plus three per column. Each GIF stream allocates its own `AnimatedGIF` state (about 25 KB of LZW tables and file/line buffers) in internal RAM when at least 32 KB of internal RAM would stay free, and otherwise in PSRAM. Serial logs `[Anim] GIF decoder state N bytes in internal|PSRAM RAM`.
+  - **GIF** decodes into AnimatedGIF's cooked PSRAM canvas, which holds five bytes per source pixel plus three per column. Each GIF stream allocates its own `AnimatedGIF` state (about 25 KB of LZW tables and file/line buffers) in internal RAM when at least 32 KB of internal RAM would stay free, and otherwise in PSRAM. Serial logs `[Anim] GIF decoder state N bytes in internal|PSRAM RAM (internal free F, largest L, reserve R)`.
   - AnimatedGIF and libwebp build at `-O2` through their `src/vendor_shims/` wrappers, like lib264, instead of the sketch-wide `-Os`.
   - **WebP** first loads the whole source into PSRAM through an 8 KiB internal bounce buffer, one bounded SD transaction per chunk. It then decodes with libwebp's `WebPAnimDecoder` in premultiplied `MODE_rgbA`, so transparency composes over black. libwebp keeps current and previous RGBA canvases (eight bytes per canvas pixel) beside the source.
   - Before starting, the worker checks free and largest-block PSRAM against these figures. It refuses with the required and available sizes rather than failing part-way.
@@ -67,6 +67,11 @@ Animated GIF and WebP stream directly from their source and never read or write 
   - **GIF:** a file without a NETSCAPE extension plays once, a loop count of zero repeats forever, and N repeats N more times.
   - **WebP:** the loop count is the total number of passes, and zero repeats forever.
   - The final frame stays on screen, and the worker releases the source and decoder.
+- **Resident replay:** a looping animation (anything but a single pass) records its first pass, giving each frame its own packed PSRAM slot. The slot table is sized at start from free PSRAM minus the decoder, capped at 512 frames. A WebP whose frame count already exceeds it never records.
+  - While recording, the worker allocates a new slot per frame. Before each allocation it checks that the frame still leaves 512 KB of PSRAM free.
+  - When a frame no longer fits, recording is abandoned: shown frames are freed, playback continues streaming every loop, and surplus buffers return to PSRAM as they are shown. Serial logs `[Anim] first pass does not fit in PSRAM; streaming every loop`.
+  - When the first pass completes in memory, buffers that hold no first-pass frame are freed, and the worker releases the source, decoder, canvas, and scaler maps and stays idle. Serial logs `[Anim] replaying N resident frame(s) (K KB); decoder released`.
+  - Later passes show the resident frames at their authored delays on the same timeline, honouring the loop count. The first pass still plays at decode speed when decoding is slow.
 - **Damaged files:** a single-frame animation is decoded once. A truncated or damaged file loops the frames that decoded; it fails only if a pass cannot decode its first frame.
 - **Display:** the first frame replaces the black canvas directly. When it takes longer than 150 ms, a "Loading animation" label appears meanwhile, with the WebP source-load percentage or, for GIF, an indeterminate progress bar. Each frame goes to the panel as one asynchronous LCD_CAM DMA transfer from its 64-byte-aligned slot (`DisplayController::beginDmaImage()`), so a whole frame appears at once and the UI loop keeps polling touch meanwhile.
   - The UI takes no new frame until the transfer completes, and it finishes any transfer before the worker may free slots.
@@ -76,7 +81,7 @@ Animated GIF and WebP stream directly from their source and never read or write 
 - **Serial log:**
   - the time from open to the first frame
   - after the first pass, `[Anim] pass 1: N frame(s), T ms as authored, canvas WxH, frame B bytes`
-  - every 2 s, `[Anim] dec=… pres=… late=… lagMs=… decMs=avg/max scaleMs=avg psram=free/largest`, where `late` counts timeline restarts and `lagMs` totals the slowdown
+  - every 2 s, `[Anim] stream|record|replay slots=… dec=… pres=… late=… lagMs=… decMs=avg/max scaleMs=avg psram=free/largest`, where `slots` counts allocated frame buffers, `late` counts timeline restarts, and `lagMs` totals the slowdown
   - the worker's free stack when it stops
 
 Use `tools/generate_animation_fixtures.py` to generate the GIF/WebP fixtures under `tests/animation/fixtures/`; their expected results and the measurement procedure are in `tests/animation/README.md`.

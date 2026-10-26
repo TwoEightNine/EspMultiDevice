@@ -1042,8 +1042,10 @@ void ImageView::logStreamStats(uint32_t nowMs, bool force) {
   _streamStatsAtMs = nowMs;
   const AnimationStreamWorker::Stats stats = _stream.stats();
   if (!force && stats.phase != AnimationStreamWorker::Phase::Running) return;
-  Serial.printf("[Anim] dec=%lu pres=%lu late=%lu lagMs=%lu decMs=%lu.%lu/%lu scaleMs=%lu.%lu "
-                "psram=%lu/%lu\n",
+  const char *mode = stats.mode == AnimationStreamWorker::Mode::Replay ? "replay"
+                   : stats.mode == AnimationStreamWorker::Mode::Record ? "record" : "stream";
+  Serial.printf("[Anim] %s slots=%u dec=%lu pres=%lu late=%lu lagMs=%lu decMs=%lu.%lu/%lu "
+                "scaleMs=%lu.%lu psram=%lu/%lu\n", mode, (unsigned)stats.slots,
                 (unsigned long)stats.decoded, (unsigned long)_streamPresentedFrames,
                 (unsigned long)stats.late, (unsigned long)stats.lagMs,
                 (unsigned long)(stats.decodeAverageUs / 1000),

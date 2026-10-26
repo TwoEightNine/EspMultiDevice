@@ -18,16 +18,25 @@ struct WebPAnimDecoder;
 // it shows the first frame. Every decoded frame is shown in order: when the
 // decoder is slower than the authored delays, playback slows down rather than
 // discarding frames it has already paid to decode.
+//
+// While a looping animation's first pass fits in PSRAM, each of its frames
+// keeps its own slot. Once that pass is complete the worker releases the
+// source and decoder, and later passes replay the resident frames at their
+// authored timing.
 class AnimationStreamWorker {
 public:
-  static constexpr uint8_t SlotCount = 3;
-  static constexpr uint8_t NoSlot = 0xff;
+  // Packed frame buffers the decoder cycles through while streaming.
+  static constexpr uint16_t StreamSlots = 3;
+  static constexpr uint16_t NoSlot = 0xffff;
 
   enum class Source : uint8_t { Gif, Webp };
   enum class Phase : uint8_t { Idle, Running, Finished, Error };
+  // Stream reuses StreamSlots buffers; Record keeps every first-pass frame;
+  // Replay shows the resident frames without decoding.
+  enum class Mode : uint8_t { Stream, Record, Replay };
 
   struct Frame {
-    uint8_t slot = NoSlot;
+    uint16_t slot = NoSlot;
     const uint16_t *pixels = nullptr;
     uint32_t sequence = 0;
     uint32_t dueMs = 0;
@@ -48,6 +57,9 @@ public:
     // reads incrementally and reports zero.
     uint32_t sourceLoaded = 0;
     uint32_t sourceSize = 0;
+    Mode mode = Mode::Stream;
+    // Frame buffers currently allocated.
+    uint16_t slots = 0;
   };
 
   explicit AnimationStreamWorker(SecretStorage &storage);
@@ -68,12 +80,13 @@ public:
   // restarts the timeline from itself. The slot stays the UI's until
   // releaseFrame().
   bool takeDueFrame(uint32_t nowMs, Frame &frame);
-  void releaseFrame(uint8_t slot);
+  void releaseFrame(uint16_t slot);
   void startTimeline(uint32_t startMs);
   Stats stats(String *error = nullptr);
 
 private:
-  enum class SlotState : uint8_t { Free, Writing, Ready, Displayed };
+  // Kept holds a shown first-pass frame for replay.
+  enum class SlotState : uint8_t { Free, Writing, Ready, Displayed, Kept };
   enum class DecodeResult : uint8_t { Frame, LastFrame, EndOfPass, Failed };
 
   struct Slot {
@@ -81,6 +94,7 @@ private:
     SlotState state;
     uint32_t sequence;
     uint32_t dueMs;
+    bool resident;
   };
 
   SecretStorage &_storage;
@@ -111,7 +125,20 @@ private:
   WebPAnimDecoder *_webpDecoder;
   const uint8_t *_webpFrame;
   uint32_t _webpPreviousTimestamp;
-  Slot _slots[SlotCount];
+  // Sized at start for the largest first pass PSRAM could hold; buffers are
+  // allocated as frames need them.
+  Slot *_slots;
+  uint16_t _slotCapacity;
+  uint16_t _allocatedSlots;
+  uint32_t _slotBytes;
+  // Slot holding each first-pass frame, in order.
+  uint16_t *_frameSlots;
+  uint32_t _expectedFrames;
+  Mode _mode;
+  uint16_t _residentFrames;
+  uint32_t _passDurationMs;
+  // The next sequence the UI will take.
+  uint32_t _nextSequence;
   bool _timelineStarted;
   uint32_t _timelineStartMs;
   Phase _phase;
@@ -139,9 +166,14 @@ private:
   void restartPass();
   void clearGifCanvas();
   void scaleInto(uint16_t *destination);
-  uint8_t acquireSlot();
-  void publish(uint8_t slot, uint32_t sequence, uint32_t dueMs);
-  void returnSlot(uint8_t slot);
+  uint16_t acquireSlot();
+  bool allocateSlotBuffer(Slot &slot);
+  void abandonRecordingLocked();
+  void beginReplay(uint16_t frames, uint32_t durationMs);
+  bool admitLocked(uint32_t nowMs, uint32_t dueMs);
+  bool takeReplayFrameLocked(uint32_t nowMs, Frame &frame);
+  void publish(uint16_t slot, uint32_t sequence, uint32_t dueMs, int32_t firstPassFrame);
+  void returnSlot(uint16_t slot);
   bool allocateGifDecoder(String &error);
   void freeGifDecoder();
   void fail(const char *message);

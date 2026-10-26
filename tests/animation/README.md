@@ -191,3 +191,29 @@ of `drop=`; read `drop=0` in the earlier checklists as `late=0`.
    bytes size any later PSRAM replay.
 6. Static WebP and Files thumbnails still render; libwebp's build change
    affects them too.
+
+## Phase 6 checks: resident replay
+
+A looping animation now records its first pass in PSRAM and replays later
+loops from memory. The stats line starts with `stream`, `record`, or `replay`
+and reports `slots=` (allocated frame buffers).
+
+1. Open each target animation. The first loop plays at decode speed, as in
+   the previous build. Then serial logs
+   `[Anim] replaying N resident frame(s) (K KB); decoder released`, `N` matches
+   the `pass 1:` frame count, and the stats lines say `replay`.
+2. From the second loop on, playback runs at the authored speed: a loop of
+   about 2 s takes about 2 s. `dec=` stops increasing, and `late=` and
+   `lagMs=` stay flat.
+3. `gif_loop2.gif` replays two more passes, then stops on frame 9.
+   `gif_no_loop.gif` never records: there is no `replaying` line, and the
+   stats say `stream`.
+4. `gif_1000x1000_100ms.gif` keeps its decoder canvas (about 5 MB) during
+   recording. Either it replays (12 frames, about 1.4 MB) or it logs
+   `first pass does not fit in PSRAM; streaming every loop` and keeps
+   playing. It must not stop with an error.
+5. Close a target during recording and during replay. `psram=` free returns to
+   the same value on the next open.
+6. Read the `GIF decoder state` line's `internal free` and `largest` figures.
+   They show whether the 32 KB internal reserve is what keeps the decoder in
+   PSRAM.

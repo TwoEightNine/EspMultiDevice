@@ -188,7 +188,7 @@ private:
   JPEGDEC _jpeg;
   // Animated GIF and WebP stream through this worker.
   AnimationStreamWorker _stream;
-  uint8_t _streamSlot;
+  uint16_t _streamSlot;
   const uint16_t *_streamPixels;
   uint32_t _streamLoadingAtMs;
   uint32_t _streamLoadingDrawnMs;

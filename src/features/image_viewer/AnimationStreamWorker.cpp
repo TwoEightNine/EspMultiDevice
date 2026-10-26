@@ -19,6 +19,9 @@ constexpr size_t SlotAlignment = 64;
 constexpr uint32_t LateToleranceMs = 20;
 // Internal RAM left free after placing the GIF decoder state there.
 constexpr size_t InternalReserveBytes = 32768;
+// PSRAM a resident first pass must leave free for the rest of the system.
+constexpr uint32_t ReplayReserveBytes = 512UL * 1024UL;
+constexpr uint16_t MaxResidentFrames = 512;
 constexpr uint32_t LockRetryMs = 20;
 constexpr uint32_t SourceCloseLockMs = 250;
 // WebP sources load through an internal-RAM bounce buffer, one bounded SD
@@ -47,7 +50,9 @@ AnimationStreamWorker::AnimationStreamWorker(SecretStorage &storage)
       _lock(nullptr), _stopped(nullptr), _stopRequested(false), _decoderOpen(false), _sourceBytes(0),
       _sourceWidth(0), _sourceHeight(0), _canvasPixels(0), _drawWidth(0), _drawHeight(0),
       _columnMap(nullptr), _rowMap(nullptr), _passLimit(1), _webpData(nullptr), _webpLoaded(0),
-      _webpDecoder(nullptr), _webpFrame(nullptr), _webpPreviousTimestamp(0), _slots{},
+      _webpDecoder(nullptr), _webpFrame(nullptr), _webpPreviousTimestamp(0), _slots(nullptr),
+      _slotCapacity(0), _allocatedSlots(0), _slotBytes(0), _frameSlots(nullptr), _expectedFrames(0),
+      _mode(Mode::Stream), _residentFrames(0), _passDurationMs(0), _nextSequence(0),
       _timelineStarted(false), _timelineStartMs(0),
       _phase(Phase::Idle), _error{}, _decoded(0), _late(0), _lagMs(0),
       _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {}
@@ -88,24 +93,35 @@ bool AnimationStreamWorker::start(Source source, const String &path, bool secret
   const uint32_t slotBytes = (uint32_t)drawWidth * drawHeight * sizeof(uint16_t);
   const uint32_t freePsram = ESP.getFreePsram();
   const uint32_t largestPsram = ESP.getMaxAllocPsram();
-  if (decoderBytes + (uint64_t)slotBytes * SlotCount > freePsram || largestBlock > largestPsram) {
+  if (decoderBytes + (uint64_t)slotBytes * StreamSlots > freePsram || largestBlock > largestPsram) {
     error = String(F("Animation needs too much PSRAM (")) +
-            String((uint32_t)((decoderBytes + (uint64_t)slotBytes * SlotCount) / 1024ULL)) +
+            String((uint32_t)((decoderBytes + (uint64_t)slotBytes * StreamSlots) / 1024ULL)) +
             F(" KB; free ") + String(freePsram / 1024) + F(" KB, largest ") +
             String(largestPsram / 1024) + F(" KB)");
     stop();
     return false;
   }
-  for (uint8_t index = 0; index < SlotCount; ++index) {
-    _slots[index].pixels = static_cast<uint16_t *>(
-        heap_caps_aligned_alloc(SlotAlignment, slotBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!_slots[index].pixels) {
-      error = String(F("Animation frames need ")) + String((slotBytes * SlotCount) / 1024) +
-              F(" KB of PSRAM; largest ") + String(ESP.getMaxAllocPsram() / 1024) + F(" KB");
-      stop();
-      return false;
-    }
-    _slots[index].state = SlotState::Free;
+  // Room for a whole first pass beside the decoder, the stream ring, and the
+  // reserve. The progressive check while recording is authoritative; this
+  // only sizes the slot table.
+  const uint64_t spare = freePsram > decoderBytes + ReplayReserveBytes
+    ? freePsram - decoderBytes - ReplayReserveBytes : 0;
+  uint64_t capacity = spare / slotBytes;
+  if (capacity > MaxResidentFrames) capacity = MaxResidentFrames;
+  if (capacity < StreamSlots) capacity = StreamSlots;
+  _slotCapacity = (uint16_t)capacity;
+  _slotBytes = slotBytes;
+  _slots = static_cast<Slot *>(heap_caps_calloc(_slotCapacity, sizeof(Slot), MALLOC_CAP_8BIT));
+  _frameSlots = static_cast<uint16_t *>(heap_caps_calloc(_slotCapacity, sizeof(uint16_t), MALLOC_CAP_8BIT));
+  bool allocated = _slots && _frameSlots;
+  for (uint16_t index = 0; allocated && index < StreamSlots; ++index) {
+    allocated = allocateSlotBuffer(_slots[index]);
+  }
+  if (!allocated) {
+    error = String(F("Animation frames need ")) + String((slotBytes * StreamSlots) / 1024) +
+            F(" KB of PSRAM; largest ") + String(ESP.getMaxAllocPsram() / 1024) + F(" KB");
+    stop();
+    return false;
   }
   if (source == Source::Gif && !allocateGifDecoder(error)) {
     stop();
@@ -168,6 +184,11 @@ void AnimationStreamWorker::stop() {
   _stackHighWater = 0;
   _webpLoaded = 0;
   _sourceBytes = 0;
+  _expectedFrames = 0;
+  _mode = Mode::Stream;
+  _residentFrames = 0;
+  _passDurationMs = 0;
+  _nextSequence = 0;
 }
 
 bool AnimationStreamWorker::allocateGifDecoder(String &error) {
@@ -176,8 +197,9 @@ bool AnimationStreamWorker::allocateGifDecoder(String &error) {
   // the system; PSRAM still works, just more slowly.
   const size_t bytes = sizeof(AnimatedGIF);
   void *memory = nullptr;
-  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= bytes &&
-      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= bytes + InternalReserveBytes) {
+  const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const size_t internalLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (internalLargest >= bytes && internalFree >= bytes + InternalReserveBytes) {
     memory = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   }
   const bool internal = memory != nullptr;
@@ -189,8 +211,9 @@ bool AnimationStreamWorker::allocateGifDecoder(String &error) {
   _decoder = new (memory) AnimatedGIF();
   // Leaves the frame-buffer pointer null for closeDecoder().
   _decoder->begin(GIF_PALETTE_RGB565_LE);
-  Serial.printf("[Anim] GIF decoder state %u bytes in %s RAM\n", (unsigned)bytes,
-                internal ? "internal" : "PSRAM");
+  Serial.printf("[Anim] GIF decoder state %u bytes in %s RAM (internal free %u, largest %u, "
+                "reserve %u)\n", (unsigned)bytes, internal ? "internal" : "PSRAM", (unsigned)internalFree,
+                (unsigned)internalLargest, (unsigned)InternalReserveBytes);
   return true;
 }
 
@@ -201,49 +224,108 @@ void AnimationStreamWorker::freeGifDecoder() {
   _decoder = nullptr;
 }
 
+bool AnimationStreamWorker::allocateSlotBuffer(Slot &slot) {
+  slot = {};
+  slot.pixels = static_cast<uint16_t *>(
+      heap_caps_aligned_alloc(SlotAlignment, _slotBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!slot.pixels) return false;
+  slot.state = SlotState::Free;
+  ++_allocatedSlots;
+  return true;
+}
+
 void AnimationStreamWorker::freeSlots() {
-  for (uint8_t index = 0; index < SlotCount; ++index) {
-    if (_slots[index].pixels) heap_caps_free(_slots[index].pixels);
-    _slots[index] = {};
+  if (_slots) {
+    for (uint16_t index = 0; index < _slotCapacity; ++index) {
+      if (_slots[index].pixels) heap_caps_free(_slots[index].pixels);
+    }
+    heap_caps_free(_slots);
   }
+  if (_frameSlots) heap_caps_free(_frameSlots);
+  _slots = nullptr;
+  _frameSlots = nullptr;
+  _slotCapacity = 0;
+  _allocatedSlots = 0;
+  _slotBytes = 0;
 }
 
 bool AnimationStreamWorker::takeDueFrame(uint32_t nowMs, Frame &frame) {
-  if (!_task || !_lock) return false;
+  if (!_task || !_lock || !_slots) return false;
   LockGuard guard(_lock);
-  uint8_t chosen = NoSlot;
-  for (uint8_t index = 0; index < SlotCount; ++index) {
+  if (_mode == Mode::Replay) return takeReplayFrameLocked(nowMs, frame);
+  uint16_t chosen = NoSlot;
+  for (uint16_t index = 0; index < _slotCapacity; ++index) {
     const Slot &slot = _slots[index];
     if (slot.state != SlotState::Ready) continue;
     if (chosen == NoSlot || slot.sequence < _slots[chosen].sequence) chosen = index;
   }
   if (chosen == NoSlot) return false;
   Slot &slot = _slots[chosen];
-  if (_timelineStarted) {
-    const int32_t lateness = (int32_t)(nowMs - (_timelineStartMs + slot.dueMs));
-    if (lateness < 0) return false;
-    // A decoder slower than the authored delays makes every frame late. Show
-    // it now and measure the following delays from here, so playback slows
-    // instead of skipping, and never fast-forwards to catch up.
-    if (lateness > (int32_t)LateToleranceMs) {
-      _timelineStartMs = nowMs - slot.dueMs;
-      ++_late;
-      _lagMs += (uint32_t)lateness;
-    }
-  }
+  if (!admitLocked(nowMs, slot.dueMs)) return false;
   slot.state = SlotState::Displayed;
   frame.slot = chosen;
   frame.pixels = slot.pixels;
   frame.sequence = slot.sequence;
   frame.dueMs = slot.dueMs;
+  _nextSequence = slot.sequence + 1;
   return true;
 }
 
-void AnimationStreamWorker::releaseFrame(uint8_t slot) {
-  if (!_lock || slot >= SlotCount) return;
+bool AnimationStreamWorker::admitLocked(uint32_t nowMs, uint32_t dueMs) {
+  if (!_timelineStarted) return true;
+  const int32_t lateness = (int32_t)(nowMs - (_timelineStartMs + dueMs));
+  if (lateness < 0) return false;
+  // A decoder slower than the authored delays makes every frame late. Show
+  // it now and measure the following delays from here, so playback slows
+  // instead of skipping, and never fast-forwards to catch up.
+  if (lateness > (int32_t)LateToleranceMs) {
+    _timelineStartMs = nowMs - dueMs;
+    ++_late;
+    _lagMs += (uint32_t)lateness;
+  }
+  return true;
+}
+
+bool AnimationStreamWorker::takeReplayFrameLocked(uint32_t nowMs, Frame &frame) {
+  if (_residentFrames == 0) return false;
+  const uint32_t sequence = _nextSequence;
+  const uint32_t pass = sequence / _residentFrames;
+  if (_passLimit != 0 && pass >= _passLimit) {
+    // The last frame of the final pass stays on screen.
+    if (_phase == Phase::Running) _phase = Phase::Finished;
+    return false;
+  }
+  const uint16_t index = _frameSlots[sequence % _residentFrames];
+  const uint32_t dueMs = pass * _passDurationMs + _slots[index].dueMs;
+  if (!admitLocked(nowMs, dueMs)) return false;
+  frame.slot = index;
+  frame.pixels = _slots[index].pixels;
+  frame.sequence = sequence;
+  frame.dueMs = dueMs;
+  ++_nextSequence;
+  return true;
+}
+
+void AnimationStreamWorker::releaseFrame(uint16_t slot) {
+  if (!_lock || !_slots || slot >= _slotCapacity) return;
   {
     LockGuard guard(_lock);
-    if (_slots[slot].state == SlotState::Displayed) _slots[slot].state = SlotState::Free;
+    // Resident frames stay put during replay.
+    if (_mode == Mode::Replay) return;
+    Slot &released = _slots[slot];
+    if (released.state == SlotState::Displayed) {
+      if (_mode == Mode::Record && released.resident) {
+        released.state = SlotState::Kept;
+      } else if (_mode == Mode::Stream && _allocatedSlots > StreamSlots) {
+        // Buffers left over from an abandoned recording go back to PSRAM once
+        // shown; streaming needs only its ring.
+        heap_caps_free(released.pixels);
+        released = {};
+        --_allocatedSlots;
+      } else {
+        released.state = SlotState::Free;
+      }
+    }
   }
   if (_task) xTaskNotifyGive(_task);
 }
@@ -270,6 +352,8 @@ AnimationStreamWorker::Stats AnimationStreamWorker::stats(String *error) {
     copy.sourceLoaded = _webpLoaded;
     copy.sourceSize = _sourceBytes;
   }
+  copy.mode = _mode;
+  copy.slots = _allocatedSlots;
   if (error) *error = _error;
   return copy;
 }
@@ -283,6 +367,15 @@ void AnimationStreamWorker::run() {
   // time, and only its task invokes them.
   _current = this;
   const bool opened = _source == Source::Gif ? openGif() : openWebp();
+  if (opened) {
+    // Keep the first pass only when it can be replayed: the animation loops,
+    // and PSRAM could plausibly hold every frame.
+    LockGuard guard(_lock);
+    if (_passLimit != 1 && _slotCapacity > StreamSlots &&
+        (_expectedFrames == 0 || _expectedFrames <= _slotCapacity)) {
+      _mode = Mode::Record;
+    }
+  }
   if (opened && prepareScaler()) decodeLoop();
   // Release the source and decoder as soon as playback ends or fails; the
   // UI keeps showing its slot until it stops the worker.
@@ -402,6 +495,7 @@ bool AnimationStreamWorker::openWebp() {
   }
   // WebP loop count is the total number of passes; zero repeats forever.
   _passLimit = info.loop_count;
+  _expectedFrames = info.frame_count;
   _webpPreviousTimestamp = 0;
   return true;
 }
@@ -440,6 +534,7 @@ void AnimationStreamWorker::closeDecoder() {
   if (_rowMap) heap_caps_free(_rowMap);
   _columnMap = nullptr;
   _rowMap = nullptr;
+  freeGifDecoder();
 }
 
 void AnimationStreamWorker::clearGifCanvas() {
@@ -454,7 +549,7 @@ void AnimationStreamWorker::decodeLoop() {
   uint32_t dueMs = 0;
   bool reportedTruncation = false;
   while (!_stopRequested) {
-    uint8_t slot = acquireSlot();
+    uint16_t slot = acquireSlot();
     while (slot == NoSlot && !_stopRequested) {
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
       slot = acquireSlot();
@@ -514,7 +609,7 @@ void AnimationStreamWorker::decodeLoop() {
         _scaleTotalUs += scaleUs;
         ++_scaled;
       }
-      publish(slot, sequence, dueMs);
+      publish(slot, sequence, dueMs, passes == 0 ? (int32_t)passFrames : -1);
       ++sequence;
       ++passFrames;
       dueMs += delayMs <= ShortDelayMs ? ShortDelayReplacementMs : delayMs;
@@ -533,6 +628,11 @@ void AnimationStreamWorker::decodeLoop() {
       if (finishing) {
         LockGuard guard(_lock);
         if (_phase == Phase::Running) _phase = Phase::Finished;
+        return;
+      }
+      if (passes == 0 && _mode == Mode::Record) {
+        // Every first-pass frame is resident; run() now frees the decoder.
+        beginReplay((uint16_t)passFrames, dueMs);
         return;
       }
       ++passes;
@@ -619,10 +719,28 @@ void AnimationStreamWorker::scaleInto(uint16_t *destination) {
   }
 }
 
-uint8_t AnimationStreamWorker::acquireSlot() {
+uint16_t AnimationStreamWorker::acquireSlot() {
   LockGuard guard(_lock);
-  for (uint8_t index = 0; index < SlotCount; ++index) {
-    if (_slots[index].state == SlotState::Free) {
+  for (uint16_t index = 0; index < _slotCapacity; ++index) {
+    if (_slots[index].state == SlotState::Free && _slots[index].pixels) {
+      _slots[index].state = SlotState::Writing;
+      return index;
+    }
+  }
+  if (_mode != Mode::Record) return NoSlot;
+  // While recording, each first-pass frame keeps its own buffer.
+  if (_allocatedSlots < _slotCapacity && ESP.getMaxAllocPsram() >= _slotBytes &&
+      ESP.getFreePsram() >= _slotBytes + ReplayReserveBytes) {
+    for (uint16_t index = 0; index < _slotCapacity; ++index) {
+      if (_slots[index].pixels) continue;
+      if (!allocateSlotBuffer(_slots[index])) break;
+      _slots[index].state = SlotState::Writing;
+      return index;
+    }
+  }
+  abandonRecordingLocked();
+  for (uint16_t index = 0; index < _slotCapacity; ++index) {
+    if (_slots[index].state == SlotState::Free && _slots[index].pixels) {
       _slots[index].state = SlotState::Writing;
       return index;
     }
@@ -630,14 +748,56 @@ uint8_t AnimationStreamWorker::acquireSlot() {
   return NoSlot;
 }
 
-void AnimationStreamWorker::publish(uint8_t slot, uint32_t sequence, uint32_t dueMs) {
+void AnimationStreamWorker::abandonRecordingLocked() {
+  _mode = Mode::Stream;
+  uint16_t released = 0;
+  for (uint16_t index = 0; index < _slotCapacity; ++index) {
+    Slot &slot = _slots[index];
+    slot.resident = false;
+    if (slot.state != SlotState::Kept) continue;
+    heap_caps_free(slot.pixels);
+    slot = {};
+    --_allocatedSlots;
+    ++released;
+  }
+  Serial.printf("[Anim] first pass does not fit in PSRAM; streaming every loop (released %u "
+                "frame(s), free %lu)\n", (unsigned)released, (unsigned long)ESP.getFreePsram());
+}
+
+void AnimationStreamWorker::beginReplay(uint16_t frames, uint32_t durationMs) {
+  uint32_t residentBytes = 0;
+  {
+    LockGuard guard(_lock);
+    // Buffers that never held a first-pass frame are not needed for replay.
+    for (uint16_t index = 0; index < _slotCapacity; ++index) {
+      Slot &slot = _slots[index];
+      if (!slot.pixels || slot.resident) continue;
+      heap_caps_free(slot.pixels);
+      slot = {};
+      --_allocatedSlots;
+    }
+    _mode = Mode::Replay;
+    _residentFrames = frames;
+    _passDurationMs = durationMs;
+    residentBytes = (uint32_t)_allocatedSlots * _slotBytes;
+  }
+  Serial.printf("[Anim] replaying %u resident frame(s) (%lu KB); decoder released\n", (unsigned)frames,
+                (unsigned long)(residentBytes / 1024));
+}
+
+void AnimationStreamWorker::publish(uint16_t slot, uint32_t sequence, uint32_t dueMs,
+                                    int32_t firstPassFrame) {
   LockGuard guard(_lock);
   _slots[slot].sequence = sequence;
   _slots[slot].dueMs = dueMs;
   _slots[slot].state = SlotState::Ready;
+  if (_mode == Mode::Record && firstPassFrame >= 0) {
+    _slots[slot].resident = true;
+    _frameSlots[firstPassFrame] = slot;
+  }
 }
 
-void AnimationStreamWorker::returnSlot(uint8_t slot) {
+void AnimationStreamWorker::returnSlot(uint16_t slot) {
   LockGuard guard(_lock);
   if (_slots[slot].state == SlotState::Writing) _slots[slot].state = SlotState::Free;
 }
