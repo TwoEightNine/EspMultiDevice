@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include <memory>
 
 // A small seekable storage wrapper.  Media decoders use this exactly like an
 // fs::File; encryption stays here rather than leaking into decoder logic.
@@ -10,8 +11,8 @@ public:
   StorageFile();
   StorageFile(const fs::File &file, const uint8_t *key, uint16_t pin, bool encrypted);
 
-  operator bool() { return (bool)_file; }
-  bool operator!() { return !_file; }
+  operator bool() { return _file || _direct; }
+  bool operator!() { return !_file && !_direct; }
   int read(uint8_t *buffer, size_t length);
   int read(void *buffer, size_t length) { return read(static_cast<uint8_t *>(buffer), length); }
   size_t write(const uint8_t *buffer, size_t length);
@@ -19,14 +20,30 @@ public:
     return write(static_cast<const uint8_t *>(buffer), length);
   }
   bool seek(uint32_t position);
+  // Positional read. A direct reader reads through its own descriptor;
+  // otherwise this is seek() followed by read().
+  int readAt(uint32_t position, void *buffer, size_t length);
+  // Returns a read-only view of this file with its own unbuffered POSIX
+  // descriptor, for large positional reads with readAt(). Each request then
+  // reaches FatFs as one multi-sector read instead of 4 KiB stdio refills,
+  // and each view keeps its own cluster position, so independent forward
+  // streams over one file never rewind the FAT chain. A view only supports
+  // readAt() and close(); it uses one open-file slot and is invalid when
+  // none is free. Call with SpiBusLock held.
+  StorageFile directReader() const;
   size_t size() { return _file ? _file.size() : 0; }
   size_t position() { return _file ? _file.position() : 0; }
   uint32_t getLastWrite() { return _file ? _file.getLastWrite() : 0; }
   void flush() { if (_file) _file.flush(); }
-  void close() { if (_file) _file.close(); }
+  void close() {
+    if (_file) _file.close();
+    _direct.reset();
+  }
 
 private:
   fs::File _file;
+  // Shared so copies of a direct reader close the descriptor exactly once.
+  std::shared_ptr<int> _direct;
   const uint8_t *_key;
   uint16_t _pin;
   bool _encrypted;

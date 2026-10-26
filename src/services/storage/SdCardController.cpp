@@ -3,7 +3,9 @@
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <sd_diskio.h>
 extern "C" {
@@ -11,8 +13,15 @@ extern "C" {
 }
 
 #include "../../core/SpiBusLock.h"
+#include "SdSpiDriver.h"
 
 namespace {
+// SDFS keeps its FatFs drive number protected. A member pointer formed
+// through a derived class reads it without modifying the core library.
+struct SdDrive : fs::SDFS {
+  static uint8_t of(fs::SDFS &sd) { return sd.*(&SdDrive::_pdrv); }
+};
+
 const char *BenchmarkDirectoryPath = "/.system";
 const char *BenchmarkPath = "/.system/sd_benchmark.tmp";
 
@@ -26,6 +35,40 @@ uint32_t updateBenchmarkChecksum(uint32_t checksum, const uint8_t *bytes, size_t
     checksum *= 16777619UL;
   }
   return checksum;
+}
+
+// Development breakdown of one benchmark phase: driver bus time per stage
+// versus the bare wire time of the sectors moved, plus benchmark CPU work.
+void printDriverStats(const char *phase, uint32_t elapsedMs, uint32_t cpuUs) {
+  const SdSpiDriver::Stats stats = SdSpiDriver::stats();
+  const uint32_t clockHz = SdSpiDriver::info().clockHz;
+  // Each block is 512 data bytes plus a 2-byte CRC on the wire.
+  auto wireUs = [clockHz](uint32_t sectors) -> unsigned long {
+    return clockHz ? static_cast<unsigned long>(
+                         static_cast<uint64_t>(sectors) * 514ULL * 8ULL * 1000000ULL / clockHz)
+                   : 0UL;
+  };
+  Serial.printf("SD %s: elapsed=%lu ms, benchmark cpu=%lu ms\n", phase,
+                static_cast<unsigned long>(elapsedMs),
+                static_cast<unsigned long>(cpuUs / 1000));
+  Serial.printf("  read: calls=%lu sectors=%lu max/call=%lu bus=%lu us "
+                "(access=%lu gap=%lu data=%lu wire=%lu stop=%lu)\n",
+                static_cast<unsigned long>(stats.readCalls),
+                static_cast<unsigned long>(stats.readSectors),
+                static_cast<unsigned long>(stats.maxReadSectors),
+                static_cast<unsigned long>(stats.readUs),
+                static_cast<unsigned long>(stats.accessUs),
+                static_cast<unsigned long>(stats.gapUs),
+                static_cast<unsigned long>(stats.dataUs),
+                wireUs(stats.readSectors),
+                static_cast<unsigned long>(stats.stopUs));
+  Serial.printf("  write: calls=%lu sectors=%lu max/call=%lu bus=%lu us (busy=%lu wire=%lu)\n",
+                static_cast<unsigned long>(stats.writeCalls),
+                static_cast<unsigned long>(stats.writeSectors),
+                static_cast<unsigned long>(stats.maxWriteSectors),
+                static_cast<unsigned long>(stats.writeUs),
+                static_cast<unsigned long>(stats.writeBusyUs),
+                wireUs(stats.writeSectors));
 }
 
 float mebibytesPerSecond(uint32_t bytes, uint32_t elapsedMs) {
@@ -138,6 +181,7 @@ bool SdCardController::beginUsbExport() {
   // Drop every FatFs/VFS structure before the host can access sector zero.
   // The raw driver is then initialized without mounting a local filesystem,
   // so there can be only one FAT owner during the USB session.
+  SdSpiDriver::detach();
   SD.end();
   _mounted = false;
   _owner = SdCardOwner::None;
@@ -156,6 +200,7 @@ bool SdCardController::beginUsbExport() {
     _rawBlockSize = static_cast<uint16_t>(sdcard_sector_size(_rawDrive));
     ready = _rawBlockCount > 0 && _rawBlockSize == 512;
   }
+  if (ready) attachFastDriver(_rawDrive);
 
   if (!ready) {
     if (_rawDrive != 0xff) {
@@ -176,6 +221,7 @@ bool SdCardController::beginUsbExport() {
 void SdCardController::endUsbExport() {
   if (_rawDrive != 0xff) {
     if (SpiBusLock::lock(pdMS_TO_TICKS(2000))) {
+      SdSpiDriver::detach();
       sdcard_uninit(_rawDrive);
       SpiBusLock::unlock();
     }
@@ -209,26 +255,30 @@ bool SdCardController::validateUsbRange(uint32_t lba, uint32_t offset,
   return start < capacity && byteCount <= capacity - start;
 }
 
-bool SdCardController::readRawSector(uint32_t lba, uint8_t *buffer) {
-  if (!buffer || !isUsbExportActive() || lba >= _rawBlockCount ||
-      !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
+bool SdCardController::readRawSectors(uint32_t lba, uint8_t *buffer,
+                                      uint32_t count) {
+  if (!buffer || !count || !isUsbExportActive() || lba >= _rawBlockCount ||
+      count > _rawBlockCount - lba || !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
     return false;
   }
-  const bool read = sd_read_raw(_rawDrive, buffer, lba);
+  const bool read = disk_read(_rawDrive, buffer, lba, count) == RES_OK;
   SpiBusLock::unlock();
   return read;
 }
 
-bool SdCardController::writeRawSector(uint32_t lba, const uint8_t *buffer) {
-  if (!buffer || !isUsbExportActive() || lba >= _rawBlockCount ||
-      !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
+bool SdCardController::writeRawSectors(uint32_t lba, const uint8_t *buffer,
+                                       uint32_t count) {
+  if (!buffer || !count || !isUsbExportActive() || lba >= _rawBlockCount ||
+      count > _rawBlockCount - lba || !SpiBusLock::lock(pdMS_TO_TICKS(1000))) {
     return false;
   }
-  const bool written = sd_write_raw(_rawDrive, const_cast<uint8_t *>(buffer), lba);
+  const bool written = disk_write(_rawDrive, buffer, lba, count) == RES_OK;
   SpiBusLock::unlock();
   return written;
 }
 
+// Whole-sector runs move as one multi-block command; only a partial head or
+// tail sector goes through the read-modify-write bounce buffer.
 int32_t SdCardController::readUsbBlocks(uint32_t lba, uint32_t offset,
                                         void *buffer, uint32_t byteCount) {
   if (!buffer || !validateUsbRange(lba, offset, byteCount)) {
@@ -241,17 +291,20 @@ int32_t SdCardController::readUsbBlocks(uint32_t lba, uint32_t offset,
   offset %= _rawBlockSize;
   uint32_t completed = 0;
   while (completed < byteCount) {
-    const uint32_t available = _rawBlockSize - offset;
-    const uint32_t chunk = min(available, byteCount - completed);
-    if (offset == 0 && chunk == _rawBlockSize) {
-      if (!readRawSector(lba, destination + completed)) return -1;
+    const uint32_t remaining = byteCount - completed;
+    if (offset == 0 && remaining >= _rawBlockSize) {
+      const uint32_t sectors = min(remaining / _rawBlockSize, MaxUsbBurstSectors);
+      if (!readRawSectors(lba, destination + completed, sectors)) return -1;
+      completed += sectors * _rawBlockSize;
+      lba += sectors;
     } else {
-      if (!readRawSector(lba, sector)) return -1;
+      const uint32_t chunk = min(_rawBlockSize - offset, remaining);
+      if (!readRawSectors(lba, sector, 1)) return -1;
       memcpy(destination + completed, sector + offset, chunk);
+      completed += chunk;
+      offset = 0;
+      lba++;
     }
-    completed += chunk;
-    offset = 0;
-    lba++;
     taskYIELD();
   }
   return static_cast<int32_t>(completed);
@@ -268,18 +321,21 @@ int32_t SdCardController::writeUsbBlocks(uint32_t lba, uint32_t offset,
   offset %= _rawBlockSize;
   uint32_t completed = 0;
   while (completed < byteCount) {
-    const uint32_t available = _rawBlockSize - offset;
-    const uint32_t chunk = min(available, byteCount - completed);
-    if (offset == 0 && chunk == _rawBlockSize) {
-      if (!writeRawSector(lba, buffer + completed)) return -1;
+    const uint32_t remaining = byteCount - completed;
+    if (offset == 0 && remaining >= _rawBlockSize) {
+      const uint32_t sectors = min(remaining / _rawBlockSize, MaxUsbBurstSectors);
+      if (!writeRawSectors(lba, buffer + completed, sectors)) return -1;
+      completed += sectors * _rawBlockSize;
+      lba += sectors;
     } else {
-      if (!readRawSector(lba, sector)) return -1;
+      const uint32_t chunk = min(_rawBlockSize - offset, remaining);
+      if (!readRawSectors(lba, sector, 1)) return -1;
       memcpy(sector + offset, buffer + completed, chunk);
-      if (!writeRawSector(lba, sector)) return -1;
+      if (!writeRawSectors(lba, sector, 1)) return -1;
+      completed += chunk;
+      offset = 0;
+      lba++;
     }
-    completed += chunk;
-    offset = 0;
-    lba++;
     taskYIELD();
   }
   return static_cast<int32_t>(completed);
@@ -336,6 +392,10 @@ bool SdCardController::runThroughputBenchmark(
   uint32_t readChecksum = 2166136261UL;
   uint32_t writeElapsedMs = 0;
   uint32_t readElapsedMs = 0;
+  uint32_t bulkReadElapsedMs = 0;
+  uint32_t writeCpuUs = 0;
+  uint32_t readCpuUs = 0;
+  uint32_t bulkReadCpuUs = 0;
   uint32_t writeStartedMs = 0;
   uint32_t readStartedMs = 0;
   const __FlashStringHelper *failure = nullptr;
@@ -348,8 +408,67 @@ bool SdCardController::runThroughputBenchmark(
     if (observer) observer->sdBenchmarkProgress(phase, completedBytes,
                                                 BenchmarkBytes);
   };
+  // Re-reads the file through an unbuffered descriptor in large requests,
+  // which reach FatFs as multi-sector reads instead of 4 KiB stdio refills.
+  auto bulkRead = [&]() -> bool {
+    uint8_t *bulk = static_cast<uint8_t *>(ps_malloc(BulkReadChunkBytes));
+    if (!bulk) {
+      failure = F("no memory for bulk read buffer");
+      return false;
+    }
+    const String path = String(MountPoint) + BenchmarkPath;
+    int fd = -1;
+    if (SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      fd = ::open(path.c_str(), O_RDONLY);
+      SpiBusLock::unlock();
+      if (fd < 0) failure = F("could not open benchmark file for bulk read");
+    } else {
+      failure = F("SPI bus busy while opening bulk read");
+    }
+    SdSpiDriver::resetStats();
+    const uint32_t startedMs = millis();
+    uint32_t offset = 0;
+    while (fd >= 0 && offset < BenchmarkBytes) {
+      if (cancelled()) {
+        result.cancelled = true;
+        failure = F("cancelled");
+        break;
+      }
+      if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+        failure = F("SPI bus busy during bulk read");
+        break;
+      }
+      const ssize_t read = ::read(fd, bulk, BulkReadChunkBytes);
+      SpiBusLock::unlock();
+      if (read != static_cast<ssize_t>(BulkReadChunkBytes)) {
+        failure = F("short bulk read during benchmark");
+        break;
+      }
+      const uint32_t verifyStartedUs = micros();
+      bool matches = true;
+      for (size_t i = 0; matches && i < BulkReadChunkBytes; i++) {
+        matches = bulk[i] == benchmarkByte(offset + i);
+      }
+      bulkReadCpuUs += micros() - verifyStartedUs;
+      if (!matches) {
+        failure = F("bulk read verification failed");
+        break;
+      }
+      offset += BulkReadChunkBytes;
+      reportProgress(SdThroughputBenchmarkPhase::BulkRead, offset);
+      yield();
+    }
+    bulkReadElapsedMs = millis() - startedMs;
+    printDriverStats("bulk read", bulkReadElapsedMs, bulkReadCpuUs);
+    if (fd >= 0 && SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
+      ::close(fd);
+      SpiBusLock::unlock();
+    }
+    free(bulk);
+    return offset == BenchmarkBytes;
+  };
 
-  Serial.println(F("SD throughput benchmark: 4 MiB, 4 KiB SPI transactions."));
+  Serial.println(F("SD throughput benchmark: 4 MiB in 4 KiB file transactions, then 32 KiB bulk reads."));
 
   if (cancelled()) {
     result.cancelled = true;
@@ -389,6 +508,7 @@ bool SdCardController::runThroughputBenchmark(
     goto cleanup;
   }
 
+  SdSpiDriver::resetStats();
   writeStartedMs = millis();
   for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
     if (cancelled()) {
@@ -396,10 +516,12 @@ bool SdCardController::runThroughputBenchmark(
       failure = F("cancelled");
       goto cleanup;
     }
+    const uint32_t prepareStartedUs = micros();
     for (size_t i = 0; i < BenchmarkChunkBytes; i++) {
       buffer[i] = benchmarkByte(offset + i);
     }
     writeChecksum = updateBenchmarkChecksum(writeChecksum, buffer, BenchmarkChunkBytes);
+    writeCpuUs += micros() - prepareStartedUs;
 
     if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
       failure = F("SPI bus busy during benchmark write");
@@ -423,6 +545,7 @@ bool SdCardController::runThroughputBenchmark(
   file.close();
   SpiBusLock::unlock();
   writeElapsedMs = millis() - writeStartedMs;
+  printDriverStats("write", writeElapsedMs, writeCpuUs);
 
   if (!SpiBusLock::lock(pdMS_TO_TICKS(BenchmarkLockTimeoutMs))) {
     failure = F("SPI bus busy while opening benchmark file for reading");
@@ -435,6 +558,7 @@ bool SdCardController::runThroughputBenchmark(
     goto cleanup;
   }
 
+  SdSpiDriver::resetStats();
   readStartedMs = millis();
   for (uint32_t offset = 0; offset < BenchmarkBytes; offset += BenchmarkChunkBytes) {
     if (cancelled()) {
@@ -452,6 +576,7 @@ bool SdCardController::runThroughputBenchmark(
       failure = F("short read during benchmark");
       goto cleanup;
     }
+    const uint32_t verifyStartedUs = micros();
     for (size_t i = 0; i < BenchmarkChunkBytes; i++) {
       if (buffer[i] != benchmarkByte(offset + i)) {
         failure = F("data verification failed");
@@ -459,6 +584,7 @@ bool SdCardController::runThroughputBenchmark(
       }
     }
     readChecksum = updateBenchmarkChecksum(readChecksum, buffer, BenchmarkChunkBytes);
+    readCpuUs += micros() - verifyStartedUs;
     reportProgress(SdThroughputBenchmarkPhase::Read,
                    offset + BenchmarkChunkBytes);
     yield();
@@ -470,11 +596,13 @@ bool SdCardController::runThroughputBenchmark(
   file.close();
   SpiBusLock::unlock();
   readElapsedMs = millis() - readStartedMs;
+  printDriverStats("read", readElapsedMs, readCpuUs);
 
   if (readChecksum != writeChecksum) {
     failure = F("checksum verification failed");
     goto cleanup;
   }
+  if (!bulkRead()) goto cleanup;
   success = true;
   result.verified = true;
 
@@ -497,6 +625,8 @@ cleanup:
   result.cleanupComplete = cleanupComplete;
   result.writeElapsedMs = writeElapsedMs;
   result.readElapsedMs = readElapsedMs;
+  result.bulkReadElapsedMs = bulkReadElapsedMs;
+  result.clockHz = SdSpiDriver::info().clockHz;
   result.success = success && cleanupComplete;
   if (failure) {
     String error(failure);
@@ -520,6 +650,16 @@ cleanup:
   Serial.print(readElapsedMs);
   Serial.print(F(", MiB/s="));
   Serial.println(mebibytesPerSecond(BenchmarkBytes, readElapsedMs), 2);
+  Serial.print(F("SD benchmark bulk read: elapsedMs="));
+  Serial.print(bulkReadElapsedMs);
+  Serial.print(F(", MiB/s="));
+  Serial.println(mebibytesPerSecond(BenchmarkBytes, bulkReadElapsedMs), 2);
+  Serial.print(F("SD benchmark clock: "));
+  Serial.print(result.clockHz / 1000000.0f, 2);
+  Serial.print(F(" MHz, retries="));
+  Serial.print(SdSpiDriver::info().retries);
+  Serial.print(F(", step-downs="));
+  Serial.println(SdSpiDriver::info().stepDowns);
   Serial.println(cleanupComplete ? F("SD throughput benchmark passed; temporary file removed.")
                                  : F("SD throughput benchmark passed, but temporary-file cleanup was incomplete."));
   return result.success;
@@ -605,6 +745,7 @@ bool SdCardController::mount() {
   // reset the SPI and FatFs drivers in the middle of its bounded transaction.
   if (!SpiBusLock::lock(pdMS_TO_TICKS(200))) return false;
 
+  SdSpiDriver::detach();
   SD.end();
   SPI.end();
   delay(10);
@@ -613,7 +754,7 @@ bool SdCardController::mount() {
   configurePins();
   SPI.begin(_sckPin, _misoPin, _mosiPin, _csPin);
 
-  if (!SD.begin(_csPin, SPI, SpiFrequency)) {
+  if (!SD.begin(_csPin, SPI, SpiFrequency, MountPoint, MaxOpenFiles)) {
     SD.end();
     _mounted = false;
     if (_cardDetectPin < 0) {
@@ -623,8 +764,6 @@ bool SdCardController::mount() {
     SpiBusLock::unlock();
     return false;
   }
-  Serial.println(F("SD mounted at 25 MHz SPI."));
-
   if (SD.cardType() == CARD_NONE) {
     SD.end();
     _mounted = false;
@@ -636,6 +775,7 @@ bool SdCardController::mount() {
     return false;
   }
 
+  attachFastDriver(SdDrive::of(SD));
   _mounted = true;
   _owner = SdCardOwner::Device;
   _lastHealthCheckMs = millis();
@@ -643,8 +783,19 @@ bool SdCardController::mount() {
   return true;
 }
 
+// Called with SpiBusLock held after the backend initialized the card. When
+// attach fails the backend's own driver remains registered and functional.
+void SdCardController::attachFastDriver(uint8_t drive) {
+  if (!SdSpiDriver::attach(drive, static_cast<uint8_t>(_csPin),
+                           sdcard_type(drive) == CARD_SDHC,
+                           sdcard_num_sectors(drive))) {
+    Serial.println(F("SD SPI driver unavailable; using the 20 MHz backend driver."));
+  }
+}
+
 void SdCardController::unmount() {
   const bool locked = SpiBusLock::lock(portMAX_DELAY);
+  SdSpiDriver::detach();
   SD.end();
   _mounted = false;
   _owner = SdCardOwner::None;

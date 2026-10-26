@@ -27,7 +27,11 @@ extern "C" {
 
 namespace {
 constexpr uint8_t FrameSlots = 2;
-constexpr uint16_t IoChunkBytes = 8192;
+// Sample reads refill a sector-aligned window, so a refill reaches the card as
+// one multi-block read. 16 KiB bounds how long one read holds the bus that
+// touch polling shares.
+constexpr uint16_t IoChunkBytes = 16384;
+constexpr uint32_t SdSectorBytes = 512;
 // LCD_CAM GDMA reads presented slots directly from PSRAM in 64-byte bursts.
 constexpr size_t FrameSlotAlignment = 64;
 constexpr uint16_t PcmFrames = 512;
@@ -354,8 +358,8 @@ public:
         _videoTimeScale(0), _audioTimeScale(0), _presentation(nullptr), _presentationCount(0),
         _presentationIndex(0), _videoFlushed(false), _videoFinished(false), _firstVideoTimestamp(0),
         _firstVideoTimestampSet(false), _sampleBuffer(nullptr), _sampleBufferBytes(0), _annexBuffer(nullptr),
-        _annexBufferBytes(0), _audioBuffer(nullptr), _audioBufferBytes(0), _readWindow(nullptr),
-        _readWindowStart(0), _readWindowBytes(0), _aac(nullptr), _mp3(nullptr), _amr(nullptr), _audioScratch(nullptr),
+        _annexBufferBytes(0), _audioBuffer(nullptr), _audioBufferBytes(0), _videoStream(), _audioStream(),
+        _aac(nullptr), _mp3(nullptr), _amr(nullptr), _audioScratch(nullptr),
         _audioSampleRate(0), _audioChannels(0), _audioFramesSubmitted(0), _startedAt(0), _pausedElapsedMs(0),
         _playbackStarted(false), _pcmRing(nullptr), _pcmRead(0), _pcmWrite(0), _pcmCount(0),
         _sourceWidth(0), _sourceHeight(0), _drawX(0), _drawY(0), _drawWidth(0), _drawHeight(0),
@@ -540,8 +544,16 @@ private:
   uint32_t _sampleBufferBytes, _annexBufferBytes;
   uint8_t *_audioBuffer;
   uint32_t _audioBufferBytes;
-  uint8_t *_readWindow;
-  uint32_t _readWindowStart, _readWindowBytes;
+  // Video and audio samples advance through the file independently. Each
+  // stream keeps its own direct descriptor and window so neither seeks the
+  // other's FatFs position backwards across clusters.
+  struct SourceStream {
+    StorageFile file;
+    uint8_t *window = nullptr;
+    uint32_t windowStart = 0;
+    uint32_t windowBytes = 0;
+  };
+  SourceStream _videoStream, _audioStream;
   void *_aac, *_mp3, *_amr;
   int16_t *_audioScratch;
   uint32_t _audioSampleRate, _audioChannels, _audioFramesSubmitted, _startedAt, _pausedElapsedMs;
@@ -771,6 +783,12 @@ private:
     _source = _storage.open(_path, FILE_READ, _secretAccess);
     _sourceSize = _source ? (uint32_t)_source.size() : 0;
     if (!_source || _sourceSize < 12) { setError(F("Unable to open video")); return false; }
+    // Without free descriptors a stream falls back to the shared source file.
+    if (SpiBusLock::lock(pdMS_TO_TICKS(100))) {
+      _videoStream.file = _source.directReader();
+      _audioStream.file = _source.directReader();
+      SpiBusLock::unlock();
+    }
     _demux = new MP4D_demux_t();
     if (!_demux || !MP4D_open(_demux, readMp4, &_source, _sourceSize)) {
       setError(invalidContainerError(_source, _sourceSize)); return false;
@@ -1379,7 +1397,7 @@ private:
         setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Compressed video sample needs PSRAM")));
         return false;
       }
-      if (!readSource(fragmentSample.offset, _sampleBuffer, fragmentSample.bytes)) return false;
+      if (!readSource(_videoStream, fragmentSample.offset, _sampleBuffer, fragmentSample.bytes)) return false;
       bytes = fragmentSample.bytes;
       timestamp = fragmentSample.decodeTimestamp;
       duration = fragmentSample.duration;
@@ -1395,7 +1413,7 @@ private:
       setError(hardwareLimitError(_sourceWidth, _sourceHeight, F("Compressed video sample needs PSRAM")));
       return false;
     }
-    const bool ok = readSource((uint32_t)offset, _sampleBuffer, sampleBytes);
+    const bool ok = readSource(_videoStream, (uint32_t)offset, _sampleBuffer, sampleBytes);
     bytes = sampleBytes;
     timestamp = sampleTimestamp;
     duration = sampleDuration;
@@ -1432,7 +1450,7 @@ private:
         return false;
       }
       if (!fragmentSample.bytes || !ensureAudioBuffer(fragmentSample.bytes) ||
-          !readSource(fragmentSample.offset, _audioBuffer, fragmentSample.bytes)) return false;
+          !readSource(_audioStream, fragmentSample.offset, _audioBuffer, fragmentSample.bytes)) return false;
       bytes = fragmentSample.bytes;
       timestamp = fragmentSample.decodeTimestamp;
       duration = fragmentSample.duration;
@@ -1443,7 +1461,7 @@ private:
     const MP4D_file_offset_t offset = MP4D_frame_offset(_demux, _audioTrack, _audioSample, &sampleBytes,
                                                          &sampleTimestamp, &sampleDuration);
     if (!sampleBytes || offset > 0xffffffffULL || !ensureAudioBuffer(sampleBytes)) return false;
-    const bool ok = readSource((uint32_t)offset, _audioBuffer, sampleBytes);
+    const bool ok = readSource(_audioStream, (uint32_t)offset, _audioBuffer, sampleBytes);
     bytes = sampleBytes;
     timestamp = sampleTimestamp;
     duration = sampleDuration;
@@ -1460,35 +1478,36 @@ private:
     return true;
   }
 
-  bool readSource(uint32_t offset, uint8_t *destination, uint32_t bytes) {
+  bool readSource(SourceStream &stream, uint32_t offset, uint8_t *destination, uint32_t bytes) {
     if (!destination || !bytes || offset > _sourceSize || bytes > _sourceSize - offset) return false;
-    if (_readWindow && offset >= _readWindowStart &&
-        offset + bytes <= _readWindowStart + _readWindowBytes) {
-      memcpy(destination, _readWindow + (offset - _readWindowStart), bytes);
+    if (stream.window && offset >= stream.windowStart &&
+        offset + bytes <= stream.windowStart + stream.windowBytes) {
+      memcpy(destination, stream.window + (offset - stream.windowStart), bytes);
       return true;
     }
-    if (bytes <= IoChunkBytes) {
-      if (!_readWindow) _readWindow = static_cast<uint8_t *>(ps_malloc(IoChunkBytes));
-      if (!_readWindow) return false;
-      const uint32_t refillBytes = min<uint32_t>(IoChunkBytes, _sourceSize - offset);
+    StorageFile &file = stream.file ? stream.file : _source;
+    const uint32_t windowStart = offset & ~(SdSectorBytes - 1);
+    if (offset - windowStart + bytes <= IoChunkBytes) {
+      if (!stream.window) stream.window = static_cast<uint8_t *>(ps_malloc(IoChunkBytes));
+      if (!stream.window) return false;
+      const uint32_t refillBytes = min<uint32_t>(IoChunkBytes, _sourceSize - windowStart);
       if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-      const bool ok = _source.seek(offset) && _source.read(_readWindow, refillBytes) == (int)refillBytes;
+      const bool ok = file.readAt(windowStart, stream.window, refillBytes) == (int)refillBytes;
       SpiBusLock::unlock();
-      if (!ok) { _readWindowBytes = 0; return false; }
-      _readWindowStart = offset;
-      _readWindowBytes = refillBytes;
+      if (!ok) { stream.windowBytes = 0; return false; }
+      stream.windowStart = windowStart;
+      stream.windowBytes = refillBytes;
       ++_sdReadCount;
       _sdReadBytes += refillBytes;
-      memcpy(destination, _readWindow, bytes);
+      memcpy(destination, stream.window + (offset - windowStart), bytes);
       return true;
     }
-    _readWindowBytes = 0;
+    stream.windowBytes = 0;
     uint32_t copied = 0;
     while (copied < bytes) {
       const uint32_t chunk = min<uint32_t>(IoChunkBytes, bytes - copied);
       if (!SpiBusLock::lock(pdMS_TO_TICKS(20))) return false;
-      const bool ok = _source.seek(offset + copied) &&
-                      _source.read(destination + copied, chunk) == (int)chunk;
+      const bool ok = file.readAt(offset + copied, destination + copied, chunk) == (int)chunk;
       SpiBusLock::unlock();
       if (!ok) return false;
       ++_sdReadCount;
@@ -1497,6 +1516,12 @@ private:
       taskYIELD();
     }
     return true;
+  }
+
+  void releaseStream(SourceStream &stream) {
+    stream.file.close();
+    free(stream.window);
+    stream = SourceStream();
   }
 
   bool buildAnnexB(const uint8_t *sample, uint32_t bytes, bool includeParameters, uint32_t &outputBytes) {
@@ -1672,7 +1697,8 @@ private:
     free(_sampleBuffer); _sampleBuffer = nullptr; _sampleBufferBytes = 0;
     free(_annexBuffer); _annexBuffer = nullptr; _annexBufferBytes = 0;
     free(_audioBuffer); _audioBuffer = nullptr; _audioBufferBytes = 0;
-    free(_readWindow); _readWindow = nullptr; _readWindowStart = _readWindowBytes = 0;
+    releaseStream(_videoStream);
+    releaseStream(_audioStream);
     free(_audioScratch); _audioScratch = nullptr;
     _scaler.end();
     free(_pcmRing); _pcmRing = nullptr; _pcmRead = _pcmWrite = _pcmCount = 0;

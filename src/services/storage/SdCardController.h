@@ -17,7 +17,8 @@ enum class SdCardOwner : uint8_t {
 
 enum class SdThroughputBenchmarkPhase : uint8_t {
   Write,
-  Read
+  Read,
+  BulkRead
 };
 
 struct SdThroughputBenchmarkResult {
@@ -28,6 +29,10 @@ struct SdThroughputBenchmarkResult {
   uint32_t transferBytes = 0;
   uint32_t writeElapsedMs = 0;
   uint32_t readElapsedMs = 0;
+  // Same file re-read through an unbuffered descriptor in BulkReadChunkBytes
+  // requests, as media streaming does.
+  uint32_t bulkReadElapsedMs = 0;
+  uint32_t clockHz = 0;
   char error[96] = {};
 };
 
@@ -42,6 +47,9 @@ public:
 
 class SdCardController {
 public:
+  // VFS mount point of the card; fs::File::path() is relative to it.
+  static constexpr const char *MountPoint = "/sd";
+
   SdCardController(int sckPin,
                    int misoPin,
                    int mosiPin,
@@ -82,11 +90,18 @@ public:
                               SdThroughputBenchmarkObserver *observer);
 
 private:
-  // Arduino-ESP32's SPI SD backend clamps non-UHS cards to 25 MHz. Request
-  // that effective rate explicitly so diagnostics and source agree.
+  // Rate requested from Arduino-ESP32's SD backend, which only initializes
+  // and mounts the card. The backend clamps requests to 25 MHz and its
+  // divider search then settles on 80 MHz / 4 = 20 MHz. SdSpiDriver takes
+  // over the mounted drive and selects its own, faster clock.
   static const uint32_t SpiFrequency = 25000000;
+  // FatFs/VFS open-file slots. Media streams use extra direct descriptors.
+  static const uint8_t MaxOpenFiles = 8;
   static const uint32_t BenchmarkBytes = 4UL * 1024UL * 1024UL;
   static const size_t BenchmarkChunkBytes = 4096;
+  static constexpr size_t BulkReadChunkBytes = 32768;
+  // Upper bound on sectors moved per bus transaction for USB MSC requests.
+  static constexpr uint32_t MaxUsbBurstSectors = 64;
   static const uint32_t BenchmarkLockTimeoutMs = 100;
   static const uint32_t MountRetryIntervalMs = 1000;
   // Without a physical CD pin the only way to find an inserted card is to
@@ -117,8 +132,9 @@ private:
   void configurePins();
   bool validateUsbRange(uint32_t lba, uint32_t offset,
                         uint32_t byteCount) const;
-  bool readRawSector(uint32_t lba, uint8_t *buffer);
-  bool writeRawSector(uint32_t lba, const uint8_t *buffer);
+  bool readRawSectors(uint32_t lba, uint8_t *buffer, uint32_t count);
+  bool writeRawSectors(uint32_t lba, const uint8_t *buffer, uint32_t count);
+  void attachFastDriver(uint8_t drive);
 
   bool writeTextFile(const char *path, const char *content);
   bool appendTextFile(const char *path, const char *content);

@@ -123,9 +123,13 @@ void SdSpeedTestWorker::run(uint32_t generation) {
             result.error[0] ? result.error : "SD speed test failed");
     return;
   }
-  publish(SdSpeedTestPhase::Complete, 100, "Verified; temporary file removed",
+  char status[sizeof(SdSpeedTestSnapshot::status)];
+  snprintf(status, sizeof(status), "Verified at %.2f MHz; temporary file removed",
+           result.clockHz / 1000000.0f);
+  publish(SdSpeedTestPhase::Complete, 100, status,
           mebibytesPerSecond(result.transferBytes, result.writeElapsedMs),
           mebibytesPerSecond(result.transferBytes, result.readElapsedMs),
+          mebibytesPerSecond(result.transferBytes, result.bulkReadElapsedMs),
           result.verified);
 }
 
@@ -135,7 +139,8 @@ bool SdSpeedTestWorker::current(uint32_t generation) const {
 
 void SdSpeedTestWorker::publish(SdSpeedTestPhase phase, uint8_t progress,
                                 const char *status, float writeMiBps,
-                                float readMiBps, bool verified) {
+                                float readMiBps, float bulkReadMiBps,
+                                bool verified) {
   if (!_snapshotMutex) return;
   StateLock lock(_snapshotMutex);
   if (!lock.locked()) return;
@@ -143,6 +148,7 @@ void SdSpeedTestWorker::publish(SdSpeedTestPhase phase, uint8_t progress,
   _snapshot.progress = progress > 100 ? 100 : progress;
   _snapshot.writeMiBps = writeMiBps;
   _snapshot.readMiBps = readMiBps;
+  _snapshot.bulkReadMiBps = bulkReadMiBps;
   _snapshot.verified = verified;
   strlcpy(_snapshot.status, status ? status : "", sizeof(_snapshot.status));
   _snapshot.revision++;
@@ -165,6 +171,8 @@ void SdSpeedTestWorker::sdBenchmarkProgress(
   publish(phase == SdThroughputBenchmarkPhase::Write
               ? SdSpeedTestPhase::Write : SdSpeedTestPhase::Read,
           static_cast<uint8_t>((completedBytes * 100ULL) / totalBytes),
-          phase == SdThroughputBenchmarkPhase::Write
-              ? "Writing 4 MiB" : "Reading and verifying 4 MiB");
+          phase == SdThroughputBenchmarkPhase::Write ? "Writing 4 MiB"
+          : phase == SdThroughputBenchmarkPhase::Read
+              ? "Reading and verifying 4 MiB"
+              : "Re-reading 4 MiB in 32 KiB blocks");
 }

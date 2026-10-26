@@ -225,7 +225,7 @@ void WiFiSpeedTestScreen::refreshSd(const SdSpeedTestSnapshot &snapshot,
   if (mountChanged) drawConnection();
   if (_sdSnapshot.writeMiBps != previous.writeMiBps) drawMetric(0);
   if (_sdSnapshot.readMiBps != previous.readMiBps) drawMetric(1);
-  if (_sdSnapshot.verified != previous.verified || phaseChanged) drawMetric(2);
+  if (_sdSnapshot.bulkReadMiBps != previous.bulkReadMiBps) drawMetric(2);
   if (progressChanged || statusChanged || phaseChanged)
     drawProgress(false, previous.progress);
   if (mountChanged || activeChanged || phaseChanged) drawActionButton();
@@ -286,11 +286,11 @@ void WiFiSpeedTestScreen::drawMetric(uint8_t index) {
       UiKit::drawListCell(tft, _display.width(), y, F("Write"),
                           metricText(_sdSnapshot.writeMiBps, 2, " MiB/s"));
     } else if (index == 1) {
-      UiKit::drawListCell(tft, _display.width(), y, F("Read"),
+      UiKit::drawListCell(tft, _display.width(), y, F("Read 4 KiB"),
                           metricText(_sdSnapshot.readMiBps, 2, " MiB/s"));
     } else {
-      UiKit::drawListCell(tft, _display.width(), y, F("Integrity"),
-                          _sdSnapshot.verified ? F("Passed") : F("--"));
+      UiKit::drawListCell(tft, _display.width(), y, F("Read 32 KiB"),
+                          metricText(_sdSnapshot.bulkReadMiBps, 2, " MiB/s"));
     }
   }
 }

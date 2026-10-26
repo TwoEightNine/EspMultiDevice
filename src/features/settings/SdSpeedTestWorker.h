@@ -21,6 +21,7 @@ struct SdSpeedTestSnapshot {
   uint8_t progress = 0;
   float writeMiBps = -1.0f;
   float readMiBps = -1.0f;
+  float bulkReadMiBps = -1.0f;
   bool verified = false;
   char status[80] = {};
 };
@@ -55,7 +56,7 @@ private:
   bool current(uint32_t generation) const;
   void publish(SdSpeedTestPhase phase, uint8_t progress, const char *status,
                float writeMiBps = -1.0f, float readMiBps = -1.0f,
-               bool verified = false);
+               float bulkReadMiBps = -1.0f, bool verified = false);
 
   bool sdBenchmarkCancelled() const override;
   void sdBenchmarkProgress(SdThroughputBenchmarkPhase phase,

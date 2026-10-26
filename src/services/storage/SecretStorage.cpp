@@ -2,9 +2,12 @@
 
 #include <SD.h>
 #include <esp_system.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../../core/SpiBusLock.h"
+#include "SdCardController.h"
 
 const char *SecretStorage::Directory = "/.configs";
 const char *SecretStorage::IndexPath = "/.configs/index";
@@ -50,6 +53,39 @@ size_t StorageFile::write(const uint8_t *buffer, size_t length) {
 }
 
 bool StorageFile::seek(uint32_t position) { return _file && _file.seek(position); }
+
+int StorageFile::readAt(uint32_t position, void *buffer, size_t length) {
+  if (!buffer || length == 0) return 0;
+  uint8_t *bytes = static_cast<uint8_t *>(buffer);
+  if (!_direct) return seek(position) ? read(bytes, length) : -1;
+  if (lseek(*_direct, static_cast<off_t>(position), SEEK_SET) != static_cast<off_t>(position)) {
+    return -1;
+  }
+  size_t count = 0;
+  while (count < length) {
+    const ssize_t read = ::read(*_direct, bytes + count, length - count);
+    if (read <= 0) break;
+    count += static_cast<size_t>(read);
+  }
+  if (count > 0) crypt(bytes, count, position);
+  return static_cast<int>(count);
+}
+
+StorageFile StorageFile::directReader() const {
+  StorageFile view;
+  if (!_file) return view;
+  const String path = String(SdCardController::MountPoint) + _file.path();
+  const int descriptor = ::open(path.c_str(), O_RDONLY);
+  if (descriptor < 0) return view;
+  view._direct = std::shared_ptr<int>(new int(descriptor), [](int *owned) {
+    ::close(*owned);
+    delete owned;
+  });
+  view._key = _key;
+  view._pin = _pin;
+  view._encrypted = _encrypted;
+  return view;
+}
 
 SecretStorage::SecretStorage() : _key{}, _pin(0), _unlocked(false) {}
 
