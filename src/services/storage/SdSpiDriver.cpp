@@ -3,6 +3,11 @@
 #include <SPI.h>
 #include <esp32-hal-psram.h>
 #include <esp_cpu.h>
+#include <esp_heap_caps.h>
+#include <esp_private/gdma.h>
+#include <esp_private/periph_ctrl.h>
+#include <hal/dma_types.h>
+#include <soc/gdma_struct.h>
 #include <soc/spi_struct.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +44,21 @@ constexpr uint8_t FailuresBeforeStepDown = 2;
 constexpr uint32_t ProbeSectors = 64;
 constexpr uint8_t ProbePasses = 3;
 constexpr uint8_t ClockLevels = 3;
+// One DMA transaction moves a whole block plus its CRC (reads), or the start
+// token, block, and CRC (writes). Buffers are word-sized for GDMA.
+constexpr uint32_t BlockWithCrcBytes = BlockBytes + 2;
+constexpr uint32_t TokenBlockWithCrcBytes = BlockWithCrcBytes + 1;
+constexpr uint32_t DmaBufferBytes = (TokenBlockWithCrcBytes + 3) & ~3UL;
+// A block takes about 200 us on the wire at 20 MHz; these only catch a
+// GDMA that never completes, which permanently selects FIFO transfers.
+constexpr uint32_t DmaTransferTimeoutUs = 5000;
+constexpr uint32_t DmaWritebackTimeoutUs = 500;
+// A fault resets both channels and the operation is retried; this many in
+// one mount select FIFO transfers until the next attach.
+constexpr uint8_t MaxDmaFaults = 3;
+// Channel pairs abandoned because another driver reprogrammed them, before
+// FIFO transfers are selected for the rest of the firmware's run.
+constexpr uint8_t MaxPairMoves = 2;
 
 spi_dev_t &bus = GPSPI2;
 
@@ -47,6 +67,10 @@ struct State {
   bool highSpeed;
   bool crc;
   bool blockAddressing;
+  bool dma;
+  // Set by a DMA fault so the retry does not count it as a clock failure.
+  bool dmaFaultPending;
+  uint8_t dmaFaults;
   uint8_t pdrv;
   uint8_t csPin;
   uint8_t level;
@@ -58,6 +82,25 @@ struct State {
 };
 
 State state = {};
+
+// GDMA channel pair on SPI2 and its internal-RAM descriptors and buffers.
+// Allocated on the first attach and kept for the life of the firmware.
+struct Dma {
+  bool ready;
+  int pair;
+  uint8_t moves;
+  gdma_channel_handle_t tx;
+  gdma_channel_handle_t rx;
+  dma_descriptor_t *txDescriptor;
+  dma_descriptor_t *rxDescriptors;  // one per receive slot
+  uint8_t *ones;                    // 0xFF clocked out while receiving
+  uint8_t *slots[2];                // double-buffered receive blocks
+  uint8_t *outgoing;                // staged token, block, and CRC
+};
+
+Dma dma = {};
+// The most recent DMA fault since the last attach; empty if none.
+char dmaFault[192] = "";
 
 // CPU cycle accumulators behind SdSpiDriver::Stats. Each measured interval
 // is far below the 32-bit counter's wrap period.
@@ -198,16 +241,20 @@ uint32_t address(uint32_t sector) {
 
 // Receives one data block. The next FIFO chunk is clocked while the CPU
 // copies and checksums the previous one.
-bool receiveBlock(uint8_t *destination, uint32_t length, uint64_t *tokenCycles = nullptr) {
+bool waitDataToken(uint64_t *tokenCycles) {
   const uint32_t started = millis();
   const uint32_t tokenStarted = now();
   uint8_t token;
   do {
     token = transferByte(0xFF);
   } while (token == 0xFF && millis() - started < ReadTokenTimeoutMs);
+  if (tokenCycles) *tokenCycles += now() - tokenStarted;
+  return token == DataStartToken;
+}
+
+bool receiveBlock(uint8_t *destination, uint32_t length, uint64_t *tokenCycles = nullptr) {
+  if (!waitDataToken(tokenCycles)) return false;
   const uint32_t dataStarted = now();
-  if (tokenCycles) *tokenCycles += dataStarted - tokenStarted;
-  if (token != DataStartToken) return false;
 
   const bool aligned = (reinterpret_cast<uintptr_t>(destination) & 3) == 0;
   uint32_t bounce[FifoBytes / 4];
@@ -236,7 +283,7 @@ bool receiveBlock(uint8_t *destination, uint32_t length, uint64_t *tokenCycles =
   return !state.crc || expected == crc;
 }
 
-bool sendBlock(uint8_t token, const uint8_t *source) {
+bool sendBlockFifo(uint8_t token, const uint8_t *source) {
   transferByte(token);
   const bool aligned = (reinterpret_cast<uintptr_t>(source) & 3) == 0;
   uint32_t bounce[FifoBytes / 4];
@@ -261,6 +308,304 @@ bool sendBlock(uint8_t token, const uint8_t *source) {
   return (transferByte(0xFF) & 0x1F) == 0x05;
 }
 
+void armDescriptor(dma_descriptor_t *descriptor, uint8_t *buffer, uint32_t length) {
+  descriptor->dw0.size = DmaBufferBytes;
+  descriptor->dw0.length = length;
+  descriptor->dw0.err_eof = 0;
+  descriptor->dw0.suc_eof = 1;
+  descriptor->dw0.owner = DMA_DESCRIPTOR_BUFFER_OWNER_DMA;
+  descriptor->buffer = buffer;
+  descriptor->next = nullptr;
+}
+
+// Starts one full-duplex SPI transaction of `length` bytes, sent from
+// `outgoing` by the TX channel and captured into `slot` by the RX channel.
+// Writes discard what they receive, so reads and writes run the single
+// configuration that the attach probe verifies. The HAL's full-duplex setup
+// stays in place; only the data path changes.
+void startDma(const uint8_t *outgoing, uint32_t length, uint8_t slot) {
+  armDescriptor(dma.txDescriptor, const_cast<uint8_t *>(outgoing), length);
+  armDescriptor(&dma.rxDescriptors[slot], dma.slots[slot], 0);
+  dma.rxDescriptors[slot].dw0.suc_eof = 0;
+  __sync_synchronize();
+  gdma_reset(dma.tx);
+  gdma_reset(dma.rx);
+  bus.dma_conf.rx_afifo_rst = 1;
+  bus.dma_conf.buf_afifo_rst = 1;
+  bus.dma_conf.dma_afifo_rst = 1;
+  bus.dma_conf.rx_afifo_rst = 0;
+  bus.dma_conf.buf_afifo_rst = 0;
+  bus.dma_conf.dma_afifo_rst = 0;
+  bus.dma_int_clr.infifo_full_err = 1;
+  bus.dma_int_clr.outfifo_empty_err = 1;
+  bus.dma_conf.dma_rx_ena = 1;
+  bus.dma_conf.dma_tx_ena = 1;
+  gdma_start(dma.rx, reinterpret_cast<intptr_t>(&dma.rxDescriptors[slot]));
+  gdma_start(dma.tx, reinterpret_cast<intptr_t>(dma.txDescriptor));
+  startTransfer(length);
+}
+
+bool pairConnected() {
+  return dma.tx && GDMA.channel[dma.pair].in.peri_sel.sel == SOC_GDMA_TRIG_PERIPH_SPI2 &&
+         GDMA.channel[dma.pair].out.peri_sel.sel == SOC_GDMA_TRIG_PERIPH_SPI2;
+}
+
+void disableDma() {
+  // Never stop a pair that another driver has reprogrammed and may be using.
+  if (pairConnected()) {
+    gdma_stop(dma.tx);
+    gdma_stop(dma.rx);
+  }
+  state.dma = false;
+}
+
+bool acquirePair();
+
+// Another driver has reconnected our pair to its own peripheral, without
+// the allocator. Leave the pair allocated and untouched, so its transfers
+// are not reset and the allocator does not hand it out again, and move to a
+// fresh pair. Returns whether DMA is still usable.
+bool movePair(const char *when) {
+  const unsigned inSel = GDMA.channel[dma.pair].in.peri_sel.sel;
+  const unsigned outSel = GDMA.channel[dma.pair].out.peri_sel.sel;
+  snprintf(dmaFault, sizeof(dmaFault), "%s: pair %d reconnected to peripheral in=%u out=%u",
+           when, dma.pair, inSel, outSel);
+  Serial.printf("SD SPI DMA %s; leaving it to that driver.\n", dmaFault);
+  dma.tx = dma.rx = nullptr;
+  ++dma.moves;
+  if (dma.moves > MaxPairMoves || !acquirePair()) {
+    state.dma = false;
+    Serial.println(F("SD SPI DMA disabled; using FIFO transfers."));
+    return false;
+  }
+  Serial.printf("SD SPI DMA moved to GDMA pair %d.\n", dma.pair);
+  return true;
+}
+
+// Checked before each DMA operation; a few register reads.
+bool dmaUsable() {
+  if (!state.dma) return false;
+  return pairConnected() || movePair("before transfer");
+}
+
+// Records a fault with the descriptor, GDMA RX channel, and SPI DMA state,
+// resets both channels for the retry, and selects FIFO transfers once
+// faults reach MaxDmaFaults.
+void recordDmaFault(const char *direction, const char *reason, uint32_t descriptorWord) {
+  volatile auto &in = GDMA.channel[dma.pair].in;
+  snprintf(dmaFault, sizeof(dmaFault),
+           "%s: %s (dw0=%08lx ch=%d sel=%lu link=%08lx state=%08lx fifo=%08lx raw=%08lx spi=%08lx/%08lx)",
+           direction, reason, static_cast<unsigned long>(descriptorWord), dma.pair,
+           static_cast<unsigned long>(in.peri_sel.sel), static_cast<unsigned long>(in.link.val),
+           static_cast<unsigned long>(in.state.val), static_cast<unsigned long>(in.infifo_status.val),
+           static_cast<unsigned long>(in.int_raw.val), static_cast<unsigned long>(bus.dma_conf.val),
+           static_cast<unsigned long>(bus.dma_int_raw.val));
+  ++state.dmaFaults;
+  state.dmaFaultPending = true;
+  gdma_reset(dma.tx);
+  gdma_reset(dma.rx);
+  Serial.printf("SD SPI DMA fault %u/%u, %s\n", state.dmaFaults, MaxDmaFaults, dmaFault);
+  if (state.dmaFaults >= MaxDmaFaults) {
+    disableDma();
+    Serial.println(F("SD SPI DMA disabled; using FIFO transfers."));
+  }
+}
+
+// Last resort for a transaction that never ends: reset SPI2 and restore the
+// configuration the Arduino HAL set up, so neither this driver nor touch
+// waits forever on the busy flag. Pin routing lives in the GPIO matrix and
+// survives the reset.
+void resetBus() {
+  const uint32_t ctrl = bus.ctrl.val;
+  const uint32_t clock = bus.clock.val;
+  const uint32_t user = bus.user.val;
+  const uint32_t user1 = bus.user1.val;
+  const uint32_t user2 = bus.user2.val;
+  const uint32_t misc = bus.misc.val;
+  const uint32_t dinMode = bus.din_mode.val;
+  const uint32_t dinNum = bus.din_num.val;
+  const uint32_t doutMode = bus.dout_mode.val;
+  const uint32_t slave = bus.slave.val;
+  const uint32_t clkGate = bus.clk_gate.val;
+  periph_module_reset(PERIPH_SPI2_MODULE);
+  bus.clk_gate.val = clkGate;
+  bus.slave.val = slave;
+  bus.ctrl.val = ctrl;
+  bus.clock.val = clock;
+  bus.user.val = user;
+  bus.user1.val = user1;
+  bus.user2.val = user2;
+  bus.misc.val = misc;
+  bus.din_mode.val = dinMode;
+  bus.din_num.val = dinNum;
+  bus.dout_mode.val = doutMode;
+  bus.dma_conf.val = 0;
+}
+
+// Waits for the transaction and for GDMA to write back the receive
+// descriptor, so all `length` bytes are in memory, then restores
+// CPU-controlled mode. Any failure turns DMA off with the reason recorded.
+bool finishDma(uint8_t slot, uint32_t length, const char *direction) {
+  const uint32_t started = now();
+  const uint32_t mhz = getCpuFrequencyMhz();
+  while (bus.cmd.usr) {
+    if (now() - started > DmaTransferTimeoutUs * mhz) break;
+  }
+  if (bus.cmd.usr) {
+    // A master stalled on an empty DMA FIFO can finish from the CPU buffer.
+    bus.dma_conf.dma_rx_ena = 0;
+    bus.dma_conf.dma_tx_ena = 0;
+    const uint32_t drained = now();
+    while (bus.cmd.usr && now() - drained < DmaTransferTimeoutUs * mhz) {}
+    const bool reset = bus.cmd.usr;
+    if (reset) resetBus();
+    if (!pairConnected()) {
+      state.dmaFaultPending = true;
+      movePair(direction);
+      return false;
+    }
+    recordDmaFault(direction, reset ? "SPI stalled, bus reset" : "SPI stalled",
+                   *reinterpret_cast<volatile uint32_t *>(&dma.rxDescriptors[slot]));
+    return false;
+  }
+  volatile dma_descriptor_t *descriptor = &dma.rxDescriptors[slot];
+  const uint32_t writeback = now();
+  while (descriptor->dw0.owner == DMA_DESCRIPTOR_BUFFER_OWNER_DMA &&
+         now() - writeback <= DmaWritebackTimeoutUs * mhz) {}
+  bus.dma_conf.dma_rx_ena = 0;
+  bus.dma_conf.dma_tx_ena = 0;
+  const uint32_t word = *reinterpret_cast<volatile uint32_t *>(descriptor);
+  if (!pairConnected()) {
+    state.dmaFaultPending = true;
+    movePair(direction);
+    return false;
+  }
+  if (descriptor->dw0.owner == DMA_DESCRIPTOR_BUFFER_OWNER_DMA) {
+    recordDmaFault(direction, "descriptor not written back", word);
+    return false;
+  }
+  if (descriptor->dw0.length != length) {
+    recordDmaFault(direction, "unexpected received length", word);
+    return false;
+  }
+  return true;
+}
+
+bool checkDmaBlock(uint8_t *destination, uint8_t slot) {
+  const uint8_t *source = dma.slots[slot];
+  memcpy(destination, source, BlockBytes);
+  if (!state.crc) return true;
+  const uint16_t expected = static_cast<uint16_t>((source[BlockBytes] << 8) | source[BlockBytes + 1]);
+  return updateCrc16(0, source, BlockBytes) == expected;
+}
+
+// Alternates two receive buffers: while GDMA fills one with block i, the CPU
+// copies block i-1 out of the other and verifies its CRC.
+bool receiveBlocksDma(uint8_t *buffer, uint32_t count) {
+  uint8_t *pending = nullptr;
+  uint8_t pendingSlot = 0;
+  bool ok = true;
+  for (uint32_t i = 0; ok && i < count; ++i) {
+    if (!waitDataToken(i ? &cycles.gap : &cycles.access)) return false;
+    const uint8_t slot = i & 1;
+    const uint32_t dataStarted = now();
+    startDma(dma.ones, BlockWithCrcBytes, slot);
+    const bool previous = !pending || checkDmaBlock(pending, pendingSlot);
+    const bool received = finishDma(slot, BlockWithCrcBytes, "receive");
+    cycles.data += now() - dataStarted;
+    ok = previous && received;
+    pending = buffer + i * BlockBytes;
+    pendingSlot = slot;
+  }
+  return ok && (!pending || checkDmaBlock(pending, pendingSlot));
+}
+
+bool receiveBlocksFifo(uint8_t *buffer, uint32_t count) {
+  for (uint32_t i = 0; i < count; ++i) {
+    if (!receiveBlock(buffer + i * BlockBytes, BlockBytes, i ? &cycles.gap : &cycles.access)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool sendBlockDma(uint8_t token, const uint8_t *source) {
+  uint8_t *outgoing = dma.outgoing;
+  outgoing[0] = token;
+  memcpy(outgoing + 1, source, BlockBytes);
+  const uint16_t crc = state.crc ? updateCrc16(0, source, BlockBytes) : 0xFFFF;
+  outgoing[BlockBytes + 1] = static_cast<uint8_t>(crc >> 8);
+  outgoing[BlockBytes + 2] = static_cast<uint8_t>(crc);
+  startDma(outgoing, TokenBlockWithCrcBytes, 0);
+  if (!finishDma(0, TokenBlockWithCrcBytes, "send")) return false;
+  return (transferByte(0xFF) & 0x1F) == 0x05;
+}
+
+bool sendBlock(uint8_t token, const uint8_t *source) {
+  return dmaUsable() ? sendBlockDma(token, source) : sendBlockFifo(token, source);
+}
+
+// Allocates a TX/RX pair and connects it to SPI2. Pair 0 is never used:
+// on this firmware the hardware-AES DMA path reprogrammed channel 0 to AES
+// while SD owned it, outside the allocator. A pair 0 that the allocator
+// hands out is therefore kept allocated and idle, so no other driver gets it
+// either, and the next pair is used.
+bool acquirePair() {
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    gdma_channel_alloc_config_t txConfig = {};
+    txConfig.direction = GDMA_CHANNEL_DIRECTION_TX;
+    gdma_channel_handle_t tx = nullptr;
+    gdma_channel_handle_t rx = nullptr;
+    if (gdma_new_ahb_channel(&txConfig, &tx) != ESP_OK) return false;
+    gdma_channel_alloc_config_t rxConfig = {};
+    rxConfig.direction = GDMA_CHANNEL_DIRECTION_RX;
+    rxConfig.sibling_chan = tx;
+    int group = 0;
+    int pair = 0;
+    if (gdma_new_ahb_channel(&rxConfig, &rx) != ESP_OK ||
+        gdma_get_group_channel_id(rx, &group, &pair) != ESP_OK) {
+      if (rx) gdma_del_channel(rx);
+      gdma_del_channel(tx);
+      return false;
+    }
+    if (pair == 0) continue;
+    if (gdma_connect(tx, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_SPI, 2)) != ESP_OK ||
+        gdma_connect(rx, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_SPI, 2)) != ESP_OK) {
+      gdma_del_channel(rx);
+      gdma_del_channel(tx);
+      return false;
+    }
+    dma.tx = tx;
+    dma.rx = rx;
+    dma.pair = pair;
+    return true;
+  }
+  return false;
+}
+
+bool allocateDma() {
+  if (dma.ready) return dma.tx != nullptr;
+  const size_t descriptorBytes = 3 * sizeof(dma_descriptor_t);
+  const size_t bytes = descriptorBytes + 4 * DmaBufferBytes;
+  uint8_t *memory = static_cast<uint8_t *>(
+      heap_caps_aligned_calloc(4, 1, bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+  if (!memory) return false;
+  if (!acquirePair()) {
+    heap_caps_free(memory);
+    return false;
+  }
+  dma.txDescriptor = reinterpret_cast<dma_descriptor_t *>(memory);
+  dma.rxDescriptors = dma.txDescriptor + 1;
+  uint8_t *buffers = memory + descriptorBytes;
+  dma.ones = buffers;
+  dma.slots[0] = buffers + DmaBufferBytes;
+  dma.slots[1] = buffers + 2 * DmaBufferBytes;
+  dma.outgoing = buffers + 3 * DmaBufferBytes;
+  memset(dma.ones, 0xFF, DmaBufferBytes);
+  dma.ready = true;
+  return true;
+}
+
 bool readStatus() {
   if (!select()) return false;
   const uint8_t r1 = command(SendStatus, 0);
@@ -273,10 +618,8 @@ bool readOnce(uint32_t sector, uint8_t *buffer, uint32_t count) {
   if (!select()) return false;
   const bool multiple = count > 1;
   const bool started = command(multiple ? ReadMultiple : ReadSingle, address(sector)) == 0;
-  bool ok = started;
-  for (uint32_t i = 0; ok && i < count; ++i) {
-    ok = receiveBlock(buffer + i * BlockBytes, BlockBytes, i ? &cycles.gap : &cycles.access);
-  }
+  bool ok = started && (dmaUsable() ? receiveBlocksDma(buffer, count)
+                                    : receiveBlocksFifo(buffer, count));
   if (started && multiple) {
     const uint32_t stopStarted = now();
     // Data integrity is already proven by each block CRC. The CMD12 R1 can
@@ -342,11 +685,14 @@ template <typename Operation>
 bool withRetries(Operation operation) {
   uint8_t failuresAtLevel = 0;
   for (uint8_t attempt = 0; attempt < MaxAttempts; ++attempt) {
+    state.dmaFaultPending = false;
     beginBus();
     const bool ok = operation();
     endBus();
     if (ok) return true;
     ++state.retries;
+    // A GDMA fault is retried as is; it says nothing about the clock.
+    if (state.dmaFaultPending) continue;
     if (++failuresAtLevel >= FailuresBeforeStepDown && stepDown()) failuresAtLevel = 0;
   }
   return false;
@@ -387,18 +733,30 @@ bool probeLevel(uint8_t level, const uint8_t *reference, uint8_t *check) {
   return true;
 }
 
+// Reads a FIFO reference at the base clock, verifies the DMA path against it
+// at that clock, then probes faster clocks with whichever path is selected.
 uint8_t selectFastestLevel() {
   const uint8_t slowest = ClockLevels - 1;
-  if (state.fastestLevel == slowest) return slowest;
   const size_t bytes = ProbeSectors * BlockBytes;
   uint8_t *reference = static_cast<uint8_t *>(ps_malloc(bytes));
   uint8_t *check = static_cast<uint8_t *>(ps_malloc(bytes));
+  const bool wantDma = state.dma;
+  state.dma = false;
   uint8_t chosen = slowest;
   if (reference && check) {
     state.level = slowest;
     beginBus();
     const bool haveReference = readOnce(0, reference, ProbeSectors);
     endBus();
+    state.dma = wantDma && haveReference;
+    if (state.dma && !probeLevel(slowest, reference, check)) {
+      // A GDMA fault has already disabled DMA and logged why.
+      if (!state.dmaFaultPending) {
+        strlcpy(dmaFault, "probe: data differs from FIFO reference", sizeof(dmaFault));
+      }
+      Serial.println(F("SD SPI DMA probe failed; using FIFO transfers."));
+      disableDma();
+    }
     for (uint8_t level = state.fastestLevel; haveReference && level < slowest; ++level) {
       if (probeLevel(level, reference, check)) {
         chosen = level;
@@ -407,6 +765,7 @@ uint8_t selectFastestLevel() {
       Serial.printf("SD SPI probe failed at %.2f MHz.\n", state.clocks[level] / 1000000.0f);
     }
   }
+  state.level = chosen;
   free(reference);
   free(check);
   return chosen;
@@ -479,12 +838,21 @@ bool attach(uint8_t pdrv, uint8_t csPin, bool blockAddressing, uint32_t sectors)
   // Never exceed the 25 MHz default-speed limit without High-Speed mode, and
   // never run faster than the base clock without CRC to detect errors.
   state.fastestLevel = state.highSpeed ? 0 : ClockLevels - 1;
+  dmaFault[0] = '\0';
+  state.dmaFaults = 0;
+  state.dmaFaultPending = false;
+  state.dma = allocateDma();
+  if (!state.dma) {
+    strlcpy(dmaFault, "GDMA channels or DMA memory unavailable", sizeof(dmaFault));
+    Serial.println(F("SD SPI DMA unavailable; using FIFO transfers."));
+  }
   state.level = selectFastestLevel();
 
   state.attached = true;
   ff_diskio_register(pdrv, &DiskIo);
-  Serial.printf("SD SPI driver: %.2f MHz, High-Speed %s, CRC %s.\n",
-                state.clocks[state.level] / 1000000.0f,
+  Serial.printf("SD SPI driver: %.2f MHz, DMA %s (GDMA pair %d), High-Speed %s, CRC %s.\n",
+                state.clocks[state.level] / 1000000.0f, state.dma ? "on" : "off",
+                dma.tx ? dma.pair : -1,
                 state.highSpeed ? "on" : "unavailable", state.crc ? "on" : "off");
   return true;
 }
@@ -518,7 +886,8 @@ bool writeBlocks(uint32_t sector, const uint8_t *buffer, uint32_t count) {
 }
 
 Info info() {
-  return {state.attached, state.highSpeed, state.crc,
+  return {state.attached, state.highSpeed, state.crc, state.attached && state.dma, state.dmaFaults,
+          dmaFault,
           state.attached ? state.clocks[state.level] : 0, state.retries, state.stepDowns};
 }
 

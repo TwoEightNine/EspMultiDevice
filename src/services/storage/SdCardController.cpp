@@ -656,7 +656,18 @@ cleanup:
   Serial.println(mebibytesPerSecond(BenchmarkBytes, bulkReadElapsedMs), 2);
   Serial.print(F("SD benchmark clock: "));
   Serial.print(result.clockHz / 1000000.0f, 2);
-  Serial.print(F(" MHz, retries="));
+  Serial.print(F(" MHz, DMA "));
+  Serial.print(SdSpiDriver::info().dma ? F("on") : F("off"));
+  if (SdSpiDriver::info().dmaFaults) {
+    Serial.print(F(", DMA faults="));
+    Serial.print(SdSpiDriver::info().dmaFaults);
+  }
+  if (SdSpiDriver::info().dmaFault[0]) {
+    Serial.print(F(" [last: "));
+    Serial.print(SdSpiDriver::info().dmaFault);
+    Serial.print(']');
+  }
+  Serial.print(F(", retries="));
   Serial.print(SdSpiDriver::info().retries);
   Serial.print(F(", step-downs="));
   Serial.println(SdSpiDriver::info().stepDowns);

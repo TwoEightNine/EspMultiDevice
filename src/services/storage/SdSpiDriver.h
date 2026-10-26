@@ -10,8 +10,12 @@
 // - switches the card to High-Speed (CMD6) and runs the bus at 40 or
 //   26.67 MHz instead of the backend's effective 20 MHz, keeping data CRC on
 //   so a marginal clock is detected and stepped down instead of corrupting;
-// - streams 512-byte blocks through the SPI FIFO with the CRC16 calculation
-//   overlapped with the next chunk on the wire;
+// - moves each 512-byte block and its CRC with one GDMA transaction into
+//   double-buffered internal RAM, copying and checking the previous block
+//   while the next one is on the wire. DMA is verified against a FIFO read
+//   at attach; a GDMA fault is retried, and without DMA, or after repeated
+//   faults, blocks stream through
+//   the 64-byte SPI FIFO with the CRC16 overlapped with the next chunk;
 // - answers FatFs status polls from cached state instead of issuing CMD13 on
 //   every f_read/f_write/f_lseek.
 //
@@ -24,6 +28,11 @@ struct Info {
   bool attached;
   bool highSpeed;
   bool crc;
+  bool dma;
+  // GDMA faults since the last attach, and the most recent one with the
+  // descriptor, GDMA RX channel, and SPI DMA register state (empty if none).
+  uint8_t dmaFaults;
+  const char *dmaFault;
   uint32_t clockHz;
   uint32_t retries;
   uint32_t stepDowns;
