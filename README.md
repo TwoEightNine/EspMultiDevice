@@ -8,7 +8,7 @@ ESP Media is a touchscreen media device firmware for an ESP32-S3 N16R8. It runs 
 - Read-only paged text viewing for `.txt`, `.json`, `.lua`, and `.config` files, including files in protected storage.
 - Manual USB Drive mode exposes the complete SD card as writable USB mass storage for macOS file transfer, with isolated transfer boot and safe-eject restart.
 - A Mac Remote screen exposes standard USB HID keyboard and media controls for YouTube, screenshots, screen lock, playback, mute, and volume without a companion Mac application or configured macOS Shortcut.
-- Image viewer for BMP, PNG, baseline JPEG, GIF, and WebP, including animated GIF playback streamed from the source and animated WebP playback backed by SD caches, both using PSRAM.
+- Image viewer for BMP, PNG, baseline JPEG, GIF, and WebP, including animated GIF/WebP playback streamed from the source through PSRAM.
 - WAV/MP3 playback, 16 kHz mono WAV recording, configurable persisted volume, and built-in RGB LED settings.
 - Direct MP4/3GP video streaming for H.264, H.263, and MPEG-4 Part 2 at the source's full decodable size, downscaled to the portrait or on-demand landscape display at the best rate the device sustains, with AAC-LC, MP3, or AMR-NB audio where compatible. Complete local H.264/AAC fragmented MP4 files are also supported. A second-core scheduler decouples video decoding from non-blocking buffered audio output and does not create an SD cache.
 - Wi-Fi management with a bounded Cloudflare internet speed test, a verified SD read/write speed test, UTC+4 SNTP time, a lightweight HTTP/HTTPS browser, and an interval-workout timer with audio cues.

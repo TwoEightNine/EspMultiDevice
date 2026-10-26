@@ -60,7 +60,6 @@ ImageView::ImageView(DisplayController &display,
     _webpAnimInfo{},
     _webpAnimated(false),
     _animationSource(false),
-    _webpPreviousTimestamp(0),
     _sourceFileSize(0),
     _sourceWriteTime(0),
     _cacheOffset(0),
@@ -167,7 +166,9 @@ ImageView::ImageView(DisplayController &display,
     _streamSlot(AnimationStreamWorker::NoSlot),
     _streamPixels(nullptr),
     _streamLoadingAtMs(0),
-    _streamLoadingDrawnMs(0) {
+    _streamLoadingDrawnMs(0),
+    _streamTransferActive(false),
+    _streamDmaFallbackLogged(false) {
   // reset() releases any decoder-owned buffers, including on the first
   // screen entry. Initialize the decoder before that first release so its
   // frame-buffer pointer is null rather than indeterminate.
@@ -224,28 +225,41 @@ void ImageView::open(const String &path, bool secretAccess, bool chromeVisible) 
   if (isGifSource()) {
     _format = ImageFormat::Gif;
     _animationSource = true;
-    if (!startGifStream()) {
+    if (!readGifStreamHeader() || !startAnimationStream(AnimationStreamWorker::Source::Gif)) {
       if (_error.length() == 0) _error = F("Could not start animation");
-      stopGifStream();
+      stopAnimationStream();
       drawError();
     }
     return;
   }
   if (isWebpSource()) {
     _format = ImageFormat::Webp;
-    if (!inspectWebpSource()) {
+    // Animated WebP streams from its source; only stills are cached.
+    if (sniffAnimatedWebp()) {
+      _animationSource = true;
+      if (!startAnimationStream(AnimationStreamWorker::Source::Webp)) {
+        if (_error.length() == 0) _error = F("Could not start animation");
+        stopAnimationStream();
+        drawError();
+      }
+      return;
+    }
+    if (_error.length() == 0 && !inspectWebpSource()) {
       if (_error.length() == 0) _error = F("Invalid WebP image");
+    } else if (_webpAnimated) {
+      _error = F("Invalid WebP animation header");
+    }
+    if (_error.length() != 0) {
+      releaseWebpDecoder();
       drawError();
       return;
     }
-    _animationSource = _webpAnimated;
-    if (!prepareCachePaths(_webpAnimated ? FileFormats::Format::Emga : FileFormats::Format::Em16)) {
+    if (!prepareCachePaths(FileFormats::Format::Em16)) {
       _error = F("Invalid cache path");
       drawError();
       return;
     }
-    if (_webpAnimated && loadAnimationCache()) return;
-    if (!_webpAnimated && !prepareCachePaths(FileFormats::Format::Em16Zoom)) {
+    if (!prepareCachePaths(FileFormats::Format::Em16Zoom)) {
       _error = F("Invalid zoom cache path");
       drawError();
       return;
@@ -277,8 +291,8 @@ void ImageView::open(const String &path, bool secretAccess, bool chromeVisible) 
     return;
   }
   drawLoading(0);
-  if (_format == ImageFormat::Gif || (_format == ImageFormat::Webp && _webpAnimated)) {
-    bool started = _format == ImageFormat::Gif ? startGifBuild() : startWebpBuild();
+  if (_format == ImageFormat::Gif) {
+    bool started = startGifBuild();
     if (!started) {
       if (_error.length() == 0) _error = F("Could not cache animation");
       _mediaCache.abort(_cacheWriter);
@@ -322,15 +336,15 @@ void ImageView::close() {
 
 void ImageView::tick(uint32_t nowMs) {
   if (_stream.active()) {
-    if (!tickGifStream(nowMs)) {
-      if (_error.length() == 0) _error = F("GIF playback error");
-      stopGifStream();
+    if (!tickAnimationStream(nowMs)) {
+      if (_error.length() == 0) _error = F("Animation playback error");
+      stopAnimationStream();
       drawError();
     }
     return;
   }
   if (_gifState == GifState::Building) {
-    bool built = _format == ImageFormat::Webp ? buildWebpFrame() : buildGifFrame();
+    bool built = buildGifFrame();
     if (!built) {
       _gifState = GifState::None;
       if (_error.length() == 0) _error = F("Could not cache animation");
@@ -376,7 +390,7 @@ void ImageView::tick(uint32_t nowMs) {
 void ImageView::reset() {
   // The stream worker borrows _gif; stop it before anything below touches
   // the decoder or frees its slots.
-  stopGifStream();
+  stopAnimationStream();
   bool removeGifTemp = _gifState == GifState::Building;
   _rendering = false;
   _gifState = GifState::None;
@@ -412,7 +426,6 @@ void ImageView::reset() {
   _gifBuildFrame = 0;
   _gifBuildWriteOffset = 0;
   _gifBuildDelay = 0;
-  _webpPreviousTimestamp = 0;
   _animationSource = false;
   _gifFrameCount = 0;
   _gifPlaybackFrame = 0;
@@ -1986,7 +1999,7 @@ void ImageView::releaseGifBuffers() {
   _gifNextLoaded = false;
 }
 
-bool ImageView::startGifStream() {
+bool ImageView::readGifStreamHeader() {
   uint8_t header[10] = {};
   if (!lockedSeek(_file, 0) || lockedRead(_file, header, sizeof(header)) != sizeof(header)) {
     _error = F("Unable to read GIF header");
@@ -1998,8 +2011,27 @@ bool ImageView::startGifStream() {
     _error = F("GIF has invalid dimensions");
     return false;
   }
+  return true;
+}
+
+bool ImageView::sniffAnimatedWebp() {
+  // RIFF header, then an extended VP8X chunk whose flags carry the animation
+  // bit and whose 24-bit fields hold the canvas size minus one.
+  uint8_t header[30] = {};
+  if (!lockedSeek(_file, 0) || lockedRead(_file, header, sizeof(header)) != sizeof(header)) {
+    // Simple WebP files can be shorter than an extended header.
+    if (_sourceFileSize >= sizeof(header)) _error = F("Unable to read WebP header");
+    return false;
+  }
+  if (memcmp(header + 12, "VP8X", 4) != 0 || (header[20] & 0x02) == 0) return false;
+  _sourceWidth = 1UL + header[24] + ((uint32_t)header[25] << 8) + ((uint32_t)header[26] << 16);
+  _sourceHeight = 1UL + header[27] + ((uint32_t)header[28] << 8) + ((uint32_t)header[29] << 16);
+  return true;
+}
+
+bool ImageView::startAnimationStream(AnimationStreamWorker::Source source) {
   if (!psramFound()) {
-    _error = F("GIF viewer requires PSRAM");
+    _error = F("Animation viewer requires PSRAM");
     return false;
   }
   prepareGifDrawRect();
@@ -2010,18 +2042,27 @@ bool ImageView::startGifStream() {
   _streamSlot = AnimationStreamWorker::NoSlot;
   _streamPixels = nullptr;
   _streamLoadingAtMs = 0;
-  return _stream.start(_path, _secretAccess, _sourceWidth, _sourceHeight, _drawWidth, _drawHeight,
-                       _error);
+  return _stream.start(source, _path, _secretAccess, _sourceFileSize, _sourceWidth, _sourceHeight,
+                       _drawWidth, _drawHeight, _error);
 }
 
-bool ImageView::tickGifStream(uint32_t nowMs) {
+bool ImageView::tickAnimationStream(uint32_t nowMs) {
   String workerError;
   const AnimationStreamWorker::Stats stats = _stream.stats(&workerError);
   if (stats.phase == AnimationStreamWorker::Phase::Error) {
     _error = workerError;
     return false;
   }
-  // Finish the frame on its way to the panel before taking another one.
+  // Finish the frame on its way to the panel before taking another one. A
+  // DMA transfer reads the displayed slot, so the loop keeps polling touch
+  // and only checks for completion here.
+  if (_streamTransferActive) {
+    if (_display.dmaImageActive()) {
+      logStreamStats(nowMs);
+      return true;
+    }
+    finishStreamTransfer();
+  }
   if (_gifPresentActive) {
     tickStreamPresentation();
     logStreamStats(nowMs);
@@ -2029,7 +2070,7 @@ bool ImageView::tickGifStream(uint32_t nowMs) {
   }
   AnimationStreamWorker::Frame frame;
   if (!_stream.takeDueFrame(nowMs, frame)) {
-    if (_streamSlot == AnimationStreamWorker::NoSlot) drawStreamLoading(nowMs);
+    if (_streamSlot == AnimationStreamWorker::NoSlot) drawStreamLoading(nowMs, stats);
     logStreamStats(nowMs);
     return true;
   }
@@ -2047,16 +2088,20 @@ bool ImageView::tickGifStream(uint32_t nowMs) {
   _streamSlot = frame.slot;
   _streamPixels = frame.pixels;
   _gifPresentedFrames++;
-  _gifPresentY = streamFirstVisibleRow();
-  _gifPresentActive = true;
-  tickStreamPresentation();
+  beginStreamPresentation();
   logStreamStats(nowMs);
   return true;
 }
 
-void ImageView::stopGifStream() {
+void ImageView::stopAnimationStream() {
   if (_streamSlot != AnimationStreamWorker::NoSlot) logStreamStats(millis(), true);
+  const bool streamed = _stream.active();
+  // Never free a slot that a DMA transfer is still reading.
+  if (_streamTransferActive) finishStreamTransfer();
   _stream.stop();
+  // Like the video player, return the LCD_CAM bus and its descriptors.
+  if (streamed) _display.endDmaImages();
+  _streamDmaFallbackLogged = false;
   _streamSlot = AnimationStreamWorker::NoSlot;
   _streamPixels = nullptr;
   _streamLoadingAtMs = 0;
@@ -2070,6 +2115,32 @@ uint16_t ImageView::streamFirstVisibleRow() const {
   if (_viewMode != ViewMode::Informative || _top >= (int16_t)UiKit::AppBarHeight) return 0;
   const uint16_t hidden = (uint16_t)(UiKit::AppBarHeight - _top);
   return hidden < _drawHeight ? hidden : _drawHeight;
+}
+
+void ImageView::beginStreamPresentation() {
+  _gifPresentActive = false;
+  const uint16_t first = streamFirstVisibleRow();
+  if (!_streamPixels || !_display.isReady() || first >= _drawHeight) return;
+  const uint16_t *pixels = _streamPixels + (size_t)first * _drawWidth;
+  // Slots are 64-byte aligned, so DMA declines only a clipped start row whose
+  // offset is not (a width that is not a multiple of four in informative
+  // mode), or a panel without LCD_CAM support.
+  if (_display.beginDmaImage(_left, _top + first, _drawWidth, _drawHeight - first, pixels)) {
+    _streamTransferActive = true;
+    return;
+  }
+  if (!_streamDmaFallbackLogged) {
+    Serial.println(F("[Anim] DMA unavailable for this frame; using TFT_eSPI bands"));
+    _streamDmaFallbackLogged = true;
+  }
+  _gifPresentY = first;
+  _gifPresentActive = true;
+  tickStreamPresentation();
+}
+
+void ImageView::finishStreamTransfer() {
+  _display.finishDmaImage();
+  _streamTransferActive = false;
 }
 
 void ImageView::tickStreamPresentation() {
@@ -2088,12 +2159,13 @@ void ImageView::tickStreamPresentation() {
 }
 
 void ImageView::presentStreamFrameNow() {
-  _gifPresentY = streamFirstVisibleRow();
-  _gifPresentActive = true;
+  if (_streamTransferActive) finishStreamTransfer();
+  beginStreamPresentation();
+  // A DMA transfer completes in tick(); a banded fallback finishes here.
   while (_gifPresentActive) tickStreamPresentation();
 }
 
-void ImageView::drawStreamLoading(uint32_t nowMs) {
+void ImageView::drawStreamLoading(uint32_t nowMs, const AnimationStreamWorker::Stats &stats) {
   if (!_display.isReady() || (uint32_t)(nowMs - _openedAtMs) < StreamLoadingDelayMs) return;
   const bool first = _streamLoadingAtMs == 0;
   if (!first && (uint32_t)(nowMs - _streamLoadingDrawnMs) < StreamLoadingRefreshMs) return;
@@ -2106,8 +2178,13 @@ void ImageView::drawStreamLoading(uint32_t nowMs) {
     UiText::draw(tft, F("Loading animation"), centerX, centerY - 11, TFT_WHITE, TFT_BLACK,
                  UiText::Size::Compact, MC_DATUM);
   }
-  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, 0, true, TFT_BLUE, TFT_DARKGREY,
-                         TFT_BLACK, first, nowMs - _streamLoadingAtMs);
+  // A WebP source loads into PSRAM before its first frame, so it shows real
+  // progress; a GIF shows the moving indeterminate segment.
+  const bool determinate = stats.sourceSize != 0;
+  const uint8_t percent = determinate
+    ? (uint8_t)(((uint64_t)stats.sourceLoaded * 100ULL) / stats.sourceSize) : 0;
+  UiKit::drawProgressBar(tft, centerX - 90, centerY + 2, 180, 12, percent, !determinate, TFT_BLUE,
+                         TFT_DARKGREY, TFT_BLACK, first, nowMs - _streamLoadingAtMs);
   _streamLoadingDrawnMs = nowMs;
 }
 
@@ -2267,150 +2344,6 @@ bool ImageView::decodeWebpImage() {
   releaseWebpDecoder();
   _lastProgress = 100;
   drawLoading(100);
-  return true;
-}
-
-bool ImageView::startWebpBuild() {
-  if (_format != ImageFormat::Webp || !_webpAnimated || !_webpAnimDecoder || !_frameBuffer) return false;
-  if (!cacheNeedsRotation() &&
-      (_display.width() != CacheWidth || _display.height() != CacheHeight)) {
-    _error = F("WebP cache does not support this display size");
-    return false;
-  }
-  CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Emga, paths) ||
-      _mediaCache.beginWrite(paths, _secretAccess, _cacheWriter) != MediaCache::Result::Complete ||
-      !writeAnimationCacheHeader(0, _gifLoopCount)) {
-    _error = F("Cannot start WebP cache");
-    _mediaCache.abort(_cacheWriter);
-    return false;
-  }
-  _gifBuildFrame = 0;
-  _gifBuildWriteOffset = 0;
-  _gifBuildWritePending = false;
-  _gifBuildLastFrame = false;
-  _gifBuildFinalizing = false;
-  _gifBuildDelay = 0;
-  _webpPreviousTimestamp = 0;
-  _gifState = GifState::Building;
-  drawGifLoading(0);
-  return true;
-}
-
-bool ImageView::buildWebpFrame() {
-  if (!_cacheWriter.active || !_webpAnimDecoder || !_frameBuffer) return false;
-  if (_gifBuildFinalizing) return finishWebpBuild();
-  if (_gifBuildWritePending) {
-    uint32_t recordBytes = gifFrameRecordBytes();
-    uint32_t remaining = recordBytes - _gifBuildWriteOffset;
-    uint16_t amount = remaining > CacheChunkBytes ? CacheChunkBytes : (uint16_t)remaining;
-    if (_gifBuildWriteOffset < AnimationFrameHeaderSize) {
-      uint8_t delay[AnimationFrameHeaderSize] = {};
-      writeLe32(delay, _gifBuildDelay);
-      uint16_t available = AnimationFrameHeaderSize - _gifBuildWriteOffset;
-      if (amount > available) amount = available;
-      memcpy(_cacheChunk, delay + _gifBuildWriteOffset, amount);
-    } else {
-      uint32_t payloadOffset = _gifBuildWriteOffset - AnimationFrameHeaderSize;
-      for (uint16_t i = 0; i < amount; i++) {
-        uint32_t position = payloadOffset + i;
-        uint32_t pair = position / 3;
-        uint32_t firstPixel = pair * 2;
-        uint16_t x0 = (uint16_t)(firstPixel % _drawWidth);
-        uint16_t y0 = (uint16_t)(firstPixel / _drawWidth);
-        uint16_t first = _frameBuffer[(size_t)(_top + y0) * _display.width() + _left + x0];
-        uint16_t rgb444a = (uint16_t)((first & 0xf000) >> 4) |
-                           (uint16_t)((first & 0x0780) >> 3) |
-                           (uint16_t)((first & 0x001e) >> 1);
-        uint16_t rgb444b = 0;
-        if (firstPixel + 1 < (uint32_t)_drawWidth * _drawHeight) {
-          uint16_t x1 = (uint16_t)((firstPixel + 1) % _drawWidth);
-          uint16_t y1 = (uint16_t)((firstPixel + 1) / _drawWidth);
-          uint16_t second = _frameBuffer[(size_t)(_top + y1) * _display.width() + _left + x1];
-          rgb444b = (uint16_t)((second & 0xf000) >> 4) |
-                       (uint16_t)((second & 0x0780) >> 3) |
-                       (uint16_t)((second & 0x001e) >> 1);
-        }
-        switch (position % 3) {
-          case 0: _cacheChunk[i] = (uint8_t)(rgb444a >> 4); break;
-          case 1: _cacheChunk[i] = (uint8_t)((rgb444a << 4) | (rgb444b >> 8)); break;
-          default: _cacheChunk[i] = (uint8_t)rgb444b; break;
-        }
-      }
-    }
-    const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, _cacheChunk, amount);
-    if (writeResult == MediaCache::Result::Busy) return true;
-    if (writeResult != MediaCache::Result::Complete) {
-      _error = F("WebP cache write failed");
-      return false;
-    }
-    _gifBuildWriteOffset += amount;
-    if (_gifBuildWriteOffset == recordBytes) {
-      _gifBuildWritePending = false;
-      _gifBuildFrame++;
-      drawGifLoading((uint8_t)((_gifBuildFrame * 100UL) / _gifFrameCount));
-      if (_gifBuildLastFrame) {
-        _gifBuildFinalizing = true;
-        return finishWebpBuild();
-      }
-    }
-    return true;
-  }
-  if (!WebPAnimDecoderHasMoreFrames(_webpAnimDecoder)) return false;
-  uint8_t *rgba = nullptr;
-  int timestamp = 0;
-  if (!WebPAnimDecoderGetNext(_webpAnimDecoder, &rgba, &timestamp) || !rgba) {
-    _error = F("WebP animation decode failed");
-    return false;
-  }
-  uint32_t currentTimestamp = timestamp > 0 ? (uint32_t)timestamp : 0;
-  uint32_t delay = currentTimestamp >= _webpPreviousTimestamp
-    ? currentTimestamp - _webpPreviousTimestamp : 0;
-  _webpPreviousTimestamp = currentTimestamp;
-  _gifBuildDelay = delay < GifMinimumDelayMs ? GifMinimumDelayMs : delay;
-  scaleWebpRgba(rgba);
-  _gifBuildLastFrame = (_gifBuildFrame + 1 >= _gifFrameCount);
-  _gifBuildWriteOffset = 0;
-  _gifBuildWritePending = true;
-  return true;
-}
-
-bool ImageView::finishWebpBuild() {
-  const MediaCache::Result seekResult = _mediaCache.seek(_cacheWriter, 0);
-  if (seekResult == MediaCache::Result::Busy) return true;
-  if (seekResult != MediaCache::Result::Complete) {
-    _error = F("WebP cache header write failed");
-    return false;
-  }
-  uint8_t header[AnimationCache::HeaderBytes];
-  AnimationCache::encodeHeader(header, _sourceFileSize, _sourceWriteTime, _sourceWidth,
-                               _sourceHeight, _gifBuildFrame, _gifLoopCount, _drawWidth, _drawHeight);
-  const MediaCache::Result writeResult = _mediaCache.write(_cacheWriter, header, sizeof(header));
-  if (writeResult == MediaCache::Result::Busy) return true;
-  if (writeResult != MediaCache::Result::Complete) {
-    _error = F("WebP cache header write failed");
-    return false;
-  }
-  const MediaCache::Result commitResult = _mediaCache.commit(_cacheWriter);
-  if (commitResult == MediaCache::Result::Busy) return true;
-  if (commitResult != MediaCache::Result::Complete) {
-    _error = F("WebP cache commit failed");
-    _mediaCache.abort(_cacheWriter);
-    return false;
-  }
-  Serial.printf("[Anim] converted %lu frame(s) in %lu ms\n", (unsigned long)_gifBuildFrame,
-                (unsigned long)(millis() - _openedAtMs));
-  releaseWebpDecoder();
-  releaseBuffers();
-  CachePaths paths;
-  CachePath::forSource(_path, FileFormats::Format::Emga, paths);
-  if (_mediaCache.openRead(paths, _secretAccess, _gifCacheReadFile) != MediaCache::Result::Complete ||
-      !startGifPlayback()) {
-    _error = F("WebP cache reopen failed");
-    if (_gifCacheReadFile) _mediaCache.close(_gifCacheReadFile);
-    releaseGifBuffers();
-    return false;
-  }
   return true;
 }
 

@@ -90,7 +90,8 @@ private:
   static const bool EnableBackgroundGifLoader = true;
   static const uint8_t GifPresentBandRows = 16;
   static const uint16_t GifLoaderReadChunkBytes = 2048;
-  // Streamed frames are packed, so a band goes to TFT_eSPI without staging.
+  // Streamed frames normally go to the panel by DMA. When a clipped start row
+  // is not 64-byte aligned, packed bands go to TFT_eSPI without staging.
   static const uint16_t StreamPresentBandRows = 48;
   // Fast opens show their first frame without flashing the loading panel.
   static const uint32_t StreamLoadingDelayMs = 150;
@@ -145,7 +146,6 @@ private:
   WebPAnimInfo _webpAnimInfo;
   bool _webpAnimated;
   bool _animationSource;
-  uint32_t _webpPreviousTimestamp;
   String _path;
   String _error;
   String _cachePath;
@@ -267,12 +267,15 @@ private:
   PNG _png;
   JPEGDEC _jpeg;
   AnimatedGIF _gif;
-  // GIFs stream through this worker, which borrows _gif while it runs.
+  // Animated GIF and WebP stream through this worker; a GIF borrows _gif.
   AnimationStreamWorker _stream;
   uint8_t _streamSlot;
   const uint16_t *_streamPixels;
   uint32_t _streamLoadingAtMs;
   uint32_t _streamLoadingDrawnMs;
+  // The displayed slot is being read by an LCD_CAM DMA transfer.
+  bool _streamTransferActive;
+  bool _streamDmaFallbackLogged;
   static ImageView *_decoderOwner;
 
   void reset();
@@ -334,12 +337,16 @@ private:
   bool writeAnimationCacheHeader(uint32_t frameCount, int32_t loopCount);
   void releaseGifBuffers();
   void releaseGifDecoder();
-  bool startGifStream();
-  bool tickGifStream(uint32_t nowMs);
-  void stopGifStream();
+  bool readGifStreamHeader();
+  bool sniffAnimatedWebp();
+  bool startAnimationStream(AnimationStreamWorker::Source source);
+  bool tickAnimationStream(uint32_t nowMs);
+  void stopAnimationStream();
+  void beginStreamPresentation();
+  void finishStreamTransfer();
   void tickStreamPresentation();
   void presentStreamFrameNow();
-  void drawStreamLoading(uint32_t nowMs);
+  void drawStreamLoading(uint32_t nowMs, const AnimationStreamWorker::Stats &stats);
   void clearStreamLoading();
   void logStreamStats(uint32_t nowMs, bool force = false);
   uint16_t streamFirstVisibleRow() const;
@@ -348,9 +355,6 @@ private:
   bool prepareWebpSource();
   bool inspectWebpSource();
   bool decodeWebpImage();
-  bool startWebpBuild();
-  bool buildWebpFrame();
-  bool finishWebpBuild();
   void releaseWebpDecoder();
   void scaleWebpRgba(const uint8_t *rgba);
   void scaleGifFrame();

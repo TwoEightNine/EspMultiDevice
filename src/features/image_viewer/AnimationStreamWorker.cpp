@@ -1,6 +1,8 @@
 #include "AnimationStreamWorker.h"
 
 #include "../../../third_party/AnimatedGIF/AnimatedGIF.h"
+#include "../../../third_party/libwebp/src/webp/decode.h"
+#include "../../../third_party/libwebp/src/webp/demux.h"
 #include "../../core/SpiBusLock.h"
 
 #include <esp32-hal-psram.h>
@@ -17,9 +19,12 @@ constexpr size_t SlotAlignment = 64;
 constexpr uint32_t LateMs = 250;
 constexpr uint32_t LockRetryMs = 20;
 constexpr uint32_t SourceCloseLockMs = 250;
-// GIF delays of 10 ms or less play at 100 ms, as browsers do. AnimatedGIF
-// already applies this to explicit delays; frames without a graphic control
-// extension report zero.
+// WebP sources load through an internal-RAM bounce buffer, one bounded SD
+// transaction per chunk.
+constexpr uint32_t SourceChunkBytes = 8192;
+// Delays of 10 ms or less play at 100 ms, as browsers do. AnimatedGIF already
+// applies this to explicit GIF delays; GIF frames without a graphic control
+// extension and zero-duration WebP frames report zero.
 constexpr uint32_t ShortDelayMs = 10;
 constexpr uint32_t ShortDelayReplacementMs = 100;
 
@@ -36,10 +41,12 @@ private:
 AnimationStreamWorker *volatile AnimationStreamWorker::_current = nullptr;
 
 AnimationStreamWorker::AnimationStreamWorker(SecretStorage &storage, AnimatedGIF &decoder)
-    : _storage(storage), _decoder(decoder), _secretAccess(false), _task(nullptr), _lock(nullptr),
-      _stopped(nullptr), _stopRequested(false), _decoderOpen(false), _sourceWidth(0),
-      _sourceHeight(0), _canvasPixels(0), _drawWidth(0), _drawHeight(0), _columnMap(nullptr),
-      _rowMap(nullptr), _loopCount(-1), _slots{}, _timelineStarted(false), _timelineStartMs(0),
+    : _storage(storage), _decoder(decoder), _source(Source::Gif), _secretAccess(false), _task(nullptr),
+      _lock(nullptr), _stopped(nullptr), _stopRequested(false), _decoderOpen(false), _sourceBytes(0),
+      _sourceWidth(0), _sourceHeight(0), _canvasPixels(0), _drawWidth(0), _drawHeight(0),
+      _columnMap(nullptr), _rowMap(nullptr), _passLimit(1), _webpData(nullptr), _webpLoaded(0),
+      _webpDecoder(nullptr), _webpFrame(nullptr), _webpPreviousTimestamp(0), _slots{},
+      _timelineStarted(false), _timelineStartMs(0),
       _lastPublishedMs(0), _phase(Phase::Idle), _error{}, _decoded(0), _dropped(0),
       _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {}
 
@@ -48,9 +55,9 @@ AnimationStreamWorker::~AnimationStreamWorker() {
   if (_lock) vSemaphoreDelete(_lock);
 }
 
-bool AnimationStreamWorker::start(const String &path, bool secretAccess, uint32_t sourceWidth,
-                                  uint32_t sourceHeight, uint16_t drawWidth, uint16_t drawHeight,
-                                  String &error) {
+bool AnimationStreamWorker::start(Source source, const String &path, bool secretAccess,
+                                  uint32_t sourceBytes, uint32_t sourceWidth, uint32_t sourceHeight,
+                                  uint16_t drawWidth, uint16_t drawHeight, String &error) {
   stop();
   if (!_lock) _lock = xSemaphoreCreateMutex();
   _stopped = xSemaphoreCreateBinary();
@@ -59,20 +66,29 @@ bool AnimationStreamWorker::start(const String &path, bool secretAccess, uint32_
     stop();
     return false;
   }
-  if (!sourceWidth || !sourceHeight || !drawWidth || !drawHeight) {
+  if (!sourceWidth || !sourceHeight || !drawWidth || !drawHeight ||
+      (source == Source::Webp && !sourceBytes)) {
     error = F("Invalid animation size");
     stop();
     return false;
   }
+  const uint64_t canvasPixels = (uint64_t)sourceWidth * sourceHeight;
   // AnimatedGIF's cooked canvas keeps indexed, RGB565, and previous-frame
   // copies plus a spare row: five bytes per canvas pixel and three per column.
-  const uint64_t canvasBytes = (uint64_t)sourceWidth * sourceHeight * 5ULL + (uint64_t)sourceWidth * 3ULL;
+  // WebP keeps the whole source plus libwebp's current and previous RGBA
+  // canvases.
+  const uint64_t decoderBytes = source == Source::Gif
+    ? canvasPixels * 5ULL + (uint64_t)sourceWidth * 3ULL
+    : (uint64_t)sourceBytes + canvasPixels * 8ULL;
+  const uint64_t largestBlock = source == Source::Gif
+    ? decoderBytes
+    : (canvasPixels * 4ULL > sourceBytes ? canvasPixels * 4ULL : (uint64_t)sourceBytes);
   const uint32_t slotBytes = (uint32_t)drawWidth * drawHeight * sizeof(uint16_t);
   const uint32_t freePsram = ESP.getFreePsram();
   const uint32_t largestPsram = ESP.getMaxAllocPsram();
-  if (canvasBytes + (uint64_t)slotBytes * SlotCount > freePsram || canvasBytes > largestPsram) {
+  if (decoderBytes + (uint64_t)slotBytes * SlotCount > freePsram || largestBlock > largestPsram) {
     error = String(F("Animation needs too much PSRAM (")) +
-            String((uint32_t)((canvasBytes + (uint64_t)slotBytes * SlotCount) / 1024ULL)) +
+            String((uint32_t)((decoderBytes + (uint64_t)slotBytes * SlotCount) / 1024ULL)) +
             F(" KB; free ") + String(freePsram / 1024) + F(" KB, largest ") +
             String(largestPsram / 1024) + F(" KB)");
     stop();
@@ -89,8 +105,10 @@ bool AnimationStreamWorker::start(const String &path, bool secretAccess, uint32_
     }
     _slots[index].state = SlotState::Free;
   }
+  _source = source;
   _path = path;
   _secretAccess = secretAccess;
+  _sourceBytes = sourceBytes;
   _sourceWidth = sourceWidth;
   _sourceHeight = sourceHeight;
   _drawWidth = drawWidth;
@@ -141,6 +159,8 @@ void AnimationStreamWorker::stop() {
   _scaleTotalUs = 0;
   _scaled = 0;
   _stackHighWater = 0;
+  _webpLoaded = 0;
+  _sourceBytes = 0;
 }
 
 void AnimationStreamWorker::freeSlots() {
@@ -212,6 +232,10 @@ AnimationStreamWorker::Stats AnimationStreamWorker::stats(String *error) {
   copy.decodeAverageUs = _decoded ? (uint32_t)(_decodeTotalUs / _decoded) : 0;
   copy.decodeMaxUs = _decodeMaxUs;
   copy.scaleAverageUs = _scaled ? (uint32_t)(_scaleTotalUs / _scaled) : 0;
+  if (_source == Source::Webp) {
+    copy.sourceLoaded = _webpLoaded;
+    copy.sourceSize = _sourceBytes;
+  }
   if (error) *error = _error;
   return copy;
 }
@@ -224,7 +248,8 @@ void AnimationStreamWorker::run() {
   // AnimatedGIF's callbacks carry no context. Only one worker runs at a
   // time, and only its task invokes them.
   _current = this;
-  if (openDecoder()) decodeLoop();
+  const bool opened = _source == Source::Gif ? openGif() : openWebp();
+  if (opened && prepareScaler()) decodeLoop();
   // Release the source and decoder as soon as playback ends or fails; the
   // UI keeps showing its slot until it stops the worker.
   closeDecoder();
@@ -235,7 +260,7 @@ void AnimationStreamWorker::run() {
   vTaskDelete(nullptr);
 }
 
-bool AnimationStreamWorker::openDecoder() {
+bool AnimationStreamWorker::openGif() {
   _decoder.begin(GIF_PALETTE_RGB565_LE);
   const int opened = _decoder.open(_path.c_str(), gifOpen, gifClose, gifRead, gifSeek, nullptr);
   if (!opened) {
@@ -264,8 +289,90 @@ bool AnimationStreamWorker::openDecoder() {
     fail(message);
     return false;
   }
-  clearCanvas();
-  _loopCount = _decoder.getLoopCount();
+  clearGifCanvas();
+  // NETSCAPE loop count: none plays once, zero repeats forever, and N
+  // repeats N more times.
+  const int loopCount = _decoder.getLoopCount();
+  _passLimit = loopCount < 0 ? 1 : loopCount == 0 ? 0 : (uint32_t)loopCount + 1;
+  return true;
+}
+
+bool AnimationStreamWorker::loadWebpSource() {
+  if (!lockSource()) return false;
+  _file = _storage.open(_path, FILE_READ, _secretAccess);
+  const uint32_t size = _file ? (uint32_t)_file.size() : 0;
+  SpiBusLock::unlock();
+  if (!_file || size != _sourceBytes) {
+    fail(_file ? "WebP source changed while opening" : "Unable to open WebP source");
+    return false;
+  }
+  _webpData = static_cast<uint8_t *>(psramAlloc(size));
+  uint8_t *chunk = static_cast<uint8_t *>(
+      heap_caps_malloc(SourceChunkBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!_webpData || !chunk) {
+    if (chunk) heap_caps_free(chunk);
+    char message[96];
+    snprintf(message, sizeof(message), "WebP source needs too much PSRAM (%u KB; largest %u KB)",
+             (unsigned)(size / 1024), (unsigned)(ESP.getMaxAllocPsram() / 1024));
+    fail(message);
+    return false;
+  }
+  uint32_t loaded = 0;
+  while (loaded < size) {
+    const uint32_t amount = size - loaded > SourceChunkBytes ? SourceChunkBytes : size - loaded;
+    if (!lockSource()) break;
+    const int read = _file.read(chunk, amount);
+    SpiBusLock::unlock();
+    if (read != (int)amount) {
+      fail("WebP source read failed");
+      break;
+    }
+    memcpy(_webpData + loaded, chunk, amount);
+    loaded += amount;
+    {
+      LockGuard guard(_lock);
+      _webpLoaded = loaded;
+    }
+    // Leave the shared SD/touch bus free for a moment between chunks.
+    vTaskDelay(1);
+  }
+  heap_caps_free(chunk);
+  gifClose(&_file);
+  return loaded == size;
+}
+
+bool AnimationStreamWorker::openWebp() {
+  if (!loadWebpSource()) return false;
+  WebPAnimDecoderOptions options;
+  if (!WebPAnimDecoderOptionsInit(&options)) {
+    fail("WebP animation setup failed");
+    return false;
+  }
+  // Premultiplied output composes transparency over the black canvas.
+  options.color_mode = MODE_rgbA;
+  options.use_threads = 0;
+  // The decoder keeps pointing into this data until it is deleted.
+  WebPData data = {_webpData, _sourceBytes};
+  _webpDecoder = WebPAnimDecoderNew(&data, &options);
+  WebPAnimInfo info;
+  if (!_webpDecoder || !WebPAnimDecoderGetInfo(_webpDecoder, &info) || info.frame_count == 0) {
+    char message[96];
+    snprintf(message, sizeof(message), "Invalid WebP animation or too little PSRAM (largest %u KB)",
+             (unsigned)(ESP.getMaxAllocPsram() / 1024));
+    fail(message);
+    return false;
+  }
+  if (info.canvas_width != _sourceWidth || info.canvas_height != _sourceHeight) {
+    fail("WebP header changed while opening");
+    return false;
+  }
+  // WebP loop count is the total number of passes; zero repeats forever.
+  _passLimit = info.loop_count;
+  _webpPreviousTimestamp = 0;
+  return true;
+}
+
+bool AnimationStreamWorker::prepareScaler() {
   _columnMap = static_cast<uint16_t *>(
       heap_caps_malloc((size_t)_drawWidth * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   _rowMap = static_cast<uint16_t *>(
@@ -289,6 +396,11 @@ void AnimationStreamWorker::closeDecoder() {
     _decoderOpen = false;
   }
   if (_decoder.getFrameBuf()) _decoder.freeFrameBuf(psramFree);
+  if (_webpDecoder) WebPAnimDecoderDelete(_webpDecoder);
+  _webpDecoder = nullptr;
+  _webpFrame = nullptr;
+  if (_webpData) psramFree(_webpData);
+  _webpData = nullptr;
   if (_file) gifClose(&_file);
   if (_columnMap) heap_caps_free(_columnMap);
   if (_rowMap) heap_caps_free(_rowMap);
@@ -296,15 +408,12 @@ void AnimationStreamWorker::closeDecoder() {
   _rowMap = nullptr;
 }
 
-void AnimationStreamWorker::clearCanvas() {
+void AnimationStreamWorker::clearGifCanvas() {
   uint8_t *canvas = _decoder.getFrameBuf();
   if (canvas) memset(canvas, 0, (size_t)_canvasPixels * 5 + (size_t)_sourceWidth * 3);
 }
 
 void AnimationStreamWorker::decodeLoop() {
-  // NETSCAPE loop count: none plays once, zero repeats forever, and N
-  // repeats N more times.
-  const uint32_t totalPasses = _loopCount < 0 ? 1 : (uint32_t)_loopCount + 1;
   uint32_t passes = 0;
   uint32_t passFrames = 0;
   uint32_t sequence = 0;
@@ -321,41 +430,36 @@ void AnimationStreamWorker::decodeLoop() {
       return;
     }
 
-    int delay = 0;
+    uint32_t delayMs = 0;
+    int errorCode = 0;
     const int64_t decodeStarted = esp_timer_get_time();
-    const int result = _decoder.playFrame(false, &delay, nullptr);
+    const DecodeResult result = decodeNext(delayMs, errorCode);
     const uint32_t decodeUs = (uint32_t)(esp_timer_get_time() - decodeStarted);
     if (_stopRequested) {
       returnSlot(slot);
       return;
     }
-    const int status = _decoder.getLastError();
-    bool frameDecoded = false;
-    bool endOfPass = false;
-    if (result < 0 || (status != GIF_SUCCESS && status != GIF_EMPTY_FRAME)) {
+    const bool frameDecoded = result == DecodeResult::Frame || result == DecodeResult::LastFrame;
+    const bool endOfPass = result != DecodeResult::Frame;
+    if (result == DecodeResult::Failed) {
       if (passFrames == 0) {
         returnSlot(slot);
         char message[48];
-        snprintf(message, sizeof(message), "GIF decode error %d", status);
+        if (_source == Source::Gif) snprintf(message, sizeof(message), "GIF decode error %d", errorCode);
+        else snprintf(message, sizeof(message), "WebP animation decode failed");
         fail(message);
         return;
       }
       // A truncated or damaged file loops the frames that did decode, as
       // browsers do.
       if (!reportedTruncation) {
-        Serial.printf("[Anim] GIF stream ended early after %lu frame(s), error %d\n",
-                      (unsigned long)passFrames, status);
+        Serial.printf("[Anim] stream ended early after %lu frame(s), error %d\n",
+                      (unsigned long)passFrames, errorCode);
         reportedTruncation = true;
       }
-      endOfPass = true;
-    } else if (status == GIF_EMPTY_FRAME) {
-      endOfPass = true;
-    } else {
-      frameDecoded = true;
-      endOfPass = result == 0;
     }
 
-    const bool finalPass = _loopCount != 0 && passes + 1 >= totalPasses;
+    const bool finalPass = _passLimit != 0 && passes + 1 >= _passLimit;
     // A single-frame source never needs a second decode.
     const bool finishing = endOfPass && (finalPass || (passFrames + (frameDecoded ? 1 : 0)) <= 1);
     if (frameDecoded) {
@@ -386,8 +490,7 @@ void AnimationStreamWorker::decodeLoop() {
       }
       ++sequence;
       ++passFrames;
-      const uint32_t frameDelay = (uint32_t)(delay > 0 ? delay : 0);
-      dueMs += frameDelay <= ShortDelayMs ? ShortDelayReplacementMs : frameDelay;
+      dueMs += delayMs <= ShortDelayMs ? ShortDelayReplacementMs : delayMs;
     } else {
       returnSlot(slot);
     }
@@ -400,16 +503,68 @@ void AnimationStreamWorker::decodeLoop() {
       }
       ++passes;
       passFrames = 0;
-      _decoder.reset();
-      // Each pass starts from an empty canvas, like the first.
-      clearCanvas();
+      restartPass();
     }
     // Let the idle task run between frames on this core.
     vTaskDelay(1);
   }
 }
 
+AnimationStreamWorker::DecodeResult AnimationStreamWorker::decodeNext(uint32_t &delayMs,
+                                                                      int &errorCode) {
+  if (_source == Source::Gif) {
+    int delay = 0;
+    const int result = _decoder.playFrame(false, &delay, nullptr);
+    errorCode = _decoder.getLastError();
+    if (result < 0 || (errorCode != GIF_SUCCESS && errorCode != GIF_EMPTY_FRAME)) {
+      return DecodeResult::Failed;
+    }
+    if (errorCode == GIF_EMPTY_FRAME) return DecodeResult::EndOfPass;
+    delayMs = delay > 0 ? (uint32_t)delay : 0;
+    return result == 0 ? DecodeResult::LastFrame : DecodeResult::Frame;
+  }
+  if (!WebPAnimDecoderHasMoreFrames(_webpDecoder)) return DecodeResult::EndOfPass;
+  uint8_t *rgba = nullptr;
+  int timestamp = 0;
+  if (!WebPAnimDecoderGetNext(_webpDecoder, &rgba, &timestamp) || !rgba) {
+    _webpFrame = nullptr;
+    return DecodeResult::Failed;
+  }
+  _webpFrame = rgba;
+  // A WebP timestamp is the end time of its frame, so the difference from the
+  // previous one is this frame's duration.
+  const uint32_t current = timestamp > 0 ? (uint32_t)timestamp : 0;
+  delayMs = current >= _webpPreviousTimestamp ? current - _webpPreviousTimestamp : 0;
+  _webpPreviousTimestamp = current;
+  return WebPAnimDecoderHasMoreFrames(_webpDecoder) ? DecodeResult::Frame : DecodeResult::LastFrame;
+}
+
+void AnimationStreamWorker::restartPass() {
+  if (_source == Source::Gif) {
+    _decoder.reset();
+    // Each pass starts from an empty canvas, like the first.
+    clearGifCanvas();
+    return;
+  }
+  // libwebp clears its canvas when it decodes the first frame again.
+  WebPAnimDecoderReset(_webpDecoder);
+  _webpPreviousTimestamp = 0;
+  _webpFrame = nullptr;
+}
+
 void AnimationStreamWorker::scaleInto(uint16_t *destination) {
+  if (_source == Source::Webp) {
+    const uint32_t pitch = _sourceWidth * 4;
+    for (uint32_t y = 0; y < _drawHeight; ++y) {
+      const uint8_t *row = _webpFrame + (size_t)_rowMap[y] * pitch;
+      uint16_t *out = destination + (size_t)y * _drawWidth;
+      for (uint32_t x = 0; x < _drawWidth; ++x) {
+        const uint8_t *pixel = row + (size_t)_columnMap[x] * 4;
+        out[x] = (uint16_t)(((pixel[0] & 0xf8) << 8) | ((pixel[1] & 0xfc) << 3) | (pixel[2] >> 3));
+      }
+    }
+    return;
+  }
   const uint8_t *cooked = _decoder.getFrameBuf() + _canvasPixels;
   const uint32_t pitch = _sourceWidth * 2;
   // The cooked canvas follows the one-byte-per-pixel indexed canvas, so an

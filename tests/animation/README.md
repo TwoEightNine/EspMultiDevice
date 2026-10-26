@@ -36,7 +36,7 @@ python3 tools/generate_animation_fixtures.py
 | `gif_single_frame.gif` | One frame (frame 000) shown still. |
 | `gif_truncated.gif` | The 320 × 240 loop cut mid-frame with no trailer. Streaming loops the frames that decoded, and serial logs `[Anim] GIF stream ended early`. |
 | `gif_disposal_alpha.gif` | A checkerboard, then 64 × 64 disks with transparent corners. Red (disposal 1) disks accumulate. Green (disposal 2) disks leave black holes in the board. Blue (disposal 3) disks vanish and the board shows through again. The checkerboard must show through the disk corners. Magenta anywhere means transparency or disposal is wrong. |
-| `webp_anim_lossy_320x240.webp` | Lossy, 30 frames at 10 fps. |
+| `webp_anim_lossy_320x240.webp` | Lossy, 30 frames at 10 fps. Infinite loop. |
 | `webp_anim_lossless_320x240.webp` | Lossless, 30 frames at 10 fps. |
 | `webp_anim_640x480_lossy.webp` | Lossy, 20 frames downscaled to 320 × 240. |
 | `webp_anim_textured_320x240_lossy.webp` | Lossy, 20 frames over scrolling noise. Worst-case WebP decode. |
@@ -71,7 +71,7 @@ columns no longer apply to them. Serial reports:
 - every 2 s, `[Anim] dec=… pres=… drop=… decMs=avg/max scaleMs=avg psram=free/largest`
 - `[Anim] worker stack free N bytes` when the viewer closes
 
-Animated WebP still uses the cached path until phase 2.
+Animated WebP streams too since phase 2; see the checks below.
 
 1. Open each GIF twice. Both opens should report a similar first-frame time,
    far below the baseline's first-open conversion.
@@ -102,3 +102,48 @@ Animated WebP still uses the cached path until phase 2.
 13. Record `decMs` for `gif_320x240_textured_100ms.gif`, `gif_640x480_100ms.gif`,
     and `gif_1000x1000_100ms.gif`. These numbers decide whether phase 6 (PSRAM
     replay) is worth doing.
+
+## Phase 2 checks: WebP streaming
+
+Animated WebP now streams like GIF. The loading panel shows the source-load
+percentage, because the whole file must be in PSRAM before the first frame.
+
+1. Open each `webp_anim_*` fixture twice. Record the first-frame time, then
+   watch for 30 s and record the last `[Anim] dec=… drop=… decMs=…` line.
+   `webp_anim_lossy_320x240.webp` and `webp_anim_lossless_320x240.webp` should
+   show no skipped numbers and `drop=0`.
+2. `webp_anim_alpha_blend.webp`: the left half is black, and the moving square
+   is mid grey there and lighter over the board. Compare with a desktop
+   browser set to a black background.
+3. `webp_static.webp` and `webp_static_alpha.webp` still behave as stills. The
+   second open logs `Image cache hit`, and the zoom button appears for the
+   480 × 200 aspect ratio.
+4. Close `webp_anim_textured_320x240_lossy.webp` while the percentage bar is
+   loading. The viewer exits at once.
+5. Alternate edge taps between a GIF and an animated WebP about ten times.
+   Nothing crashes, and `psram=` free returns to the same value on each open.
+6. No new `.cache/*.emga` appears for any WebP.
+7. Record `decMs` for `webp_anim_textured_320x240_lossy.webp` and
+   `webp_anim_640x480_lossy.webp` next to the GIF numbers from phase 1.
+
+## Phase 3 checks: DMA presentation
+
+Animation frames now reach the panel through the same LCD_CAM DMA path as
+video.
+
+1. Watch `gif_320x240_100ms.gif` for 30 s in informative mode. The app bar's
+   bottom edge never flickers, and the title and close icon stay intact. No
+   frame tears horizontally; each frame appears whole.
+2. In full screen the same fixture animates rows 40–47, the strip the bar
+   covered.
+3. `gif_317x237_100ms.gif` in informative mode logs `[Anim] DMA unavailable
+   for this frame; using TFT_eSPI bands` once. Rows stay straight, with no
+   skew or shift. In full screen it uses DMA, so the log line does not
+   reappear after reopening in full screen.
+4. Toggle the bar quickly during playback. The frame and bar repaint cleanly.
+5. Open the Lua Images example app on an animation and close it.
+6. View an animation, then play a video, then view an animation again. Both
+   play, which confirms the LCD_CAM bus is handed back on each exit.
+7. Compare `gif_320x240_40ms.gif` and `webp_anim_lossy_320x240.webp` with the
+   phase 1–2 numbers. `pres` should be close to `dec - drop`, and `drop`
+   should not be higher than before.

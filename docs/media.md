@@ -46,24 +46,34 @@ The viewer supports BMP, static non-interlaced PNG, baseline JPEG, simple/extend
 
 Images open in informative mode with an opaque 48px top bar showing the source filename. Tapping the central image area toggles informative and full-screen modes; full screen hides the bar. The left and right 48px edges move through adjacent images, except that the informative bar owns its close target and, when available, its top-right zoom target. Eligible still images whose aspect ratio differs from the 480 × 320 screen ratio by more than 10% expose a centered crop-to-fill zoom toggle. Crop state persists while switching modes. Edge navigation preserves full-screen mode but resets zoom; every newly opened image starts aspect-fit in informative mode. Animated images do not expose crop zoom.
 
-The decode, scaling, cache, and animation code lives in `ImageView` (`src/features/image_viewer/`), which the Image Viewer screen and the Lua app host share; the screen keeps only its bar, touch targets, and neighbour navigation. SDK 5 Lua apps show images through the same pipeline (`esp.image`, see [external-apps.md](external-apps.md)), so they use and produce the same `.em16`, `.em16z`, and (for animated WebP) `.emga` sidecars. Because a Lua worker may use the card while an image decodes for it, every source read, seek, and open in `ImageView` takes `SpiBusLock` for that one transaction (waiting up to 250 ms), as `MediaCache` already does for sidecars.
+The decode, scaling, cache, and animation code lives in `ImageView` (`src/features/image_viewer/`), which the Image Viewer screen and the Lua app host share; the screen keeps only its bar, touch targets, and neighbour navigation. SDK 5 Lua apps show images through the same pipeline (`esp.image`, see [external-apps.md](external-apps.md)), so they use and produce the same `.em16` and `.em16z` sidecars. Because a Lua worker may use the card while an image decodes for it, every source read, seek, and open in `ImageView` takes `SpiBusLock` for that one transaction (waiting up to 250 ms), as `MediaCache` already does for sidecars.
 
 From Files, tapping the left or right 48px edge moves to the previous or next supported image from the naturally sorted folder listing; navigation wraps. The Image Viewer itself has no navigation arrows.
 
 Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; smaller images are never upscaled. Animation support includes transparency, disposal/blending, and loop metadata. Insufficient PSRAM produces an error instead of synchronous SD fallback.
 
-GIFs stream directly from their source and never read or write an `.emga` sidecar; existing GIF sidecars remain orphaned cache files until normal Files cleanup.
-- **Worker:** `AnimationStreamWorker` runs on the core the Arduino loop does not use and owns the source file and the decoder while it runs. It borrows `ImageView`'s `AnimatedGIF` instance. The worker decodes into AnimatedGIF's cooked PSRAM canvas, which holds five bytes per source pixel plus three per column. It then nearest-neighbour scales into one of three packed RGB565 PSRAM slots sized to the draw rectangle, using precomputed row and column maps.
+Animated GIF and WebP stream directly from their source and never read or write an `.emga` sidecar; existing sidecars remain orphaned cache files until normal Files cleanup. `ImageView` routes a WebP to streaming when its first chunk is `VP8X` with the animation flag set, reading the canvas size from that header. Simple (`VP8 `/`VP8L`) and non-animated extended WebP stay on the cached still path.
+- **Worker:** `AnimationStreamWorker` runs on the core the Arduino loop does not use and owns the source file and the decoder while it runs. It scales each frame, nearest-neighbour with precomputed row and column maps, into one of three packed RGB565 PSRAM slots sized to the draw rectangle.
+  - **GIF** borrows `ImageView`'s `AnimatedGIF` instance and decodes into its cooked PSRAM canvas, which holds five bytes per source pixel plus three per column.
+  - **WebP** first loads the whole source into PSRAM through an 8 KiB internal bounce buffer, one bounded SD transaction per chunk. It then decodes with libwebp's `WebPAnimDecoder` in premultiplied `MODE_rgbA`, so transparency composes over black. libwebp keeps current and previous RGBA canvases (eight bytes per canvas pixel) beside the source.
+  - Before starting, the worker checks free and largest-block PSRAM against these figures. It refuses with the required and available sizes rather than failing part-way.
 - **SD access:** every source open, read, and seek holds `SpiBusLock` for that one transaction. A stop request abandons a pending lock wait, so closing or navigating away waits for at most the current frame's decode.
 - **Timing:** the UI starts the presentation timeline when it shows the first frame. Each frame becomes due at the sum of the preceding delays, and the UI shows the newest due frame.
   - Delays of 10 ms or less, including frames without a delay, play at 100 ms, as in browsers. Other delays are honoured, with no further minimum.
   - A frame more than 250 ms late is still decoded, because later frames build on its canvas, but it is not scaled or published unless 250 ms have passed without a new frame. A slow source therefore skips frames rather than playing in slow motion.
-- **Looping:** each loop pass starts from a cleared canvas. A file without a NETSCAPE extension plays once, a loop count of zero repeats forever, and N repeats N more times. The final frame stays on screen, and the worker releases the source and decoder.
-- **Damaged files:** a single-frame GIF is decoded once. A truncated or damaged GIF loops the frames that decoded; it fails only if a pass cannot decode its first frame.
-- **Display:** the first frame replaces the black canvas directly. When it takes longer than 150 ms, a "Loading animation" label with an indeterminate progress bar appears meanwhile. Frames go to TFT_eSPI in 48-row bands, one band per loop pass. In informative mode, rows under the 48px app bar are not sent, so the bar does not flicker.
+- **Looping:** each loop pass starts from a cleared canvas.
+  - **GIF:** a file without a NETSCAPE extension plays once, a loop count of zero repeats forever, and N repeats N more times.
+  - **WebP:** the loop count is the total number of passes, and zero repeats forever.
+  - The final frame stays on screen, and the worker releases the source and decoder.
+- **Damaged files:** a single-frame animation is decoded once. A truncated or damaged file loops the frames that decoded; it fails only if a pass cannot decode its first frame.
+- **Display:** the first frame replaces the black canvas directly. When it takes longer than 150 ms, a "Loading animation" label appears meanwhile, with the WebP source-load percentage or, for GIF, an indeterminate progress bar. Each frame goes to the panel as one asynchronous LCD_CAM DMA transfer from its 64-byte-aligned slot (`DisplayController::beginDmaImage()`), so a whole frame appears at once and the UI loop keeps polling touch meanwhile.
+  - The UI takes no new frame until the transfer completes, and it finishes any transfer before the worker may free slots.
+  - Stopping the stream releases the LCD_CAM bus, as the video player does.
+  - In informative mode, rows under the 48px app bar are not sent, so the bar does not flicker. The clipped transfer starts at the first visible row.
+  - When that row's offset is not 64-byte aligned (a width that is not a multiple of four), or DMA is unavailable, the frame falls back to 48-row TFT_eSPI bands, one band per loop pass. Serial then logs `[Anim] DMA unavailable for this frame; using TFT_eSPI bands` once per open.
 - **Serial log:** playback logs the time from open to the first frame, then every 2 s a line `[Anim] dec=… pres=… drop=… decMs=avg/max scaleMs=avg psram=free/largest`, and the worker's free stack when it stops.
 
-Animated WebP still converts to an `.emga` cache before playback and logs `[Anim] converted N frame(s) in T ms` and `[Anim] pres=…` lines. Use `tools/generate_animation_fixtures.py` to generate the GIF/WebP fixtures under `tests/animation/fixtures/`; their expected results and the measurement procedure are in `tests/animation/README.md`.
+Use `tools/generate_animation_fixtures.py` to generate the GIF/WebP fixtures under `tests/animation/fixtures/`; their expected results and the measurement procedure are in `tests/animation/README.md`.
 
 Visible image files may receive 32×32 Files thumbnails. They are worker-decoded, retained for the Files visit, and persist as validated `.cache/*.eth1` sidecars. Unsupported variants, oversized WebP input, and memory failures retain a normal file icon.
 
@@ -130,7 +140,7 @@ Eligible crop-zoom renders use a separate `.em16z` sidecar with the same validat
 
 ### `.emga`: animated-image frames
 
-Animated WebP uses `EMGA` version 4; GIFs stream instead and no longer produce it. Its 40-byte little-endian header declares packed RGB444 encoding (`2`), fixed 480 × 320 display geometry, source size/time, source geometry, frame count, loop count, and cached draw geometry.
+Animated GIF and WebP used `EMGA` version 4 before they streamed; the firmware no longer produces it, and Files cleanup removes existing files. Its 40-byte little-endian header declares packed RGB444 encoding (`2`), fixed 480 × 320 display geometry, source size/time, source geometry, frame count, loop count, and cached draw geometry.
 
 Each frame has a 32-bit little-endian delay in milliseconds followed by two 12-bit RGB444 pixels packed into three bytes (two bytes for an odd final pixel). This keeps 4,096 colors while using 25% less SD storage/read bandwidth than RGB565. The worker expands frames into an RGB565 PSRAM ring before TFT transfer. Source animation delays are clamped to at least 100 ms (10fps), and GIF/WebP frame transfers are batched so touch and close interaction remain responsive.
 

@@ -9,19 +9,21 @@
 
 class AnimatedGIF;
 struct gif_file_tag;  // AnimatedGIF's GIFFILE
+struct WebPAnimDecoder;
 
-// Decodes a GIF directly from its source on the core the Arduino loop does
-// not use and publishes display-sized RGB565 frames in packed PSRAM slots.
-// While running, the worker owns the source file and the borrowed decoder;
-// the UI owns presentation timing and display transfers and never touches
-// either. Frames carry their due time on a timeline the UI starts when it
-// shows the first frame, so a slow decoder skips stale output instead of
-// playing in slow motion.
+// Decodes an animated GIF or WebP directly from its source on the core the
+// Arduino loop does not use and publishes display-sized RGB565 frames in
+// packed PSRAM slots. While running, the worker owns the source file and the
+// decoder (a GIF borrows the caller's AnimatedGIF); the UI owns presentation
+// timing and display transfers and never touches either. Frames carry their
+// due time on a timeline the UI starts when it shows the first frame, so a
+// slow decoder skips stale output instead of playing in slow motion.
 class AnimationStreamWorker {
 public:
   static constexpr uint8_t SlotCount = 3;
   static constexpr uint8_t NoSlot = 0xff;
 
+  enum class Source : uint8_t { Gif, Webp };
   enum class Phase : uint8_t { Idle, Running, Finished, Error };
 
   struct Frame {
@@ -38,6 +40,10 @@ public:
     uint32_t decodeAverageUs = 0;
     uint32_t decodeMaxUs = 0;
     uint32_t scaleAverageUs = 0;
+    // WebP loads its whole source into PSRAM before the first frame; GIF
+    // reads incrementally and reports zero.
+    uint32_t sourceLoaded = 0;
+    uint32_t sourceSize = 0;
   };
 
   AnimationStreamWorker(SecretStorage &storage, AnimatedGIF &decoder);
@@ -45,8 +51,9 @@ public:
 
   // Allocates the packed slots and starts the worker task. On failure the
   // error names the reason, including PSRAM figures for allocation failures.
-  bool start(const String &path, bool secretAccess, uint32_t sourceWidth, uint32_t sourceHeight,
-             uint16_t drawWidth, uint16_t drawHeight, String &error);
+  bool start(Source source, const String &path, bool secretAccess, uint32_t sourceBytes,
+             uint32_t sourceWidth, uint32_t sourceHeight, uint16_t drawWidth, uint16_t drawHeight,
+             String &error);
   // Blocks until the worker has released the source and decoder, then frees
   // every slot. Pixels from earlier frames must not be used afterwards.
   void stop();
@@ -62,6 +69,7 @@ public:
 
 private:
   enum class SlotState : uint8_t { Free, Writing, Ready, Displayed };
+  enum class DecodeResult : uint8_t { Frame, LastFrame, EndOfPass, Failed };
 
   struct Slot {
     uint16_t *pixels;
@@ -72,6 +80,7 @@ private:
 
   SecretStorage &_storage;
   AnimatedGIF &_decoder;
+  Source _source;
   String _path;
   bool _secretAccess;
   StorageFile _file;
@@ -80,6 +89,7 @@ private:
   SemaphoreHandle_t _stopped;
   volatile bool _stopRequested;
   bool _decoderOpen;
+  uint32_t _sourceBytes;
   uint32_t _sourceWidth;
   uint32_t _sourceHeight;
   uint32_t _canvasPixels;
@@ -87,7 +97,13 @@ private:
   uint16_t _drawHeight;
   uint16_t *_columnMap;
   uint16_t *_rowMap;
-  int32_t _loopCount;
+  // Total passes to play; zero repeats forever.
+  uint32_t _passLimit;
+  uint8_t *_webpData;
+  uint32_t _webpLoaded;
+  WebPAnimDecoder *_webpDecoder;
+  const uint8_t *_webpFrame;
+  uint32_t _webpPreviousTimestamp;
   Slot _slots[SlotCount];
   bool _timelineStarted;
   uint32_t _timelineStartMs;
@@ -106,10 +122,15 @@ private:
 
   static void taskMain(void *context);
   void run();
-  bool openDecoder();
+  bool openGif();
+  bool openWebp();
+  bool loadWebpSource();
+  bool prepareScaler();
   void closeDecoder();
   void decodeLoop();
-  void clearCanvas();
+  DecodeResult decodeNext(uint32_t &delayMs, int &errorCode);
+  void restartPass();
+  void clearGifCanvas();
   void scaleInto(uint16_t *destination);
   uint8_t acquireSlot();
   void publish(uint8_t slot, uint32_t sequence, uint32_t dueMs);
