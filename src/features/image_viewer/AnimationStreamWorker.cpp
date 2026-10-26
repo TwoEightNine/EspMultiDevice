@@ -25,13 +25,27 @@ constexpr uint16_t MaxResidentFrames = 512;
 constexpr uint32_t LockRetryMs = 20;
 constexpr uint32_t SourceCloseLockMs = 250;
 // WebP sources load through an internal-RAM bounce buffer, one bounded SD
-// transaction per chunk.
-constexpr uint32_t SourceChunkBytes = 8192;
+// transaction per chunk. Smaller chunks only cost more transactions, so a
+// short internal heap degrades speed rather than failing the open.
+constexpr uint32_t SourceChunkSizes[] = {8192, 2048, 512};
 // Delays of 10 ms or less play at 100 ms, as browsers do. AnimatedGIF already
 // applies this to explicit GIF delays; GIF frames without a graphic control
 // extension and zero-duration WebP frames report zero.
 constexpr uint32_t ShortDelayMs = 10;
 constexpr uint32_t ShortDelayReplacementMs = 100;
+
+// Hot per-pixel tables prefer internal RAM but work from PSRAM.
+void *allocPreferInternal(size_t bytes) {
+  void *memory = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  return memory ? memory : heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+// Bookkeeping that can be large but is touched rarely lives in PSRAM, so
+// internal RAM stays available for buffers that need it.
+void *callocPreferPsram(size_t count, size_t bytes) {
+  void *memory = heap_caps_calloc(count, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return memory ? memory : heap_caps_calloc(count, bytes, MALLOC_CAP_8BIT);
+}
 
 class LockGuard {
 public:
@@ -111,8 +125,8 @@ bool AnimationStreamWorker::start(Source source, const String &path, bool secret
   if (capacity < StreamSlots) capacity = StreamSlots;
   _slotCapacity = (uint16_t)capacity;
   _slotBytes = slotBytes;
-  _slots = static_cast<Slot *>(heap_caps_calloc(_slotCapacity, sizeof(Slot), MALLOC_CAP_8BIT));
-  _frameSlots = static_cast<uint16_t *>(heap_caps_calloc(_slotCapacity, sizeof(uint16_t), MALLOC_CAP_8BIT));
+  _slots = static_cast<Slot *>(callocPreferPsram(_slotCapacity, sizeof(Slot)));
+  _frameSlots = static_cast<uint16_t *>(callocPreferPsram(_slotCapacity, sizeof(uint16_t)));
   bool allocated = _slots && _frameSlots;
   for (uint16_t index = 0; allocated && index < StreamSlots; ++index) {
     allocated = allocateSlotBuffer(_slots[index]);
@@ -434,19 +448,33 @@ bool AnimationStreamWorker::loadWebpSource() {
     return false;
   }
   _webpData = static_cast<uint8_t *>(psramAlloc(size));
-  uint8_t *chunk = static_cast<uint8_t *>(
-      heap_caps_malloc(SourceChunkBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!_webpData || !chunk) {
-    if (chunk) heap_caps_free(chunk);
+  if (!_webpData) {
     char message[96];
     snprintf(message, sizeof(message), "WebP source needs too much PSRAM (%u KB; largest %u KB)",
              (unsigned)(size / 1024), (unsigned)(ESP.getMaxAllocPsram() / 1024));
     fail(message);
     return false;
   }
+  uint8_t *chunk = nullptr;
+  uint32_t chunkBytes = 0;
+  for (const uint32_t candidate : SourceChunkSizes) {
+    chunk = static_cast<uint8_t *>(heap_caps_malloc(candidate, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (chunk) {
+      chunkBytes = candidate;
+      break;
+    }
+  }
+  if (!chunk) {
+    char message[96];
+    snprintf(message, sizeof(message), "WebP loader needs internal RAM (free %u, largest %u)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    fail(message);
+    return false;
+  }
   uint32_t loaded = 0;
   while (loaded < size) {
-    const uint32_t amount = size - loaded > SourceChunkBytes ? SourceChunkBytes : size - loaded;
+    const uint32_t amount = size - loaded > chunkBytes ? chunkBytes : size - loaded;
     if (!lockSource()) break;
     const int read = _file.read(chunk, amount);
     SpiBusLock::unlock();
@@ -501,10 +529,8 @@ bool AnimationStreamWorker::openWebp() {
 }
 
 bool AnimationStreamWorker::prepareScaler() {
-  _columnMap = static_cast<uint16_t *>(
-      heap_caps_malloc((size_t)_drawWidth * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  _rowMap = static_cast<uint16_t *>(
-      heap_caps_malloc((size_t)_drawHeight * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  _columnMap = static_cast<uint16_t *>(allocPreferInternal((size_t)_drawWidth * sizeof(uint16_t)));
+  _rowMap = static_cast<uint16_t *>(allocPreferInternal((size_t)_drawHeight * sizeof(uint16_t)));
   if (!_columnMap || !_rowMap) {
     fail("Animation scaler needs more memory");
     return false;
