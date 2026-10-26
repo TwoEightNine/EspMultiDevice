@@ -1042,9 +1042,11 @@ void ImageView::logStreamStats(uint32_t nowMs, bool force) {
   _streamStatsAtMs = nowMs;
   const AnimationStreamWorker::Stats stats = _stream.stats();
   if (!force && stats.phase != AnimationStreamWorker::Phase::Running) return;
-  Serial.printf("[Anim] dec=%lu pres=%lu drop=%lu decMs=%lu.%lu/%lu scaleMs=%lu.%lu psram=%lu/%lu\n",
+  Serial.printf("[Anim] dec=%lu pres=%lu late=%lu lagMs=%lu decMs=%lu.%lu/%lu scaleMs=%lu.%lu "
+                "psram=%lu/%lu\n",
                 (unsigned long)stats.decoded, (unsigned long)_streamPresentedFrames,
-                (unsigned long)stats.dropped, (unsigned long)(stats.decodeAverageUs / 1000),
+                (unsigned long)stats.late, (unsigned long)stats.lagMs,
+                (unsigned long)(stats.decodeAverageUs / 1000),
                 (unsigned long)((stats.decodeAverageUs / 100) % 10),
                 (unsigned long)(stats.decodeMaxUs / 1000), (unsigned long)(stats.scaleAverageUs / 1000),
                 (unsigned long)((stats.scaleAverageUs / 100) % 10), (unsigned long)ESP.getFreePsram(),

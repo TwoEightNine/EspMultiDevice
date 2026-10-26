@@ -13,10 +13,11 @@ struct WebPAnimDecoder;
 // Decodes an animated GIF or WebP directly from its source on the core the
 // Arduino loop does not use and publishes display-sized RGB565 frames in
 // packed PSRAM slots. While running, the worker owns the source file and the
-// decoder; the UI owns presentation
-// timing and display transfers and never touches either. Frames carry their
-// due time on a timeline the UI starts when it shows the first frame, so a
-// slow decoder skips stale output instead of playing in slow motion.
+// decoder; the UI owns presentation timing and display transfers and never
+// touches either. Frames carry their due time on a timeline the UI starts when
+// it shows the first frame. Every decoded frame is shown in order: when the
+// decoder is slower than the authored delays, playback slows down rather than
+// discarding frames it has already paid to decode.
 class AnimationStreamWorker {
 public:
   static constexpr uint8_t SlotCount = 3;
@@ -35,7 +36,11 @@ public:
   struct Stats {
     Phase phase = Phase::Idle;
     uint32_t decoded = 0;
-    uint32_t dropped = 0;
+    // Frames that became ready after their due time; each restarts the
+    // timeline, and lagMs totals how far playback fell behind the authored
+    // timing.
+    uint32_t late = 0;
+    uint32_t lagMs = 0;
     uint32_t decodeAverageUs = 0;
     uint32_t decodeMaxUs = 0;
     uint32_t scaleAverageUs = 0;
@@ -58,9 +63,10 @@ public:
   void stop();
   bool active() const { return _task != nullptr; }
 
-  // Returns the newest ready frame whose due time has passed; before the
-  // timeline starts, the first frame. Older due frames are dropped. The slot
-  // stays the UI's until releaseFrame().
+  // Returns the next frame in order once its due time has passed; before the
+  // timeline starts, the first frame. A late frame is returned at once and
+  // restarts the timeline from itself. The slot stays the UI's until
+  // releaseFrame().
   bool takeDueFrame(uint32_t nowMs, Frame &frame);
   void releaseFrame(uint8_t slot);
   void startTimeline(uint32_t startMs);
@@ -78,8 +84,9 @@ private:
   };
 
   SecretStorage &_storage;
-  // Held for the worker's lifetime so its LZW tables stay in internal RAM.
-  AnimatedGIF _decoder;
+  // Allocated per GIF stream, in internal RAM when there is room, so its LZW
+  // tables avoid PSRAM latency.
+  AnimatedGIF *_decoder;
   Source _source;
   String _path;
   bool _secretAccess;
@@ -107,11 +114,11 @@ private:
   Slot _slots[SlotCount];
   bool _timelineStarted;
   uint32_t _timelineStartMs;
-  uint32_t _lastPublishedMs;
   Phase _phase;
   char _error[96];
   uint32_t _decoded;
-  uint32_t _dropped;
+  uint32_t _late;
+  uint32_t _lagMs;
   uint64_t _decodeTotalUs;
   uint32_t _decodeMaxUs;
   uint64_t _scaleTotalUs;
@@ -135,7 +142,8 @@ private:
   uint8_t acquireSlot();
   void publish(uint8_t slot, uint32_t sequence, uint32_t dueMs);
   void returnSlot(uint8_t slot);
-  bool timelineLate(uint32_t dueMs, uint32_t nowMs);
+  bool allocateGifDecoder(String &error);
+  void freeGifDecoder();
   void fail(const char *message);
   void freeSlots();
 

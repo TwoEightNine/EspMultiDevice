@@ -54,13 +54,15 @@ Animated images fit a 320 × 240 photo viewport. Larger images are downscaled; s
 
 Animated GIF and WebP stream directly from their source and never read or write an `.emga` sidecar; existing sidecars remain orphaned cache files until Files deletes or renames their source. `ImageView` routes a WebP to streaming when its first chunk is `VP8X` with the animation flag set, reading the canvas size from that header. Simple (`VP8 `/`VP8L`) and non-animated extended WebP stay on the cached still path.
 - **Worker:** `AnimationStreamWorker` runs on the core the Arduino loop does not use and owns the source file and the decoder while it runs. It scales each frame, nearest-neighbour with precomputed row and column maps, into one of three packed RGB565 PSRAM slots sized to the draw rectangle.
-  - **GIF** decodes with the worker's own `AnimatedGIF` instance, whose LZW tables stay in internal RAM, into its cooked PSRAM canvas. That canvas holds five bytes per source pixel plus three per column.
+  - **GIF** decodes into AnimatedGIF's cooked PSRAM canvas, which holds five bytes per source pixel plus three per column. Each GIF stream allocates its own `AnimatedGIF` state (about 25 KB of LZW tables and file/line buffers) in internal RAM when at least 32 KB of internal RAM would stay free, and otherwise in PSRAM. Serial logs `[Anim] GIF decoder state N bytes in internal|PSRAM RAM`.
+  - AnimatedGIF and libwebp build at `-O2` through their `src/vendor_shims/` wrappers, like lib264, instead of the sketch-wide `-Os`.
   - **WebP** first loads the whole source into PSRAM through an 8 KiB internal bounce buffer, one bounded SD transaction per chunk. It then decodes with libwebp's `WebPAnimDecoder` in premultiplied `MODE_rgbA`, so transparency composes over black. libwebp keeps current and previous RGBA canvases (eight bytes per canvas pixel) beside the source.
   - Before starting, the worker checks free and largest-block PSRAM against these figures. It refuses with the required and available sizes rather than failing part-way.
 - **SD access:** every source open, read, and seek holds `SpiBusLock` for that one transaction. A stop request abandons a pending lock wait, so closing or navigating away waits for at most the current frame's decode.
-- **Timing:** the UI starts the presentation timeline when it shows the first frame. Each frame becomes due at the sum of the preceding delays, and the UI shows the newest due frame.
+- **Timing:** the UI starts the presentation timeline when it shows the first frame. Each frame becomes due at the sum of the preceding delays, and the UI shows frames strictly in order.
   - Delays of 10 ms or less, including frames without a delay, play at 100 ms, as in browsers. Other delays are honoured, with no further minimum.
-  - A frame more than 250 ms late is still decoded, because later frames build on its canvas, but it is not scaled or published unless 250 ms have passed without a new frame. A slow source therefore skips frames rather than playing in slow motion.
+  - Every decoded frame is shown; nothing is skipped. Unlike video there is no audio clock, and each frame must be decoded anyway because later frames build on its canvas, so skipping would save only the cheap scale and transfer.
+  - A frame ready more than 20 ms after its due time is shown at once and restarts the timeline from itself. When the decoder is slower than the authored delays, playback therefore slows to the decoder's pace (slow and smooth) and never fast-forwards to catch up. Smaller lateness, such as a DMA transfer still in flight, is absorbed without shifting the timeline.
 - **Looping:** each loop pass starts from a cleared canvas.
   - **GIF:** a file without a NETSCAPE extension plays once, a loop count of zero repeats forever, and N repeats N more times.
   - **WebP:** the loop count is the total number of passes, and zero repeats forever.
@@ -71,7 +73,11 @@ Animated GIF and WebP stream directly from their source and never read or write 
   - Stopping the stream releases the LCD_CAM bus, as the video player does.
   - In informative mode, rows under the 48px app bar are not sent, so the bar does not flicker. The clipped transfer starts at the first visible row.
   - When that row's offset is not 64-byte aligned (a width that is not a multiple of four), or DMA is unavailable, the frame falls back to 48-row TFT_eSPI bands, one band per loop pass. Serial then logs `[Anim] DMA unavailable for this frame; using TFT_eSPI bands` once per open.
-- **Serial log:** playback logs the time from open to the first frame, then every 2 s a line `[Anim] dec=… pres=… drop=… decMs=avg/max scaleMs=avg psram=free/largest`, and the worker's free stack when it stops.
+- **Serial log:**
+  - the time from open to the first frame
+  - after the first pass, `[Anim] pass 1: N frame(s), T ms as authored, canvas WxH, frame B bytes`
+  - every 2 s, `[Anim] dec=… pres=… late=… lagMs=… decMs=avg/max scaleMs=avg psram=free/largest`, where `late` counts timeline restarts and `lagMs` totals the slowdown
+  - the worker's free stack when it stops
 
 Use `tools/generate_animation_fixtures.py` to generate the GIF/WebP fixtures under `tests/animation/fixtures/`; their expected results and the measurement procedure are in `tests/animation/README.md`.
 

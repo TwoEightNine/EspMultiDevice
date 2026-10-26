@@ -169,3 +169,25 @@ nothing else depended on them.
 6. Rerun the phase 1–3 checks on `gif_320x240_100ms.gif`,
    `webp_anim_lossy_320x240.webp`, and `gif_disposal_alpha.gif`. Each still
    plays as before.
+
+## Decoder speed and slow-and-smooth checks
+
+AnimatedGIF and libwebp now build at `-O2`, and GIF decoder state goes to
+internal RAM when there is room. Late frames are no longer dropped. The stats
+line reports `late=` (timeline restarts) and `lagMs=` (total slowdown) instead
+of `drop=`; read `drop=0` in the earlier checklists as `late=0`.
+
+1. On each open of a GIF, serial logs
+   `[Anim] GIF decoder state N bytes in internal RAM`. If it says PSRAM, note
+   the free internal heap from the `[Navigator]` line.
+2. Rerun your target animations and the textured fixtures. Compare `decMs`
+   with the earlier numbers; this is the effect of `-O2` and internal RAM.
+3. For a slow animation, `pres` now tracks `dec` (within 1–2 frames), and the
+   frame number never skips. Playback is slower than authored, and `lagMs`
+   grows to show by how much.
+4. A fast animation (`gif_320x240_100ms.gif`) still shows `late=0` and plays
+   at its authored speed.
+5. Record each target's `[Anim] pass 1: …` line. Its frame count and frame
+   bytes size any later PSRAM replay.
+6. Static WebP and Files thumbnails still render; libwebp's build change
+   affects them too.

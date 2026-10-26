@@ -1,8 +1,5 @@
 #include "AnimationStreamWorker.h"
 
-// Arduino's sketch builder does not compile sources below the sketch root;
-// include the pinned, header-based decoder implementation exactly once.
-#include "../../../third_party/AnimatedGIF/AnimatedGIF.cpp"
 #include "../../../third_party/libwebp/src/webp/decode.h"
 #include "../../../third_party/libwebp/src/webp/demux.h"
 #include "../../core/SpiBusLock.h"
@@ -10,15 +7,18 @@
 #include <esp32-hal-psram.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 
 namespace {
 constexpr uint32_t WorkerStackBytes = 8192;
 constexpr size_t SlotAlignment = 64;
-// A frame this late is decoded for the canvas but neither scaled nor
-// published, unless nothing has been published for as long.
-constexpr uint32_t LateMs = 250;
+// Lateness up to this is absorbed by the timeline (touch polling, a DMA
+// transfer still in flight); beyond it the timeline restarts at the frame.
+constexpr uint32_t LateToleranceMs = 20;
+// Internal RAM left free after placing the GIF decoder state there.
+constexpr size_t InternalReserveBytes = 32768;
 constexpr uint32_t LockRetryMs = 20;
 constexpr uint32_t SourceCloseLockMs = 250;
 // WebP sources load through an internal-RAM bounce buffer, one bounded SD
@@ -43,18 +43,14 @@ private:
 AnimationStreamWorker *volatile AnimationStreamWorker::_current = nullptr;
 
 AnimationStreamWorker::AnimationStreamWorker(SecretStorage &storage)
-    : _storage(storage), _source(Source::Gif), _secretAccess(false), _task(nullptr),
+    : _storage(storage), _decoder(nullptr), _source(Source::Gif), _secretAccess(false), _task(nullptr),
       _lock(nullptr), _stopped(nullptr), _stopRequested(false), _decoderOpen(false), _sourceBytes(0),
       _sourceWidth(0), _sourceHeight(0), _canvasPixels(0), _drawWidth(0), _drawHeight(0),
       _columnMap(nullptr), _rowMap(nullptr), _passLimit(1), _webpData(nullptr), _webpLoaded(0),
       _webpDecoder(nullptr), _webpFrame(nullptr), _webpPreviousTimestamp(0), _slots{},
       _timelineStarted(false), _timelineStartMs(0),
-      _lastPublishedMs(0), _phase(Phase::Idle), _error{}, _decoded(0), _dropped(0),
-      _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {
-  // Leave the decoder's frame-buffer pointer null; closeDecoder() checks it
-  // even when a WebP stream never opened a GIF.
-  _decoder.begin(GIF_PALETTE_RGB565_LE);
-}
+      _phase(Phase::Idle), _error{}, _decoded(0), _late(0), _lagMs(0),
+      _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {}
 
 AnimationStreamWorker::~AnimationStreamWorker() {
   stop();
@@ -111,6 +107,10 @@ bool AnimationStreamWorker::start(Source source, const String &path, bool secret
     }
     _slots[index].state = SlotState::Free;
   }
+  if (source == Source::Gif && !allocateGifDecoder(error)) {
+    stop();
+    return false;
+  }
   _source = source;
   _path = path;
   _secretAccess = secretAccess;
@@ -151,15 +151,16 @@ void AnimationStreamWorker::stop() {
   if (_stopped) vSemaphoreDelete(_stopped);
   _stopped = nullptr;
   freeSlots();
+  freeGifDecoder();
   _path = "";
   _stopRequested = false;
   _timelineStarted = false;
   _timelineStartMs = 0;
-  _lastPublishedMs = 0;
   _phase = Phase::Idle;
   _error[0] = '\0';
   _decoded = 0;
-  _dropped = 0;
+  _late = 0;
+  _lagMs = 0;
   _decodeTotalUs = 0;
   _decodeMaxUs = 0;
   _scaleTotalUs = 0;
@@ -167,6 +168,37 @@ void AnimationStreamWorker::stop() {
   _stackHighWater = 0;
   _webpLoaded = 0;
   _sourceBytes = 0;
+}
+
+bool AnimationStreamWorker::allocateGifDecoder(String &error) {
+  // The decoder's LZW tables and line buffers are hit for every pixel. Keep
+  // them in internal RAM unless that would leave too little for the rest of
+  // the system; PSRAM still works, just more slowly.
+  const size_t bytes = sizeof(AnimatedGIF);
+  void *memory = nullptr;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= bytes &&
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= bytes + InternalReserveBytes) {
+    memory = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  const bool internal = memory != nullptr;
+  if (!memory) memory = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!memory) {
+    error = F("GIF decoder needs more memory");
+    return false;
+  }
+  _decoder = new (memory) AnimatedGIF();
+  // Leaves the frame-buffer pointer null for closeDecoder().
+  _decoder->begin(GIF_PALETTE_RGB565_LE);
+  Serial.printf("[Anim] GIF decoder state %u bytes in %s RAM\n", (unsigned)bytes,
+                internal ? "internal" : "PSRAM");
+  return true;
+}
+
+void AnimationStreamWorker::freeGifDecoder() {
+  if (!_decoder) return;
+  _decoder->~AnimatedGIF();
+  heap_caps_free(_decoder);
+  _decoder = nullptr;
 }
 
 void AnimationStreamWorker::freeSlots() {
@@ -178,37 +210,32 @@ void AnimationStreamWorker::freeSlots() {
 
 bool AnimationStreamWorker::takeDueFrame(uint32_t nowMs, Frame &frame) {
   if (!_task || !_lock) return false;
+  LockGuard guard(_lock);
   uint8_t chosen = NoSlot;
-  bool released = false;
-  {
-    LockGuard guard(_lock);
-    for (uint8_t index = 0; index < SlotCount; ++index) {
-      const Slot &slot = _slots[index];
-      if (slot.state != SlotState::Ready) continue;
-      if (!_timelineStarted) {
-        if (chosen == NoSlot || slot.sequence < _slots[chosen].sequence) chosen = index;
-      } else if ((int32_t)(nowMs - (_timelineStartMs + slot.dueMs)) >= 0 &&
-                 (chosen == NoSlot || slot.sequence > _slots[chosen].sequence)) {
-        chosen = index;
-      }
-    }
-    if (chosen == NoSlot) return false;
-    for (uint8_t index = 0; index < SlotCount; ++index) {
-      Slot &slot = _slots[index];
-      if (index == chosen || slot.state != SlotState::Ready ||
-          slot.sequence > _slots[chosen].sequence) continue;
-      slot.state = SlotState::Free;
-      ++_dropped;
-      released = true;
-    }
-    Slot &slot = _slots[chosen];
-    slot.state = SlotState::Displayed;
-    frame.slot = chosen;
-    frame.pixels = slot.pixels;
-    frame.sequence = slot.sequence;
-    frame.dueMs = slot.dueMs;
+  for (uint8_t index = 0; index < SlotCount; ++index) {
+    const Slot &slot = _slots[index];
+    if (slot.state != SlotState::Ready) continue;
+    if (chosen == NoSlot || slot.sequence < _slots[chosen].sequence) chosen = index;
   }
-  if (released) xTaskNotifyGive(_task);
+  if (chosen == NoSlot) return false;
+  Slot &slot = _slots[chosen];
+  if (_timelineStarted) {
+    const int32_t lateness = (int32_t)(nowMs - (_timelineStartMs + slot.dueMs));
+    if (lateness < 0) return false;
+    // A decoder slower than the authored delays makes every frame late. Show
+    // it now and measure the following delays from here, so playback slows
+    // instead of skipping, and never fast-forwards to catch up.
+    if (lateness > (int32_t)LateToleranceMs) {
+      _timelineStartMs = nowMs - slot.dueMs;
+      ++_late;
+      _lagMs += (uint32_t)lateness;
+    }
+  }
+  slot.state = SlotState::Displayed;
+  frame.slot = chosen;
+  frame.pixels = slot.pixels;
+  frame.sequence = slot.sequence;
+  frame.dueMs = slot.dueMs;
   return true;
 }
 
@@ -234,7 +261,8 @@ AnimationStreamWorker::Stats AnimationStreamWorker::stats(String *error) {
   LockGuard guard(_lock);
   copy.phase = _phase;
   copy.decoded = _decoded;
-  copy.dropped = _dropped;
+  copy.late = _late;
+  copy.lagMs = _lagMs;
   copy.decodeAverageUs = _decoded ? (uint32_t)(_decodeTotalUs / _decoded) : 0;
   copy.decodeMaxUs = _decodeMaxUs;
   copy.scaleAverageUs = _scaled ? (uint32_t)(_scaleTotalUs / _scaled) : 0;
@@ -267,28 +295,28 @@ void AnimationStreamWorker::run() {
 }
 
 bool AnimationStreamWorker::openGif() {
-  _decoder.begin(GIF_PALETTE_RGB565_LE);
-  const int opened = _decoder.open(_path.c_str(), gifOpen, gifClose, gifRead, gifSeek, nullptr);
+  _decoder->begin(GIF_PALETTE_RGB565_LE);
+  const int opened = _decoder->open(_path.c_str(), gifOpen, gifClose, gifRead, gifSeek, nullptr);
   if (!opened) {
     if (!_stopRequested) {
       char message[48];
-      snprintf(message, sizeof(message), "GIF header error %d", _decoder.getLastError());
+      snprintf(message, sizeof(message), "GIF header error %d", _decoder->getLastError());
       fail(message);
     }
     if (_file) gifClose(&_file);
     return false;
   }
   _decoderOpen = true;
-  if ((uint32_t)_decoder.getCanvasWidth() != _sourceWidth ||
-      (uint32_t)_decoder.getCanvasHeight() != _sourceHeight) {
+  if ((uint32_t)_decoder->getCanvasWidth() != _sourceWidth ||
+      (uint32_t)_decoder->getCanvasHeight() != _sourceHeight) {
     fail("GIF header changed while opening");
     return false;
   }
   _canvasPixels = _sourceWidth * _sourceHeight;
   // A null draw callback makes AnimatedGIF keep the complete cooked RGB565
   // canvas, including disposal and transparency, in its frame buffer.
-  _decoder.setDrawType(GIF_DRAW_COOKED);
-  if (_decoder.allocFrameBuf(psramAlloc) != GIF_SUCCESS) {
+  _decoder->setDrawType(GIF_DRAW_COOKED);
+  if (_decoder->allocFrameBuf(psramAlloc) != GIF_SUCCESS) {
     char message[96];
     snprintf(message, sizeof(message), "GIF canvas needs too much PSRAM (largest %u KB)",
              (unsigned)(ESP.getMaxAllocPsram() / 1024));
@@ -298,7 +326,7 @@ bool AnimationStreamWorker::openGif() {
   clearGifCanvas();
   // NETSCAPE loop count: none plays once, zero repeats forever, and N
   // repeats N more times.
-  const int loopCount = _decoder.getLoopCount();
+  const int loopCount = _decoder->getLoopCount();
   _passLimit = loopCount < 0 ? 1 : loopCount == 0 ? 0 : (uint32_t)loopCount + 1;
   return true;
 }
@@ -398,10 +426,10 @@ bool AnimationStreamWorker::prepareScaler() {
 
 void AnimationStreamWorker::closeDecoder() {
   if (_decoderOpen) {
-    _decoder.close();
+    _decoder->close();
     _decoderOpen = false;
   }
-  if (_decoder.getFrameBuf()) _decoder.freeFrameBuf(psramFree);
+  if (_decoder && _decoder->getFrameBuf()) _decoder->freeFrameBuf(psramFree);
   if (_webpDecoder) WebPAnimDecoderDelete(_webpDecoder);
   _webpDecoder = nullptr;
   _webpFrame = nullptr;
@@ -415,7 +443,7 @@ void AnimationStreamWorker::closeDecoder() {
 }
 
 void AnimationStreamWorker::clearGifCanvas() {
-  uint8_t *canvas = _decoder.getFrameBuf();
+  uint8_t *canvas = _decoder->getFrameBuf();
   if (canvas) memset(canvas, 0, (size_t)_canvasPixels * 5 + (size_t)_sourceWidth * 3);
 }
 
@@ -475,25 +503,18 @@ void AnimationStreamWorker::decodeLoop() {
         _decodeTotalUs += decodeUs;
         if (decodeUs > _decodeMaxUs) _decodeMaxUs = decodeUs;
       }
-      const uint32_t nowMs = millis();
-      // The final frame always appears; otherwise a stale frame is skipped
-      // unless the display has gone a full LateMs without a new one.
-      if (!finishing && timelineLate(dueMs, nowMs)) {
-        returnSlot(slot);
+      // Decoding is the expensive part and cannot be skipped, because later
+      // frames build on this canvas; scaling and showing it is cheap, so
+      // every decoded frame is published.
+      const int64_t scaleStarted = esp_timer_get_time();
+      scaleInto(_slots[slot].pixels);
+      const uint32_t scaleUs = (uint32_t)(esp_timer_get_time() - scaleStarted);
+      {
         LockGuard guard(_lock);
-        ++_dropped;
-      } else {
-        const int64_t scaleStarted = esp_timer_get_time();
-        scaleInto(_slots[slot].pixels);
-        const uint32_t scaleUs = (uint32_t)(esp_timer_get_time() - scaleStarted);
-        {
-          LockGuard guard(_lock);
-          _scaleTotalUs += scaleUs;
-          ++_scaled;
-        }
-        publish(slot, sequence, dueMs);
-        _lastPublishedMs = nowMs;
+        _scaleTotalUs += scaleUs;
+        ++_scaled;
       }
+      publish(slot, sequence, dueMs);
       ++sequence;
       ++passFrames;
       dueMs += delayMs <= ShortDelayMs ? ShortDelayReplacementMs : delayMs;
@@ -502,6 +523,13 @@ void AnimationStreamWorker::decodeLoop() {
     }
 
     if (endOfPass) {
+      // One summary per stream sizes what a full pass would need in memory.
+      if (passes == 0) {
+        Serial.printf("[Anim] pass 1: %lu frame(s), %lu ms as authored, canvas %lux%lu, "
+                      "frame %lu bytes\n", (unsigned long)passFrames, (unsigned long)dueMs,
+                      (unsigned long)_sourceWidth, (unsigned long)_sourceHeight,
+                      (unsigned long)((uint32_t)_drawWidth * _drawHeight * sizeof(uint16_t)));
+      }
       if (finishing) {
         LockGuard guard(_lock);
         if (_phase == Phase::Running) _phase = Phase::Finished;
@@ -520,8 +548,8 @@ AnimationStreamWorker::DecodeResult AnimationStreamWorker::decodeNext(uint32_t &
                                                                       int &errorCode) {
   if (_source == Source::Gif) {
     int delay = 0;
-    const int result = _decoder.playFrame(false, &delay, nullptr);
-    errorCode = _decoder.getLastError();
+    const int result = _decoder->playFrame(false, &delay, nullptr);
+    errorCode = _decoder->getLastError();
     if (result < 0 || (errorCode != GIF_SUCCESS && errorCode != GIF_EMPTY_FRAME)) {
       return DecodeResult::Failed;
     }
@@ -547,7 +575,7 @@ AnimationStreamWorker::DecodeResult AnimationStreamWorker::decodeNext(uint32_t &
 
 void AnimationStreamWorker::restartPass() {
   if (_source == Source::Gif) {
-    _decoder.reset();
+    _decoder->reset();
     // Each pass starts from an empty canvas, like the first.
     clearGifCanvas();
     return;
@@ -571,7 +599,7 @@ void AnimationStreamWorker::scaleInto(uint16_t *destination) {
     }
     return;
   }
-  const uint8_t *cooked = _decoder.getFrameBuf() + _canvasPixels;
+  const uint8_t *cooked = _decoder->getFrameBuf() + _canvasPixels;
   const uint32_t pitch = _sourceWidth * 2;
   // The cooked canvas follows the one-byte-per-pixel indexed canvas, so an
   // odd pixel count leaves it unaligned for 16-bit loads.
@@ -612,14 +640,6 @@ void AnimationStreamWorker::publish(uint8_t slot, uint32_t sequence, uint32_t du
 void AnimationStreamWorker::returnSlot(uint8_t slot) {
   LockGuard guard(_lock);
   if (_slots[slot].state == SlotState::Writing) _slots[slot].state = SlotState::Free;
-}
-
-bool AnimationStreamWorker::timelineLate(uint32_t dueMs, uint32_t nowMs) {
-  LockGuard guard(_lock);
-  if (!_timelineStarted) return false;
-  const bool late = (int32_t)(nowMs - (_timelineStartMs + dueMs)) > (int32_t)LateMs;
-  const bool starving = (uint32_t)(nowMs - _lastPublishedMs) >= LateMs;
-  return late && !starving;
 }
 
 void AnimationStreamWorker::fail(const char *message) {
