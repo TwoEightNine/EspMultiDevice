@@ -1,6 +1,8 @@
 #include "AnimationStreamWorker.h"
 
-#include "../../../third_party/AnimatedGIF/AnimatedGIF.h"
+// Arduino's sketch builder does not compile sources below the sketch root;
+// include the pinned, header-based decoder implementation exactly once.
+#include "../../../third_party/AnimatedGIF/AnimatedGIF.cpp"
 #include "../../../third_party/libwebp/src/webp/decode.h"
 #include "../../../third_party/libwebp/src/webp/demux.h"
 #include "../../core/SpiBusLock.h"
@@ -40,15 +42,19 @@ private:
 
 AnimationStreamWorker *volatile AnimationStreamWorker::_current = nullptr;
 
-AnimationStreamWorker::AnimationStreamWorker(SecretStorage &storage, AnimatedGIF &decoder)
-    : _storage(storage), _decoder(decoder), _source(Source::Gif), _secretAccess(false), _task(nullptr),
+AnimationStreamWorker::AnimationStreamWorker(SecretStorage &storage)
+    : _storage(storage), _source(Source::Gif), _secretAccess(false), _task(nullptr),
       _lock(nullptr), _stopped(nullptr), _stopRequested(false), _decoderOpen(false), _sourceBytes(0),
       _sourceWidth(0), _sourceHeight(0), _canvasPixels(0), _drawWidth(0), _drawHeight(0),
       _columnMap(nullptr), _rowMap(nullptr), _passLimit(1), _webpData(nullptr), _webpLoaded(0),
       _webpDecoder(nullptr), _webpFrame(nullptr), _webpPreviousTimestamp(0), _slots{},
       _timelineStarted(false), _timelineStartMs(0),
       _lastPublishedMs(0), _phase(Phase::Idle), _error{}, _decoded(0), _dropped(0),
-      _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {}
+      _decodeTotalUs(0), _decodeMaxUs(0), _scaleTotalUs(0), _scaled(0), _stackHighWater(0) {
+  // Leave the decoder's frame-buffer pointer null; closeDecoder() checks it
+  // even when a WebP stream never opened a GIF.
+  _decoder.begin(GIF_PALETTE_RGB565_LE);
+}
 
 AnimationStreamWorker::~AnimationStreamWorker() {
   stop();
@@ -640,7 +646,7 @@ void AnimationStreamWorker::gifClose(void *handle) {
   if (locked) SpiBusLock::unlock();
 }
 
-int32_t AnimationStreamWorker::gifRead(gif_file_tag *file, uint8_t *buffer, int32_t length) {
+int32_t AnimationStreamWorker::gifRead(GIFFILE *file, uint8_t *buffer, int32_t length) {
   if (!file || !file->fHandle || length <= 0) return 0;
   StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   int32_t amount = length;
@@ -654,7 +660,7 @@ int32_t AnimationStreamWorker::gifRead(gif_file_tag *file, uint8_t *buffer, int3
   return read;
 }
 
-int32_t AnimationStreamWorker::gifSeek(gif_file_tag *file, int32_t position) {
+int32_t AnimationStreamWorker::gifSeek(GIFFILE *file, int32_t position) {
   if (!file || !file->fHandle || position < 0 || !lockSource()) return 0;
   StorageFile *source = static_cast<StorageFile *>(file->fHandle);
   const bool moved = source->seek((uint32_t)position);

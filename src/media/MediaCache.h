@@ -118,7 +118,6 @@ private:
         return true;
       case FileFormats::Format::Em16:
       case FileFormats::Format::Em16Zoom:
-      case FileFormats::Format::Emga:
         offset = 12;
         return true;
       default:

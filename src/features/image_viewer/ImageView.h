@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
@@ -20,9 +19,7 @@ using File = fs::File;
 
 #include <JPEGDEC.h>
 #include <PNGdec.h>
-#include "../../../third_party/AnimatedGIF/AnimatedGIF.h"
 #include "../../../third_party/libwebp/src/webp/decode.h"
-#include "../../../third_party/libwebp/src/webp/demux.h"
 
 #include "../../core/DisplayController.h"
 #include "../../services/storage/SdCardController.h"
@@ -72,24 +69,14 @@ private:
   static const uint16_t CacheWidth = 480;
   static const uint16_t CacheHeight = 320;
   static const uint16_t CacheHeaderSize = 32;
-  static const uint16_t AnimationCacheHeaderSize = 40;
   static const uint32_t MaxPngScanlineBytes = 4096UL * 4UL;
-  // Animated cache records use packed RGB444 pixels. They are expanded into
-  // the RGB565 PSRAM ring by the worker without palette shimmer.
-  static const uint32_t AnimationFrameHeaderSize = 4;
-  static const uint16_t GifPhotoMaxWidth = 320;
-  static const uint16_t GifPhotoMaxHeight = 240;
+  // Animations play in a centered photo viewport and are never upscaled.
+  static const uint16_t AnimationMaxWidth = 320;
+  static const uint16_t AnimationMaxHeight = 240;
   static const uint32_t CachePixelBytes = (uint32_t)CacheWidth * CacheHeight * 2UL;
   // A 16 KiB internal-RAM staging buffer amortizes FAT/SPI overhead while
   // leaving the shared touch bus responsive between transfers.
   static const uint16_t CacheChunkBytes = 16384;
-  static const uint32_t GifPsramReserveBytes = 512UL * 1024UL;
-  static const uint8_t GifPreloadChunksPerTick = 2;
-  static const uint8_t GifInitialPreloadFrames = 3;
-  static const uint32_t GifMinimumDelayMs = 100;
-  static const bool EnableBackgroundGifLoader = true;
-  static const uint8_t GifPresentBandRows = 16;
-  static const uint16_t GifLoaderReadChunkBytes = 2048;
   // Streamed frames normally go to the panel by DMA. When a clipped start row
   // is not 64-byte aligned, packed bands go to TFT_eSPI without staging.
   static const uint16_t StreamPresentBandRows = 48;
@@ -115,21 +102,6 @@ private:
     uint8_t b;
   };
 
-  enum class GifState : uint8_t { None, Building, Preloading, Playing };
-  enum class GifSlotState : uint8_t { Free, Loading, Ready, Displaying };
-
-  struct GifLoadRequest {
-    uint32_t slot;
-    uint32_t sequence;
-  };
-
-  struct GifLoadResult {
-    uint32_t slot;
-    uint32_t sequence;
-    uint32_t delay;
-    bool success;
-  };
-
   DisplayController &_display;
   SdCardController &_sdCard;
   SecretStorage &_secretStorage;
@@ -137,14 +109,10 @@ private:
   StorageFile _file;
   StorageFile _decoderFile;
   MediaCache::Writer _cacheWriter;
-  StorageFile _gifCacheReadFile;
   bool _secretAccess;
   uint8_t *_webpSource;
   uint32_t _webpSourceSize;
   uint8_t *_webpRgba;
-  WebPAnimDecoder *_webpAnimDecoder;
-  WebPAnimInfo _webpAnimInfo;
-  bool _webpAnimated;
   bool _animationSource;
   String _path;
   String _error;
@@ -199,61 +167,13 @@ private:
   uint8_t *_row1;
   bool _rendering;
   bool _cacheWriting;
-  GifState _gifState;
-  bool _gifDecoderOpen;
-  bool _gifBuildWritePending;
-  bool _gifBuildLastFrame;
-  bool _gifBuildFinalizing;
-  uint32_t _gifBuildFrame;
-  uint32_t _gifBuildWriteOffset;
-  uint32_t _gifBuildDelay;
-  uint32_t _gifFrameCount;
-  uint32_t _gifPlaybackFrame;
-  uint32_t _gifPlaybackDelay;
-  uint32_t _gifNextDelay;
-  uint32_t _gifCyclesCompleted;
-  int32_t _gifLoopCount;
-  uint16_t *_gifPlaybackA;
-  uint16_t *_gifPlaybackB;
-  uint32_t _gifBufferedFrame;
-  uint32_t _gifBufferedOffset;
-  bool _gifBufferedLoading;
-  uint16_t *_gifResidentFrames;
-  uint32_t *_gifResidentDelays;
-  uint32_t *_gifResidentSequences;
-  uint8_t *_gifResidentStates;
-  uint32_t _gifResidentCapacity;
-  uint32_t _gifPreloadTarget;
-  uint32_t _gifPreloadSlot;
-  uint32_t _gifPreloadSequence;
-  uint32_t _gifPreloadOffset;
-  uint32_t _gifNextLoadSequence;
-  uint32_t _gifPlaybackSequence;
-  bool _gifFullResident;
-  bool _gifPreloadActive;
-  QueueHandle_t _gifLoadRequests;
-  QueueHandle_t _gifLoadResults;
-  SemaphoreHandle_t _gifLoaderStopped;
-  TaskHandle_t _gifLoaderTask;
-  volatile bool _gifLoaderStop;
-  bool _gifLoaderError;
-  uint32_t _gifLoadedFrames;
-  uint32_t _gifUnderruns;
-  uint32_t _gifDroppedFrames;
-  // Baseline playback measurements for the animation streaming migration.
-  uint32_t _gifPresentedFrames;
-  uint32_t _gifStatsAtMs;
+  // Playback measurements logged to serial.
+  uint32_t _streamPresentedFrames;
+  uint32_t _streamStatsAtMs;
   uint32_t _openedAtMs;
-  bool _gifWaitingForFrame;
-  bool _gifActiveIsA;
-  bool _gifNextLoaded;
-  uint32_t _gifNextFrameAt;
-  uint32_t _gifCanvasPixels;
-  const uint16_t *_gifPresentFrame;
-  const uint16_t *_gifDisplayedFrame;
-  uint16_t _gifPresentY;
-  bool _gifPresentActive;
-  uint16_t _gifPresentBuffer[GifPhotoMaxWidth * GifPresentBandRows];
+  // A banded TFT_eSPI fallback presentation in progress.
+  uint16_t _streamPresentY;
+  bool _streamPresentActive;
   uint8_t _lastProgress;
   bool _failed = false;
   ChromePainter _chromePainter = nullptr;
@@ -266,8 +186,7 @@ private:
 
   PNG _png;
   JPEGDEC _jpeg;
-  AnimatedGIF _gif;
-  // Animated GIF and WebP stream through this worker; a GIF borrows _gif.
+  // Animated GIF and WebP stream through this worker.
   AnimationStreamWorker _stream;
   uint8_t _streamSlot;
   const uint16_t *_streamPixels;
@@ -287,8 +206,6 @@ private:
   bool reloadStaticRender(bool cropZoom);
   void drawError();
   void drawLoading(uint8_t percent);
-  void drawGifLoading(uint8_t percent);
-  void drawGifPreloading(uint8_t percent);
   void updateDecodeProgress(uint8_t percent);
   bool readHeader();
   bool readRasterHeader();
@@ -296,47 +213,7 @@ private:
   bool decodeRasterImage();
   bool prepareCachePaths(FileFormats::Format format);
   bool loadCache(bool cropZoom);
-  bool loadAnimationCache();
-  bool readAnimationCacheHeader(StorageFile &file, uint32_t &frameCount, int32_t &loopCount,
-                                uint32_t &sourceWidth, uint32_t &sourceHeight,
-                                uint16_t &drawWidth, uint16_t &drawHeight) const;
-  bool startGifBuild();
-  bool buildGifFrame();
-  bool finishGifBuild();
-  bool startGifPlayback();
-  bool tickGifPlayback(uint32_t nowMs);
-  void beginGifTwoFrameLoad(uint32_t frameIndex);
-  bool tickGifTwoFrameLoad();
-  bool startGifPreload();
-  bool tickGifPreload();
-  bool beginGifResidentPlayback();
-  bool startGifLoader();
-  void stopGifLoader();
-  bool enqueueGifLoad(uint32_t sequence);
-  bool collectGifLoadResults();
-  bool allGifPreloadSlotsReady() const;
-  bool loadGifFrameOnWorker(StorageFile &cache, uint8_t *chunk,
-                            const GifLoadRequest &request, GifLoadResult &result);
-  void copyGifCacheChunk(uint16_t *destination, uint32_t pixelOffset,
-                         const uint8_t *chunk, uint16_t amount);
-  bool beginGifRingLoad(uint32_t sequence);
-  bool tickGifRingLoad();
-  bool startNextGifRingLoad();
-  bool canPlayGifSequence(uint32_t sequence) const;
-  uint32_t gifSourceFrameForSequence(uint32_t sequence) const;
-  uint16_t *gifResidentFrame(uint32_t slot) const;
-  uint32_t gifRgb444Bytes() const;
-  uint32_t gifFrameRecordBytes() const;
-  void prepareGifDrawRect();
-  void presentGifFullFrame(const uint16_t *frame);
-  void presentGifFrame(const uint16_t *frame, const uint16_t *previous, bool forceFull);
-  bool tickGifPresentation();
-  bool readGifCacheFrameChunk(uint32_t frameIndex, uint32_t pixelOffset,
-                              uint16_t *destination, uint32_t &delay);
-  bool readGifCacheFrame(uint32_t frameIndex, uint16_t *destination, uint32_t &delay);
-  bool writeAnimationCacheHeader(uint32_t frameCount, int32_t loopCount);
-  void releaseGifBuffers();
-  void releaseGifDecoder();
+  void prepareAnimationDrawRect();
   bool readGifStreamHeader();
   bool sniffAnimatedWebp();
   bool startAnimationStream(AnimationStreamWorker::Source source);
@@ -357,7 +234,6 @@ private:
   bool decodeWebpImage();
   void releaseWebpDecoder();
   void scaleWebpRgba(const uint8_t *rgba);
-  void scaleGifFrame();
   bool cacheNeedsRotation() const;
   void startCacheWrite();
   void writeCacheChunk();
@@ -393,13 +269,5 @@ private:
   static int32_t jpegRead(JPEGFILE *file, uint8_t *buffer, int32_t length);
   static int32_t jpegSeek(JPEGFILE *file, int32_t position);
   static int jpegDraw(JPEGDRAW *draw);
-  static void *gifOpen(const char *name, int32_t *size);
-  static void gifClose(void *handle);
-  static int32_t gifRead(GIFFILE *file, uint8_t *buffer, int32_t length);
-  static int32_t gifSeek(GIFFILE *file, int32_t position);
-  static void gifDraw(GIFDRAW *draw);
-  static void *gifAlloc(uint32_t size);
-  static void gifFree(void *buffer);
-  static void gifLoaderTask(void *context);
   void storeRasterPixel(uint32_t sourceX, uint32_t sourceY, uint16_t color);
 };

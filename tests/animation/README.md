@@ -46,7 +46,9 @@ python3 tools/generate_animation_fixtures.py
 
 ## Baseline procedure
 
-Use this to compare the cached player with the streaming replacement.
+This measured the cached player on firmware before phase 1 (commit `b74a3f9`
+plus the phase 0 logs). Current firmware streams and never writes `.emga`;
+keep the table only to compare against the phase 1–3 numbers.
 
 1. Build and flash with `tools/build_esp32s3.sh`, then open the serial monitor at 115200 baud.
 2. Copy `fixtures/` to the SD card. For a clean first-open measurement, delete the folder's `.cache/*.emga` files on a computer.
@@ -147,3 +149,23 @@ video.
 7. Compare `gif_320x240_40ms.gif` and `webp_anim_lossy_320x240.webp` with the
    phase 1–2 numbers. `pres` should be close to `dec - drop`, and `drop`
    should not be higher than before.
+
+## Phase 4 checks: cache code removed
+
+The `.emga` writer, preloader, and loader are gone. These checks confirm
+nothing else depended on them.
+
+1. Still images: BMP, PNG, JPEG, and both static WebP fixtures render. Their
+   second open logs `Image cache hit`, and crop zoom still works.
+2. Files thumbnails (`.cache/*.eth1`) still appear for GIF and WebP files.
+3. A GIF inline on a Browser page still renders.
+4. On a card that still has `.emga` files from the baseline:
+   - Files does not list them.
+   - Deleting or renaming the source removes its `.emga`.
+   - Moving a GIF into secret storage and back works, and no `.emga`
+     appears beside the moved file.
+5. Build and run `tests/media_cache_contract`. Serial prints
+   `media cache contract: PASS`.
+6. Rerun the phase 1–3 checks on `gif_320x240_100ms.gif`,
+   `webp_anim_lossy_320x240.webp`, and `gif_disposal_alpha.gif`. Each still
+   plays as before.

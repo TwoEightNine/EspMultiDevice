@@ -219,6 +219,11 @@ MediaCache::Result MediaCache::relocationStep(Relocation &relocation, uint8_t *b
   }
 
   const FileFormats::Format format = FileFormats::internalCacheAt(relocation.nextFormat);
+  // Legacy caches stay behind and are removed with the source.
+  if (relocation.phase == Relocation::Phase::StartCache && FileFormats::isLegacyCache(format)) {
+    advanceRelocation(relocation);
+    return Result::More;
+  }
   if (relocation.phase == Relocation::Phase::StartCache) {
     CachePaths sourcePaths;
     CachePaths destinationPaths;

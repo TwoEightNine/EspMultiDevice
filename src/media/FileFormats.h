@@ -28,6 +28,8 @@ public:
     Mp4,
     ThreeGp,
     Em16,
+    // Legacy animation cache: nothing writes it now that animations stream,
+    // but cleanup still removes existing files.
     Emga,
     Empa,
     // Keep new values after the persisted source-format values above. ETH1
@@ -174,6 +176,12 @@ public:
     return format == Format::Em16 || format == Format::Em16Zoom ||
            format == Format::Emga || format == Format::Empa ||
            format == Format::Eth1;
+  }
+
+  // A legacy cache has no producer; Files removes it with its source but never
+  // copies it when the source moves.
+  static bool isLegacyCache(Format format) {
+    return format == Format::Emga;
   }
 
   static uint8_t internalCacheCount() { return 5; }

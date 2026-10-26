@@ -5,16 +5,15 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include "../../../third_party/AnimatedGIF/AnimatedGIF.h"
 #include "../../services/storage/SecretStorage.h"
 
-class AnimatedGIF;
-struct gif_file_tag;  // AnimatedGIF's GIFFILE
 struct WebPAnimDecoder;
 
 // Decodes an animated GIF or WebP directly from its source on the core the
 // Arduino loop does not use and publishes display-sized RGB565 frames in
 // packed PSRAM slots. While running, the worker owns the source file and the
-// decoder (a GIF borrows the caller's AnimatedGIF); the UI owns presentation
+// decoder; the UI owns presentation
 // timing and display transfers and never touches either. Frames carry their
 // due time on a timeline the UI starts when it shows the first frame, so a
 // slow decoder skips stale output instead of playing in slow motion.
@@ -46,7 +45,7 @@ public:
     uint32_t sourceSize = 0;
   };
 
-  AnimationStreamWorker(SecretStorage &storage, AnimatedGIF &decoder);
+  explicit AnimationStreamWorker(SecretStorage &storage);
   ~AnimationStreamWorker();
 
   // Allocates the packed slots and starts the worker task. On failure the
@@ -79,7 +78,8 @@ private:
   };
 
   SecretStorage &_storage;
-  AnimatedGIF &_decoder;
+  // Held for the worker's lifetime so its LZW tables stay in internal RAM.
+  AnimatedGIF _decoder;
   Source _source;
   String _path;
   bool _secretAccess;
@@ -142,8 +142,8 @@ private:
   static bool lockSource();
   static void *gifOpen(const char *name, int32_t *size);
   static void gifClose(void *handle);
-  static int32_t gifRead(gif_file_tag *file, uint8_t *buffer, int32_t length);
-  static int32_t gifSeek(gif_file_tag *file, int32_t position);
+  static int32_t gifRead(GIFFILE *file, uint8_t *buffer, int32_t length);
+  static int32_t gifSeek(GIFFILE *file, int32_t position);
   static void *psramAlloc(uint32_t size);
   static void psramFree(void *buffer);
 };

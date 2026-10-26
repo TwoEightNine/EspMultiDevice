@@ -30,8 +30,7 @@ const FingerprintCase FingerprintCases[] = {
   {FileFormats::Format::Eth1, 8},
   {FileFormats::Format::Empa, 8},
   {FileFormats::Format::Em16, 12},
-  {FileFormats::Format::Em16Zoom, 12},
-  {FileFormats::Format::Emga, 12}
+  {FileFormats::Format::Em16Zoom, 12}
 };
 
 uint16_t failures = 0;
@@ -83,6 +82,8 @@ void setup() {
     expect(FileFormats::isInternal(format), F("cache registry contains source format"));
     expect(!FileFormats::isOpenable(format) && !FileFormats::isDownloadable(format),
            F("internal cache exposed as source media"));
+    expect(FileFormats::isLegacyCache(format) == (format == FileFormats::Format::Emga),
+           F("legacy cache registry mismatch"));
   }
 
   const SourceFingerprint original{1234, 0};
@@ -101,9 +102,13 @@ void setup() {
            F("cache fingerprint timestamp rewrite mismatch"));
   }
   uint8_t shortHeader[15] = {};
-  expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Emga, shortHeader,
+  expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Em16, shortHeader,
                                          sizeof(shortHeader), moved),
          F("short cache header accepted"));
+  uint8_t legacyHeader[40] = {};
+  expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Emga, legacyHeader,
+                                         sizeof(legacyHeader), moved),
+         F("legacy cache fingerprint rewritten"));
   expect(!MediaCache::rewriteFingerprint(FileFormats::Format::Jpeg, shortHeader,
                                          sizeof(shortHeader), moved),
          F("source format accepted for fingerprint rewrite"));
