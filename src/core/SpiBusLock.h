@@ -11,6 +11,8 @@ public:
   static bool begin();
   static bool lock(TickType_t timeout = portMAX_DELAY);
   static void unlock();
+  // Name of the task holding the bus, or "none"; for failure diagnostics.
+  static const char *holderName();
 
 private:
   static SemaphoreHandle_t _mutex;

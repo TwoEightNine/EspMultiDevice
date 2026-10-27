@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the 64x64 transparent logos shipped with the example Lua apps."""
+"""Generate the 64x64 transparent logos shipped with the example Lua apps.
 
+Pass app names (for example `dvach`) to regenerate only those logos.
+"""
+
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -71,9 +75,29 @@ def images_logo():
     save(image, "examples/apps/images/logo.png")
 
 
+def dvach_logo():
+    image = canvas()
+    draw = ImageDraw.Draw(image)
+    white = (255, 255, 255, 255)
+    clear = (0, 0, 0, 0)
+    # A speech bubble with three lines of text cut out of it.
+    draw.rounded_rectangle((30, 46, 226, 176), radius=30, fill=white)
+    draw.polygon(((70, 170), (62, 216), (112, 172)), fill=white)
+    for y, right in ((78, 194), (106, 194), (134, 150)):
+        draw.rounded_rectangle((62, y, right, y + 14), radius=7, fill=clear)
+    save(image, "examples/apps/dvach/logo.png")
+
+
+LOGOS = {
+    "counter": counter_logo,
+    "workout": workout_logo,
+    "recorder": recorder_logo,
+    "files": files_logo,
+    "images": images_logo,
+    "dvach": dvach_logo,
+}
+
+
 if __name__ == "__main__":
-    counter_logo()
-    workout_logo()
-    recorder_logo()
-    files_logo()
-    images_logo()
+    for name in sys.argv[1:] or LOGOS:
+        LOGOS[name]()

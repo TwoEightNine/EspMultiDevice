@@ -16,7 +16,7 @@ public:
   void tick(uint32_t nowMs) override;
 
 private:
-  static const uint8_t MaxKeys = 48;
+  static const uint8_t MaxKeys = 56;
   static const uint16_t MaxVisualLines = 256;
   static const uint16_t CursorBlinkMs = 500;
   static const uint16_t KeyFeedbackMs = 120;
@@ -26,6 +26,7 @@ private:
     Character,
     Shift,
     Symbols,
+    Language,
     Space,
     Backspace,
     Enter,
@@ -42,7 +43,7 @@ private:
   struct Key {
     Rect bounds;
     char label[8];
-    char value;
+    uint16_t value;  // Unicode code point for Character keys
     KeyAction action;
   };
 
@@ -59,6 +60,8 @@ private:
   bool _shift;
   bool _capsLock;
   bool _symbols;
+  bool _cyrillic;
+  uint8_t _columns;
   bool _shiftPressPending;
   uint32_t _shiftPressMs;
   bool _lastTouchDown;
@@ -88,15 +91,16 @@ private:
   void drawKeyIcon(const Key &key, uint16_t color, uint16_t backgroundColor);
   void layout();
   void layoutCharacterRow(const char *characters, uint8_t row);
-  void layoutCharacterKey(char value, uint8_t row, uint8_t column);
+  void layoutCyrillicRow(const uint16_t *letters, uint8_t count, uint8_t row, uint8_t firstColumn);
+  void layoutCharacterKey(uint16_t value, uint8_t row, uint8_t column);
   void layoutSpannedKey(const char *label,
-                        char value,
+                        uint16_t value,
                         KeyAction action,
                         uint8_t row,
                         uint8_t column,
                         uint8_t span);
   void addKey(const char *label,
-              char value,
+              uint16_t value,
               KeyAction action,
               int16_t x,
               int16_t y,
@@ -105,7 +109,7 @@ private:
 
   void handleKey(uint8_t index);
   void finishShiftPress();
-  void insertCharacter(char value);
+  void insertCharacter(uint16_t value);
   void deleteCharacterBeforeCursor();
   void placeCursor(int16_t x, int16_t y);
   void buildVisualLines();
@@ -116,4 +120,6 @@ private:
   bool contains(const Rect &rect, int16_t x, int16_t y) const;
   int8_t keyAt(int16_t x, int16_t y) const;
   bool lettersUppercase() const;
+  static uint16_t upperCase(uint16_t value);
+  static uint8_t sequenceLength(uint8_t lead);
 };

@@ -5,7 +5,7 @@
 // Firmware release version (semantic versioning). Edit only the three numeric
 // components; the display string is derived from them so it cannot drift.
 #define ESP_MEDIA_VERSION_MAJOR 0
-#define ESP_MEDIA_VERSION_MINOR 1
+#define ESP_MEDIA_VERSION_MINOR 2
 #define ESP_MEDIA_VERSION_PATCH 0
 
 #define ESP_MEDIA_VERSION_STRINGIFY_(value) #value

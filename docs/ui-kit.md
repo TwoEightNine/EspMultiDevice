@@ -115,6 +115,10 @@ While an SDK 5 app shows an image, the host draws the Image Viewer's app bar ove
 
 SDK 2 canvas commands are still rendered by the host UI task. The host clips them below the same app bar and uses `UiText` for app text and `UiKit` for submitted buttons and progress bars. Apps supply the immediate background to smooth drawing primitives and own the full hit rectangles of content controls through `on_touch(x, y)`; the host always owns the close cell.
 
+SDK 6 adds two canvas commands. `text_box` wraps its text with `UiText::measure` at word boundaries (inside a word only when one word is wider than the box) and passes the last line through `UiText::ellipsize`. `bitmap` pushes a decoded RGB565 bitmap with `pushImage`; the app blends PNG alpha against the background it names when decoding, so the bitmap must be drawn over that colour.
+
+The system keyboard (`TextInputScreen`) has an EN/RU key in the bottom row. The Russian layout uses an 11-column grid: digits plus Ё, ЙЦУКЕНГШЩЗХ, ФЫВАПРОЛДЖЭ, Shift with ЯЧСМИТЬБЮ and Backspace, then symbols, EN, Ъ, Space, Enter, and Done. Shift and Caps Lock apply to Cyrillic letters; the cursor, Backspace, masking, and line wrapping step over whole UTF-8 characters.
+
 Rounded controls are fill-only smooth rounded rectangles: use `fillSmoothRoundRect()` with the fill as the edge background, never an outline. Labels default to `UiText::Size::Content`; numeric PIN keys are the sole exception and use `Title`.
 
 Use `UiKit::drawFilledButton()` for ordinary rounded text buttons. The helper draws the fill and ellipsized `Content` label with the supplied immediate background; the screen retains responsibility for making the complete button rectangle tappable.

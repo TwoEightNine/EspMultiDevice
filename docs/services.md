@@ -75,6 +75,10 @@ checked between transactions, Back waits for cleanup and worker shutdown, and
 an incomplete cleanup is reported instead of hidden. No result or test payload
 is retained after the screen visit.
 
+`HttpClient` (`src/services/network/`) is the bounded HTTP/1.1 client behind the SDK 6 `esp.net` API. It performs one blocking request at a time on its caller's worker task, with a caller-supplied host policy that also reports cancellation and progress, and a body sink. HTTPS validates certificates against the Mozilla root bundle that ESP-IDF's mbedTLS component already links into every Arduino-ESP32 3.x image (`_binary_x509_crt_bundle_start`), attached with `setCACertBundle`, so it adds no flash for trust anchors; handshakes run inside `TlsMemoryScope`. It refuses HTTPS before the clock is valid (`Clock not set`), distinguishes DNS, TCP, and TLS failures, follows allowlisted redirects, decodes chunked bodies, rejects compressed ones, keeps one idle keep-alive connection, and logs only method, host, status, and timing. Unlike `BrowserTransport`, it never disables certificate validation; the Browser keeps its own transport and compatibility policy.
+
+`SpiBusLock` logs `[SPI bus] <task> … waited N ms; holder=<task>` when a wait of 10 ms or more times out, and `[SPI bus] <task> … held the bus N ms` for holds over 100 ms, each at most every 250 ms. A holder of `none` means the bus was free and the waiting task did not get CPU time. `[SD]` lines report card-detect removals, failed health checks, and remounts.
+
 `TimeController` begins SNTP only while Wi-Fi is connected, marks time available after a valid epoch, and reports a fixed UTC+4 local clock. Change `UtcOffsetSeconds` if the product’s local-time requirement changes.
 
 ## Audio and workout

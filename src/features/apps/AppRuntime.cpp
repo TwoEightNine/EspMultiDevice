@@ -7,6 +7,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <new>
 
 #include "../../vendor_shims/lua/LuaConfig.h"
 
@@ -16,6 +17,7 @@ extern "C" {
 #include "../../../third_party/lua/lualib.h"
 }
 
+#include "../../core/FirmwareVersion.h"
 #include "../../core/NaturalOrder.h"
 #include "../../core/SpiBusLock.h"
 #include "../../media/FileFormats.h"
@@ -25,7 +27,9 @@ extern "C" {
 #include "../../services/audio/AudioSettings.h"
 #include "../../services/audio/MicController.h"
 #include "../../services/audio/WavFormat.h"
+#include "AppNetWorker.h"
 #include "AppPackage.h"
+#include "AppText.h"
 
 namespace {
 String dataDirectory(const String &id) { return String("/.system/appdata/") + id; }
@@ -62,6 +66,11 @@ AppRuntime::AppRuntime(SdCardController &card, SpeakerController &speaker,
 
 bool AppRuntime::start(const String &id, const Status &initialStatus) {
   if (_task || !AppPackage::validId(id)) return false;
+  if (_net) {
+    if (!_net->stop()) return false;
+    delete _net;
+    _net = nullptr;
+  }
   _id = id;
   _cancel = false;
   _stopped = false;
@@ -72,6 +81,8 @@ bool AppRuntime::start(const String &id, const Status &initialStatus) {
   _frameCost = 0;
   _sdkVersion = 1;
   _filesPermission = false;
+  _networkPermission = false;
+  _hostCount = 0;
   _navigationPending = _inputProvided = false;
   _paused = false;
   _resumeRequested = false;
@@ -99,7 +110,7 @@ bool AppRuntime::start(const String &id, const Status &initialStatus) {
   _mutex = xSemaphoreCreateMutex();
   if (!_actions || !_mutex ||
       xTaskCreatePinnedToCore(taskMain, "sd-app", WorkerStackBytes, this,
-                              tskIDLE_PRIORITY, &_task, 0) != pdPASS) {
+                              WorkerPriority, &_task, 0) != pdPASS) {
     if (_actions) { vQueueDelete(_actions); _actions = nullptr; }
     if (_mutex) { vSemaphoreDelete(_mutex); _mutex = nullptr; }
     heap_caps_free(_buildingFrame); heap_caps_free(_publishedFrame);
@@ -116,12 +127,19 @@ bool AppRuntime::stopped() const { return _stopped; }
 bool AppRuntime::end() {
   requestStop();
   if (!_stopped) return false;
+  // A request may still be unwinding a connect; the host retries.
+  if (_net) {
+    if (!_net->stop()) return false;
+    delete _net;
+    _net = nullptr;
+  }
   if (_task) { vTaskDelete(_task); _task = nullptr; }
   if (_actions) { vQueueDelete(_actions); _actions = nullptr; }
   if (_mutex) { vSemaphoreDelete(_mutex); _mutex = nullptr; }
   clearTones();
   if (_buildingFrame) { heap_caps_free(_buildingFrame); _buildingFrame = nullptr; }
   if (_publishedFrame) { heap_caps_free(_publishedFrame); _publishedFrame = nullptr; }
+  releaseBitmaps();
   _id = String();
   _displayName = String();
   return true;
@@ -224,7 +242,7 @@ void AppRuntime::luaHook(lua_State *state, lua_Debug *) {
   AppRuntime *runtime = *static_cast<AppRuntime **>(lua_getextraspace(state));
   runtime->_hookCount += 1000;
   if (runtime->_cancel || runtime->_hookCount > CallbackMaxInstructions ||
-      esp_timer_get_time() - runtime->_callbackStartedUs > CallbackMaxUs) {
+      callbackClockUs() - runtime->_callbackStartedUs > CallbackMaxUs) {
     luaL_error(state, "app callback exceeded its time or instruction limit");
   }
 }
@@ -288,7 +306,7 @@ bool AppRuntime::readData(const char *name, char *&data, size_t &length, String 
   length = 0;
   if (!AppPackage::validDataName(name)) { error = "Invalid file name"; return false; }
   if (!_card.isMounted()) { error = "SD card unavailable"; return false; }
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
   File file = SD.open(dataPath(_id, name).c_str(), FILE_READ);
   const bool opened = file && !file.isDirectory();
   const size_t size = opened ? static_cast<size_t>(file.size()) : 0;
@@ -305,7 +323,7 @@ bool AppRuntime::readData(const char *name, char *&data, size_t &length, String 
     return false;
   }
   while (length < size && !_cancel && _card.isMounted()) {
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; break; }
+    if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; break; }
     const size_t chunk = min(static_cast<size_t>(1024), size - length);
     const size_t count = file.readBytes(data + length, chunk);
     SpiBusLock::unlock();
@@ -337,7 +355,7 @@ bool AppRuntime::writeData(const char *name, const char *data, size_t length, St
   if (!_card.isMounted()) { error = "SD card unavailable"; return false; }
   const String path = dataPath(_id, name);
   const String temp = path + ".tmp";
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
   bool ready = ensureDataDirectory();
   if (ready) SD.remove(temp.c_str());
   File file = ready ? SD.open(temp.c_str(), FILE_WRITE) : File();
@@ -345,7 +363,7 @@ bool AppRuntime::writeData(const char *name, const char *data, size_t length, St
   if (!file) { error = "Cannot open app data"; return false; }
   size_t written = 0;
   while (written < length && !_cancel && _card.isMounted()) {
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; break; }
+    if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; break; }
     const size_t chunk = min(static_cast<size_t>(1024), length - written);
     const size_t count = file.write(reinterpret_cast<const uint8_t *>(data + written), chunk);
     SpiBusLock::unlock();
@@ -360,13 +378,13 @@ bool AppRuntime::writeData(const char *name, const char *data, size_t length, St
     closed = true;
   }
   bool success = closed && written == length && !_cancel && _card.isMounted();
-  if (success && SpiBusLock::lock(pdMS_TO_TICKS(50))) {
+  if (success && SpiBusLock::lock(AppPackage::SdLockTimeout)) {
     if (SD.exists(path.c_str())) SD.remove(path.c_str());
     success = SD.rename(temp.c_str(), path.c_str());
     SpiBusLock::unlock();
   } else success = false;
   if (!success) {
-    if (SpiBusLock::lock(pdMS_TO_TICKS(50))) { SD.remove(temp.c_str()); SpiBusLock::unlock(); }
+    if (SpiBusLock::lock(AppPackage::SdLockTimeout)) { SD.remove(temp.c_str()); SpiBusLock::unlock(); }
     if (error.isEmpty()) error = "App data write failed";
   }
   return success;
@@ -382,12 +400,12 @@ int AppRuntime::luaRead(lua_State *state) {
   char *data = nullptr;
   size_t length = 0;
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   if (!runtime->readData(name, data, length, error)) {
-    runtime->_callbackStartedUs += esp_timer_get_time() - started;
+    runtime->_callbackStartedUs += callbackClockUs() - started;
     lua_pushnil(state); lua_pushstring(state, error.c_str()); return 2;
   }
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushlstring(state, data, length);
   heap_caps_free(data);
   return 1;
@@ -403,9 +421,9 @@ int AppRuntime::luaWrite(lua_State *state) {
   size_t length = 0;
   const char *data = luaL_checklstring(state, 2, &length);
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->writeData(name, data, length, error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushboolean(state, success);
   if (!success) { lua_pushstring(state, error.c_str()); return 2; }
   return 1;
@@ -606,9 +624,9 @@ int AppRuntime::luaPlayTone(lua_State *state) {
 
 int AppRuntime::luaStopTones(lua_State *state) {
   AppRuntime *runtime = self(state);
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   runtime->clearTones();
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   return 0;
 }
 int AppRuntime::luaVolume(lua_State *state) {
@@ -620,9 +638,9 @@ int AppRuntime::luaSetVolume(lua_State *state) {
   if (volume < 0 || volume > 10) {
     lua_pushboolean(state, false); lua_pushliteral(state, "volume out of range"); return 2;
   }
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->_audioSettings.setVolume(static_cast<uint8_t>(volume));
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushboolean(state, success);
   if (!success) { lua_pushliteral(state, "volume could not be saved"); return 2; }
   return 1;
@@ -677,10 +695,10 @@ int AppRuntime::luaStorageSize(lua_State *state) {
   if (!runtime->_card.isMounted()) {
     lua_pushnil(state); lua_pushliteral(state, "SD card unavailable"); return 2;
   }
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   bool found = false;
   size_t size = 0;
-  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
   if (locked) {
     File file = SD.open(dataPath(runtime->_id, name).c_str(), FILE_READ);
     found = file && !file.isDirectory();
@@ -688,7 +706,7 @@ int AppRuntime::luaStorageSize(lua_State *state) {
     if (file) file.close();
     SpiBusLock::unlock();
   }
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!locked) { lua_pushnil(state); lua_pushliteral(state, "SD busy"); return 2; }
   if (!found) { lua_pushnil(state); lua_pushliteral(state, "File not found"); return 2; }
   lua_pushinteger(state, static_cast<lua_Integer>(size));
@@ -730,9 +748,9 @@ int AppRuntime::luaMicStart(lua_State *state) {
     lua_pushboolean(state, false); lua_pushliteral(state, "duration out of range"); return 2;
   }
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->startRecording(name, static_cast<uint32_t>(seconds), error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushboolean(state, success);
   if (!success) { lua_pushstring(state, error.c_str()); return 2; }
   return 1;
@@ -744,9 +762,9 @@ int AppRuntime::luaMicStop(lua_State *state) {
     lua_pushboolean(state, false); lua_pushliteral(state, "Not recording"); return 2;
   }
   uint32_t bytes = 0;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->finishRecording("", &bytes);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushboolean(state, success);
   if (!success) { lua_pushstring(state, runtime->_recError.c_str()); return 2; }
   lua_pushinteger(state, bytes);
@@ -761,9 +779,9 @@ int AppRuntime::luaPlayFile(lua_State *state) {
     lua_pushboolean(state, false); lua_pushliteral(state, "Invalid file name"); return 2;
   }
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->startPlayback(name, error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   lua_pushboolean(state, success);
   if (!success) { lua_pushstring(state, error.c_str()); return 2; }
   return 1;
@@ -771,9 +789,9 @@ int AppRuntime::luaPlayFile(lua_State *state) {
 
 int AppRuntime::luaStopFile(lua_State *state) {
   AppRuntime *runtime = self(state);
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   runtime->finishPlayback(nullptr, false);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   return 0;
 }
 
@@ -807,7 +825,7 @@ bool AppRuntime::startRecording(const char *name, uint32_t maxSeconds, String &e
   if (name) {
     _recPath = dataPath(_id, name);
     _recTempPath = _recPath + ".tmp";
-    if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+    if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
     const bool ready = ensureDataDirectory();
     if (ready) SD.remove(_recTempPath.c_str());
     _recFile = ready ? SD.open(_recTempPath.c_str(), FILE_WRITE) : File();
@@ -939,7 +957,7 @@ bool AppRuntime::startPlayback(const char *name, String &error) {
   uint8_t header[WavFormat::HeaderBytes];
   uint32_t sampleRate = 0, dataBytes = 0;
   size_t fileSize = 0;
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
   _playFile = SD.open(dataPath(_id, name).c_str(), FILE_READ);
   bool opened = _playFile && !_playFile.isDirectory();
   if (opened) {
@@ -1060,14 +1078,23 @@ int AppRuntime::luaPrompt(lua_State *state) {
   size_t titleLength = 0, initialLength = 0;
   const char *title = luaL_checklstring(state, 1, &titleLength);
   const char *initial = luaL_optlstring(state, 2, "", &initialLength);
+  const size_t initialLimit = runtime->_sdkVersion >= 6 ? MaxPromptBytes : 255;
   if (!titleLength || titleLength > 40 || memchr(title, 0, titleLength) ||
-      initialLength > 255 || memchr(initial, 0, initialLength))
+      initialLength > initialLimit || memchr(initial, 0, initialLength))
     return luaL_error(state, "invalid prompt text");
+  bool mask = false;
+  if (runtime->_sdkVersion >= 6 && !lua_isnoneornil(state, 3)) {
+    luaL_checktype(state, 3, LUA_TTABLE);
+    lua_getfield(state, 3, "mask");
+    mask = lua_toboolean(state, -1);
+    lua_pop(state, 1);
+  }
   if (runtime->_navigationPending) return pushFailure(state, false, "Navigation pending");
   if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
     return pushFailure(state, false, "Host busy");
   runtime->_navigation = Navigation{};
   runtime->_navigation.kind = NavigationKind::Prompt;
+  runtime->_navigation.mask = mask;
   copyText(runtime->_navigation.title, sizeof(runtime->_navigation.title), title);
   copyText(runtime->_navigation.initial, sizeof(runtime->_navigation.initial), initial);
   runtime->_navigationPending = true;
@@ -1088,11 +1115,14 @@ void AppRuntime::pauseForNavigation() {
 }
 
 bool AppRuntime::resumeFromNavigation() {
-  char text[sizeof(_input)];
+  char text[sizeof(_input)] = {};
   bool provided = false;
   if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     provided = _inputProvided;
     copyText(text, sizeof(text), _input);
+    // Earlier SDKs documented a 255-byte result; cut on a character boundary.
+    const size_t limit = _sdkVersion >= 6 ? MaxPromptBytes : 255;
+    text[AppText::utf8Prefix(text, strlen(text), limit)] = 0;
     // A request the host never took (push failed) is dropped with the pause.
     _navigationPending = false;
     xSemaphoreGive(_mutex);
@@ -1150,7 +1180,7 @@ void AppRuntime::pushFsEntry(lua_State *state, const char *name, bool directory,
 
 bool AppRuntime::startScan(const String &path, String &error) {
   closeScan(false);
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
   _fsDirectory = SD.open(path.c_str());
   const bool valid = _fsDirectory && _fsDirectory.isDirectory();
   if (!valid && _fsDirectory) _fsDirectory.close();
@@ -1257,7 +1287,7 @@ void AppRuntime::serviceScan() {
 
 bool AppRuntime::startJob(FsJob job, const String &source, const String &target, String &error) {
   if (_fsJob != FsJob::None) { error = "File job active"; return false; }
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { error = "SD busy"; return false; }
   File file = SD.open(source.c_str(), FILE_READ);
   const bool exists = static_cast<bool>(file);
   const bool directory = exists && file.isDirectory();
@@ -1384,9 +1414,9 @@ int AppRuntime::luaFsScan(lua_State *state) {
   if (!runtime->checkFsPath(state, 1, true, false, false, path)) return 2;
   if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->startScan(path, error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!success) return pushFailure(state, false, error.c_str());
   lua_pushboolean(state, true);
   return 1;
@@ -1429,10 +1459,10 @@ int AppRuntime::luaFsStat(lua_State *state) {
   AppRuntime *runtime = self(state);
   String path;
   if (!runtime->checkFsPath(state, 1, true, false, true, path)) return 2;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   bool found = false, directory = false;
   uint32_t size = 0, modified = 0;
-  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
   if (locked) {
     File file = SD.open(path.c_str(), FILE_READ);
     found = static_cast<bool>(file);
@@ -1444,7 +1474,7 @@ int AppRuntime::luaFsStat(lua_State *state) {
     }
     SpiBusLock::unlock();
   }
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!locked) return pushFailure(state, true, "SD busy");
   if (!found) return pushFailure(state, true, "File not found");
   const String name = path == "/" ? path : baseName(path);
@@ -1459,9 +1489,9 @@ int AppRuntime::luaFsMkdir(lua_State *state) {
   String path;
   if (!runtime->checkFsPath(state, 1, false, true, false, path)) return 2;
   if (runtime->_fsJob != FsJob::None) return pushFailure(state, false, "File job active");
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const char *error = nullptr;
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) {
     error = "SD busy";
   } else {
     if (SD.exists(path.c_str())) error = "Already exists";
@@ -1469,7 +1499,7 @@ int AppRuntime::luaFsMkdir(lua_State *state) {
     SpiBusLock::unlock();
   }
   if (!error) runtime->closeScan(false);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (error) return pushFailure(state, false, error);
   lua_pushboolean(state, true);
   return 1;
@@ -1489,9 +1519,9 @@ int AppRuntime::luaFsRename(lua_State *state) {
   if (PathPolicy::atOrBelow(target, source))
     return pushFailure(state, false, "Cannot move a folder into itself");
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->startJob(FsJob::Rename, source, target, error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!success) return pushFailure(state, false, error.c_str());
   lua_pushboolean(state, true);
   return 1;
@@ -1502,9 +1532,9 @@ int AppRuntime::luaFsRemove(lua_State *state) {
   String path;
   if (!runtime->checkFsPath(state, 1, false, true, false, path)) return 2;
   String error;
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   const bool success = runtime->startJob(FsJob::Remove, path, String(), error);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!success) return pushFailure(state, false, error.c_str());
   lua_pushboolean(state, true);
   return 1;
@@ -1528,9 +1558,9 @@ int AppRuntime::luaFsJob(lua_State *state) {
 
 int AppRuntime::luaFsCancel(lua_State *state) {
   AppRuntime *runtime = self(state);
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   if (runtime->_fsScanning) runtime->closeScan(false);
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (runtime->_fsJob != FsJob::None) runtime->_fsJobCancel = true;
   return 0;
 }
@@ -1543,16 +1573,16 @@ int AppRuntime::luaFsOpen(lua_State *state) {
   if (runtime->_navigationPending) return pushFailure(state, false, "Navigation pending");
   const FileFormats::Format format = FileFormats::fromPath(path);
   if (!FileFormats::isOpenable(format)) return pushFailure(state, false, "Unsupported file");
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   bool found = false;
-  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
   if (locked) {
     File file = SD.open(path.c_str(), FILE_READ);
     found = file && !file.isDirectory();
     if (file) file.close();
     SpiBusLock::unlock();
   }
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!locked) return pushFailure(state, false, "SD busy");
   if (!found) return pushFailure(state, false, "File not found");
   if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
@@ -1574,16 +1604,16 @@ int AppRuntime::luaImageOpen(lua_State *state) {
   const FileFormats::Format format = FileFormats::fromPath(path);
   if (!FileFormats::isImage(format) || !FileFormats::isOpenable(format))
     return pushFailure(state, false, "Unsupported file");
-  const int64_t started = esp_timer_get_time();
+  const int64_t started = callbackClockUs();
   bool found = false;
-  const bool locked = SpiBusLock::lock(pdMS_TO_TICKS(50));
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
   if (locked) {
     File file = SD.open(path.c_str(), FILE_READ);
     found = file && !file.isDirectory();
     if (file) file.close();
     SpiBusLock::unlock();
   }
-  runtime->_callbackStartedUs += esp_timer_get_time() - started;
+  runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!locked) return pushFailure(state, false, "SD busy");
   if (!found) return pushFailure(state, false, "File not found");
   if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
@@ -1812,6 +1842,7 @@ void AppRuntime::registerApi() {
       }
     }
   }
+  if (_sdkVersion >= 6) registerSdk6();
   lua_setglobal(_lua, "esp");
 }
 
@@ -1819,8 +1850,15 @@ void AppRuntime::setError(const String &message) {
   Serial.printf("[SD app] %s: %s\n", _id.c_str(), message.c_str());
   Scene scene{};
   copyText(scene.title, sizeof(scene.title), "App error");
-  scene.count = 1;
+  scene.count = 3;
   copyText(scene.rows[0].text, sizeof(scene.rows[0].text), message.c_str());
+  // The host handles these once the worker has stopped.
+  scene.rows[1].button = true;
+  copyText(scene.rows[1].id, sizeof(scene.rows[1].id), HostRestartAction);
+  copyText(scene.rows[1].text, sizeof(scene.rows[1].text), "Restart app");
+  scene.rows[2].button = true;
+  copyText(scene.rows[2].id, sizeof(scene.rows[2].id), HostCloseAction);
+  copyText(scene.rows[2].text, sizeof(scene.rows[2].text), "Close app");
   if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
     _scene = scene;
     ++_revision;
@@ -1846,19 +1884,58 @@ bool AppRuntime::invoke(const char *callback, const CallArgs &callArguments) {
     lua_pushinteger(_lua, static_cast<lua_Integer>(callArguments.number[i]));
     ++arguments;
   }
+  _callbackName = callback;
+  return callPrepared(arguments);
+}
+
+bool AppRuntime::callPrepared(int arguments) {
+  payGcDebt();
   _hookCount = 0;
-  _callbackStartedUs = esp_timer_get_time();
+  const int64_t wallStartedUs = esp_timer_get_time();
+  _callbackStartedUs = callbackClockUs();
   lua_sethook(_lua, luaHook, LUA_MASKCOUNT, 1000);
   const int result = lua_pcall(_lua, arguments, 0, 0);
   lua_sethook(_lua, nullptr, 0, 0);
-  if (result != LUA_OK || esp_timer_get_time() - _callbackStartedUs > CallbackMaxUs) {
+  if (result != LUA_OK || callbackClockUs() - _callbackStartedUs > CallbackMaxUs) {
     const char *error = lua_tostring(_lua, -1);
+    Serial.printf("[SD app] %s: %s ended after %lld ms of script CPU (%lld ms wall), %u instructions\n",
+                  _id.c_str(), _callbackName ? _callbackName : "callback",
+                  (callbackClockUs() - _callbackStartedUs) / 1000,
+                  (esp_timer_get_time() - wallStartedUs) / 1000,
+                  static_cast<unsigned>(_hookCount));
     setError(result != LUA_OK && error ? error : "App callback exceeded its time limit");
     lua_settop(_lua, 0);
     return false;
   }
   lua_settop(_lua, 0);
   return true;
+}
+
+// The clock for the callback limit: CPU time the calling task (the app
+// worker) has used, in microseconds. Wall time would also count every slice
+// in which Wi-Fi, TLS, or another worker preempted the script. FreeRTOS
+// updates a task's run-time counter only at context switches, so yield first
+// to bring the running task's figure up to date; at the worker's priority
+// that returns at once unless an equal-priority task is ready.
+int64_t AppRuntime::callbackClockUs() {
+  static uint32_t last = 0;
+  static int64_t wraps = 0;
+  taskYIELD();
+  TaskStatus_t status{};
+  vTaskGetInfo(nullptr, &status, pdFALSE, eRunning);
+  const uint32_t now = static_cast<uint32_t>(status.ulRunTimeCounter);
+  if (now < last) wraps += int64_t(1) << 32;
+  last = now;
+  return wraps + now;
+}
+
+// Lua 5.4's incremental collector pays its whole outstanding debt at the next
+// allocation. Host work that allocates Lua objects outside a callback (the
+// compiler, response tables) would otherwise make the next timed callback pay
+// for it, which on a PSRAM heap can exceed the time limit. Paying the debt
+// here keeps that work outside the timer.
+void AppRuntime::payGcDebt() {
+  lua_gc(_lua, LUA_GCSTEP, 1);
 }
 
 void AppRuntime::taskMain(void *context) {
@@ -1869,11 +1946,23 @@ void AppRuntime::taskMain(void *context) {
 }
 
 void AppRuntime::run() {
+  Serial.printf("[SD app] %s: starting (sd=%s, heap=%u, psram=%u)\n", _id.c_str(),
+                _card.isMounted() ? "mounted" : "unmounted",
+                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()));
   AppPackage package = AppPackage::load(_card, _id);
   if (!package.valid) { setError(package.error); return; }
   _displayName = package.name;
   _sdkVersion = package.sdk;
   _filesPermission = package.sdk >= 4 && package.filesPermission;
+  _networkPermission = package.sdk >= 6 && package.networkPermission && package.hostCount > 0;
+  _hostCount = _networkPermission ? package.hostCount : 0;
+  for (uint8_t i = 0; i < _hostCount; ++i) _hosts[i] = package.hosts[i];
+  if (_networkPermission) {
+    _net = new (std::nothrow) AppNetWorker();
+    if (!_net) { setError("App memory unavailable"); return; }
+    _net->configure(_hosts, _hostCount,
+                    String("ESP-Media-App/") + FirmwareVersion::Text + " (" + _id + ")");
+  }
   char *source = nullptr;
   size_t length = 0;
   String error;
@@ -1890,18 +1979,19 @@ void AppRuntime::run() {
     const char *loadError = lua_tostring(_lua, -1);
     setError(loadError ? loadError : "Cannot load app source");
   } else {
+    payGcDebt();
     _hookCount = 0;
-    _callbackStartedUs = esp_timer_get_time();
+    _callbackStartedUs = callbackClockUs();
     lua_sethook(_lua, luaHook, LUA_MASKCOUNT, 1000);
     const int result = lua_pcall(_lua, 0, 1, 0);
     lua_sethook(_lua, nullptr, 0, 0);
-    if (result != LUA_OK || esp_timer_get_time() - _callbackStartedUs > CallbackMaxUs ||
+    if (result != LUA_OK || callbackClockUs() - _callbackStartedUs > CallbackMaxUs ||
         !lua_istable(_lua, -1)) {
       if (result != LUA_OK) {
         const char *startupError = lua_tostring(_lua, -1);
         setError(startupError ? startupError : "App startup failed");
       }
-      else if (esp_timer_get_time() - _callbackStartedUs > CallbackMaxUs)
+      else if (callbackClockUs() - _callbackStartedUs > CallbackMaxUs)
         setError("App startup exceeded its time limit");
       else setError("App must return a callback table");
     } else {
@@ -1920,7 +2010,8 @@ void AppRuntime::run() {
           const bool fsBusy = _fsScanning || _fsJob != FsJob::None;
           const uint32_t waitMs = fsBusy ? 1 :
                                   (_toneRemaining || _toneCount || _audioReady ||
-                                   _recActive || _playActive) ? 10 : TickIntervalMs;
+                                   _recActive || _playActive ||
+                                   (_net && _net->active())) ? 10 : TickIntervalMs;
           if (xQueueReceive(_actions, &action, pdMS_TO_TICKS(waitMs)) == pdTRUE) {
             CallArgs arguments;
             const char *callback = "on_action";
@@ -1946,6 +2037,7 @@ void AppRuntime::run() {
           servicePlayback();
           serviceScan();
           serviceJob();
+          if (_net && !serviceNet()) break;
           const uint32_t now = millis();
           if (now - lastTick >= TickIntervalMs) {
             lastTick = now;
@@ -1962,6 +2054,7 @@ void AppRuntime::run() {
   finishRecording("");
   finishPlayback(nullptr, false);
   clearTones();
+  if (_net) _net->cancel(0);
   lua_close(_lua);
   _lua = nullptr;
   _appRef = LUA_NOREF;

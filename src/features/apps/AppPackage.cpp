@@ -13,12 +13,21 @@ String packagePath(const String &id, const char *name) {
   return String("/Apps/") + id + "/" + name;
 }
 
+// Logs who kept the shared SD/touch bus when a package read gives up.
+void logBusy(const String &path, uint32_t startedMs) {
+  Serial.printf("[SD app] %s: bus busy %lu ms, holder=%s, task=%s prio=%u core=%d\n",
+                path.c_str(), static_cast<unsigned long>(millis() - startedMs),
+                SpiBusLock::holderName(), pcTaskGetName(nullptr),
+                static_cast<unsigned>(uxTaskPriorityGet(nullptr)), xPortGetCoreID());
+}
+
 bool readFile(SdCardController &card, const String &path, size_t limit,
               char *&contents, size_t &length, String &error) {
   contents = nullptr;
   length = 0;
   if (!card.isMounted()) { error = "SD card unavailable"; return false; }
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) { error = "SD busy"; return false; }
+  uint32_t startedMs = millis();
+  if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) { logBusy(path, startedMs); error = "SD busy"; return false; }
   File file = SD.open(path.c_str(), FILE_READ);
   const bool opened = file && !file.isDirectory();
   const size_t size = opened ? static_cast<size_t>(file.size()) : 0;
@@ -35,8 +44,14 @@ bool readFile(SdCardController &card, const String &path, size_t limit,
     return false;
   }
   while (length < size) {
-    if (!card.isMounted() || !SpiBusLock::lock(pdMS_TO_TICKS(50))) {
+    if (!card.isMounted()) {
       error = "SD card unavailable";
+      break;
+    }
+    startedMs = millis();
+    if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) {
+      logBusy(path, startedMs);
+      error = "SD busy";
       break;
     }
     const size_t chunk = min(static_cast<size_t>(1024), size - length);
@@ -80,6 +95,20 @@ bool AppPackage::validDataName(const char *value) {
   return true;
 }
 
+bool AppPackage::validHost(const char *value) {
+  // Exact lowercase DNS names or IPv4 literals; no ports, wildcards, or IPv6.
+  if (!value) return false;
+  const size_t length = strnlen(value, 254);
+  if (!length || length > 253 || value[0] == '.' || value[0] == '-' ||
+      value[length - 1] == '.' || value[length - 1] == '-') return false;
+  for (size_t i = 0; i < length; ++i) {
+    const char c = value[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+    if (c == '.' && value[i + 1] == '.') return false;
+  }
+  return true;
+}
+
 AppPackage AppPackage::load(SdCardController &card, const String &id) {
   AppPackage result;
   result.id = id;
@@ -104,7 +133,7 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
       result.error = "Invalid app name";
     } else if (!cJSON_IsNumber(sdk) ||
                (sdk->valuedouble != 1 && sdk->valuedouble != 2 && sdk->valuedouble != 3 &&
-                sdk->valuedouble != 4 && sdk->valuedouble != 5)) {
+                sdk->valuedouble != 4 && sdk->valuedouble != 5 && sdk->valuedouble != 6)) {
       result.error = "Unsupported SDK version";
     } else {
       result.sdk = static_cast<uint8_t>(sdk->valuedouble);
@@ -121,9 +150,30 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
         cJSON_ArrayForEach(permission, permissions) {
           if (cJSON_IsString(permission) && permission->valuestring &&
               strcmp(permission->valuestring, "files") == 0) result.filesPermission = true;
+          if (result.sdk >= 6 && cJSON_IsString(permission) && permission->valuestring &&
+              strcmp(permission->valuestring, "network") == 0) result.networkPermission = true;
         }
       }
-      if (!SpiBusLock::lock(pdMS_TO_TICKS(50))) {
+      const cJSON *hosts = cJSON_GetObjectItemCaseSensitive(root, "hosts");
+      const cJSON *host = nullptr;
+      if (result.networkPermission) {
+        if (!cJSON_IsArray(hosts) || cJSON_GetArraySize(hosts) < 1 ||
+            cJSON_GetArraySize(hosts) > MaxHosts) {
+          result.error = "Network permission needs 1-8 hosts";
+        } else {
+          cJSON_ArrayForEach(host, hosts) {
+            if (!cJSON_IsString(host) || !validHost(host->valuestring)) {
+              result.error = "Invalid host in manifest";
+              break;
+            }
+            result.hosts[result.hostCount++] = host->valuestring;
+          }
+        }
+      }
+      if (result.error.length()) {
+        result.valid = false;
+      } else if (!SpiBusLock::lock(AppPackage::SdLockTimeout)) {
+        logBusy(packagePath(id, "main.lua"), millis() - 250);
         result.error = "SD busy";
       } else {
         File source = SD.open(packagePath(id, "main.lua").c_str(), FILE_READ);

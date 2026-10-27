@@ -21,7 +21,8 @@ const int16_t InputTopPadding = 6;
 const int16_t PinMaskDiameter = 10;
 const int16_t PinMaskRadius = PinMaskDiameter / 2;
 const int16_t PinMaskGap = 8;
-const int16_t GridColumns = 10;
+const int16_t LatinColumns = 10;
+const int16_t CyrillicColumns = 11;
 const int16_t KeyboardRowCount = 5;
 // Adjust this value to change the height of every keyboard row.
 const int16_t KeyboardRowHeight = 48;
@@ -43,6 +44,29 @@ const char *symbolRows[] = {
   "~_+=|\\<>{}",
   ".,?!'\":;/"
 };
+
+// ЙЦУКЕН rows; the digit row ends with Ё and the bottom row holds Ъ.
+const uint16_t cyrillicRow1[] = {0x439, 0x446, 0x443, 0x43A, 0x435, 0x43D, 0x433, 0x448, 0x449, 0x437, 0x445};
+const uint16_t cyrillicRow2[] = {0x444, 0x44B, 0x432, 0x430, 0x43F, 0x440, 0x43E, 0x43B, 0x434, 0x436, 0x44D};
+const uint16_t cyrillicRow3[] = {0x44F, 0x447, 0x441, 0x43C, 0x438, 0x442, 0x44C, 0x431, 0x44E};
+const uint16_t CyrillicYo = 0x451;
+const uint16_t CyrillicHardSign = 0x44A;
+
+void encodeUtf8(uint16_t value, char *out) {
+  if (value < 0x80) {
+    out[0] = static_cast<char>(value);
+    out[1] = 0;
+  } else if (value < 0x800) {
+    out[0] = static_cast<char>(0xC0 | (value >> 6));
+    out[1] = static_cast<char>(0x80 | (value & 0x3F));
+    out[2] = 0;
+  } else {
+    out[0] = static_cast<char>(0xE0 | (value >> 12));
+    out[1] = static_cast<char>(0x80 | ((value >> 6) & 0x3F));
+    out[2] = static_cast<char>(0x80 | (value & 0x3F));
+    out[3] = 0;
+  }
+}
 }
 
 TextInputScreen::TextInputScreen(Navigator &navigator,
@@ -57,6 +81,8 @@ TextInputScreen::TextInputScreen(Navigator &navigator,
     _shift(false),
     _capsLock(false),
     _symbols(false),
+    _cyrillic(false),
+    _columns(LatinColumns),
     _shiftPressPending(false),
     _shiftPressMs(0),
     _lastTouchDown(false),
@@ -156,12 +182,13 @@ void TextInputScreen::handleTouch(const TouchPoint &point) {
     _pressedKey = index;
     _pressedUntilMs = millis() + KeyFeedbackMs;
     bool oldSymbols = _symbols;
+    bool oldCyrillic = _cyrillic;
     bool oldShift = _shift;
     bool oldCapsLock = _capsLock;
     uint32_t oldCursor = _cursor;
     String oldText = _text;
     handleKey((uint8_t)index);
-    if (_symbols != oldSymbols ||
+    if (_symbols != oldSymbols || _cyrillic != oldCyrillic ||
         _shift != oldShift ||
         _capsLock != oldCapsLock) {
       layout();
@@ -257,13 +284,24 @@ void TextInputScreen::layout() {
   _closeBounds = {0, 0, UiKit::AppBarHeight, UiKit::AppBarHeight};
   _keyboardBounds = {OuterPadding, keyboardTop, usableWidth, keyboardHeight};
   _keyCount = 0;
+  _columns = (_cyrillic && !_symbols) ? CyrillicColumns : LatinColumns;
 
-  const uint8_t characterRows = _symbols ? 4 : 3;
-  for (uint8_t row = 0; row < characterRows; row++) {
-    layoutCharacterRow(_symbols ? symbolRows[row] : normalRows[row], row);
+  if (_cyrillic && !_symbols) {
+    layoutCharacterRow(normalRows[0], 0);
+    layoutCharacterKey(CyrillicYo, 0, 10);
+    layoutCyrillicRow(cyrillicRow1, 11, 1, 0);
+    layoutCyrillicRow(cyrillicRow2, 11, 2, 0);
+    layoutSpannedKey("", 0, KeyAction::Shift, 3, 0, 1);
+    layoutCyrillicRow(cyrillicRow3, 9, 3, 1);
+    layoutSpannedKey("", 0, KeyAction::Backspace, 3, 10, 1);
+  } else {
+    const uint8_t characterRows = _symbols ? 4 : 3;
+    for (uint8_t row = 0; row < characterRows; row++) {
+      layoutCharacterRow(_symbols ? symbolRows[row] : normalRows[row], row);
+    }
   }
 
-  if (!_symbols) {
+  if (!_symbols && !_cyrillic) {
     layoutSpannedKey("", 0, KeyAction::Shift, 3, 0, 1);
     const char *bottomLetters = "zxcvbnm";
     for (uint8_t column = 0; column < 7; column++) {
@@ -272,9 +310,23 @@ void TextInputScreen::layout() {
     layoutSpannedKey("", '\n', KeyAction::Enter, 3, 8, 2);
   }
 
-  layoutSpannedKey(_symbols ? "ABC" : "#!@", 0, KeyAction::Symbols, 4, 0, 2);
-  layoutSpannedKey("Space", ' ', KeyAction::Space, 4, 2, 6);
-  layoutSpannedKey("Done", 0, KeyAction::Done, 4, 8, 2);
+  if (_symbols) {
+    layoutSpannedKey("ABC", 0, KeyAction::Symbols, 4, 0, 2);
+    layoutSpannedKey("Space", ' ', KeyAction::Space, 4, 2, 6);
+    layoutSpannedKey("Done", 0, KeyAction::Done, 4, 8, 2);
+  } else if (_cyrillic) {
+    layoutSpannedKey("#!@", 0, KeyAction::Symbols, 4, 0, 2);
+    layoutSpannedKey("EN", 0, KeyAction::Language, 4, 2, 1);
+    layoutCharacterKey(CyrillicHardSign, 4, 3);
+    layoutSpannedKey("Space", ' ', KeyAction::Space, 4, 4, 4);
+    layoutSpannedKey("", '\n', KeyAction::Enter, 4, 8, 1);
+    layoutSpannedKey("Done", 0, KeyAction::Done, 4, 9, 2);
+  } else {
+    layoutSpannedKey("#!@", 0, KeyAction::Symbols, 4, 0, 2);
+    layoutSpannedKey("RU", 0, KeyAction::Language, 4, 2, 1);
+    layoutSpannedKey("Space", ' ', KeyAction::Space, 4, 3, 5);
+    layoutSpannedKey("Done", 0, KeyAction::Done, 4, 8, 2);
+  }
   _doneBounds = _keys[_keyCount - 1].bounds;
 }
 
@@ -292,22 +344,26 @@ void TextInputScreen::layoutCharacterRow(const char *characters, uint8_t row) {
   }
 }
 
-void TextInputScreen::layoutCharacterKey(char value, uint8_t row, uint8_t column) {
-  char label[2] = {value, '\0'};
-  if (lettersUppercase() && value >= 'a' && value <= 'z') {
-    label[0] = (char)(value - 'a' + 'A');
+void TextInputScreen::layoutCyrillicRow(const uint16_t *letters, uint8_t count, uint8_t row,
+                                        uint8_t firstColumn) {
+  for (uint8_t i = 0; i < count; i++) {
+    layoutCharacterKey(letters[i], row, firstColumn + i);
   }
+}
+
+void TextInputScreen::layoutCharacterKey(uint16_t value, uint8_t row, uint8_t column) {
+  char label[4] = {};
+  encodeUtf8(lettersUppercase() ? upperCase(value) : value, label);
   layoutSpannedKey(label, value, KeyAction::Character, row, column, 1);
 }
 
 void TextInputScreen::layoutSpannedKey(const char *label,
-                                       char value,
+                                       uint16_t value,
                                        KeyAction action,
                                        uint8_t row,
                                        uint8_t column,
                                        uint8_t span) {
-  const int16_t unit = (_keyboardBounds.w - KeyGap * (GridColumns - 1)) /
-                       GridColumns;
+  const int16_t unit = (_keyboardBounds.w - KeyGap * (_columns - 1)) / _columns;
   const int16_t x = _keyboardBounds.x + column * (unit + KeyGap);
   const int16_t y = _keyboardBounds.y + row * (KeyboardRowHeight + KeyGap);
   const int16_t h = KeyboardRowHeight;
@@ -316,7 +372,7 @@ void TextInputScreen::layoutSpannedKey(const char *label,
 }
 
 void TextInputScreen::addKey(const char *label,
-                             char value,
+                             uint16_t value,
                              KeyAction action,
                              int16_t x,
                              int16_t y,
@@ -525,6 +581,11 @@ void TextInputScreen::handleKey(uint8_t index) {
       _shift = false;
       _shiftPressPending = false;
       break;
+    case KeyAction::Language:
+      _cyrillic = !_cyrillic;
+      _shift = false;
+      _shiftPressPending = false;
+      break;
     case KeyAction::Space:
       insertCharacter(' ');
       break;
@@ -557,17 +618,19 @@ void TextInputScreen::finishShiftPress() {
   }
 }
 
-void TextInputScreen::insertCharacter(char value) {
+void TextInputScreen::insertCharacter(uint16_t value) {
   if (_pinInput && (value < '0' || value > '9' || _text.length() >= 4)) return;
-  if ((_shift || _capsLock) && value >= 'a' && value <= 'z') {
-    value = (char)(value - 'a' + 'A');
+  if ((_shift || _capsLock) && upperCase(value) != value) {
+    value = upperCase(value);
     if (!_capsLock) {
       _shift = false;
     }
   }
 
-  _text = _text.substring(0, _cursor) + String(value) + _text.substring(_cursor);
-  _cursor++;
+  char encoded[4] = {};
+  encodeUtf8(value, encoded);
+  _text = _text.substring(0, _cursor) + String(encoded) + _text.substring(_cursor);
+  _cursor += strlen(encoded);
 }
 
 void TextInputScreen::deleteCharacterBeforeCursor() {
@@ -575,8 +638,13 @@ void TextInputScreen::deleteCharacterBeforeCursor() {
     return;
   }
 
-  _text.remove(_cursor - 1, 1);
-  _cursor--;
+  // Remove the whole UTF-8 sequence that ends at the cursor.
+  uint32_t start = _cursor - 1;
+  while (start > 0 && ((uint8_t)_text[start] & 0xC0) == 0x80) {
+    start--;
+  }
+  _text.remove(start, _cursor - start);
+  _cursor = start;
 }
 
 void TextInputScreen::placeCursor(int16_t x, int16_t y) {
@@ -603,14 +671,16 @@ void TextInputScreen::placeCursor(int16_t x, int16_t y) {
   }
 
   _cursor = line.end;
-  for (uint32_t index = line.start; index < line.end; index++) {
-    String character = _text.substring(index, index + 1);
+  for (uint32_t index = line.start; index < line.end;) {
+    const uint8_t length = sequenceLength((uint8_t)_text[index]);
+    String character = _text.substring(index, index + length);
     int16_t midpoint = textWidth(_text.substring(line.start, index)) +
                        textWidth(character) / 2;
     if (localX < midpoint) {
       _cursor = index;
       break;
     }
+    index += length;
   }
 }
 
@@ -620,7 +690,7 @@ void TextInputScreen::buildVisualLines() {
   uint32_t lineStart = 0;
   uint16_t lineWidth = 0;
 
-  for (uint32_t index = 0; index < _text.length(); index++) {
+  for (uint32_t index = 0; index < _text.length();) {
     char value = _text[index];
     if (value == '\n') {
       if (_lineCount < MaxVisualLines) {
@@ -628,10 +698,13 @@ void TextInputScreen::buildVisualLines() {
       }
       lineStart = index + 1;
       lineWidth = 0;
+      index++;
       continue;
     }
 
-    uint16_t characterWidth = UiText::measure(String(value), UiText::Size::Content);
+    const uint8_t length = sequenceLength((uint8_t)value);
+    uint16_t characterWidth = UiText::measure(_text.substring(index, index + length),
+                                              UiText::Size::Content);
     if (lineStart != index && lineWidth + characterWidth > width) {
       if (_lineCount < MaxVisualLines) {
         _lines[_lineCount++] = {lineStart, index};
@@ -640,6 +713,7 @@ void TextInputScreen::buildVisualLines() {
       lineWidth = 0;
     }
     lineWidth += characterWidth;
+    index += length;
   }
 
   if (_lineCount < MaxVisualLines) {
@@ -677,6 +751,7 @@ String TextInputScreen::displayText(const String &value) const {
   String masked;
   masked.reserve(value.length());
   for (uint16_t i = 0; i < value.length(); i++) {
+    if (((uint8_t)value[i] & 0xC0) == 0x80) continue;  // One mark per character.
     masked += value[i] == '\n' ? '\n' : '*';
   }
   return masked;
@@ -689,6 +764,20 @@ bool TextInputScreen::contains(const Rect &rect, int16_t x, int16_t y) const {
 
 bool TextInputScreen::lettersUppercase() const {
   return !_symbols && (_shift || _capsLock);
+}
+
+uint16_t TextInputScreen::upperCase(uint16_t value) {
+  if (value >= 'a' && value <= 'z') return value - 'a' + 'A';
+  if (value >= 0x430 && value <= 0x44F) return value - 0x20;
+  if (value == 0x451) return 0x401;
+  return value;
+}
+
+uint8_t TextInputScreen::sequenceLength(uint8_t lead) {
+  if (lead >= 0xF0) return 4;
+  if (lead >= 0xE0) return 3;
+  if (lead >= 0xC0) return 2;
+  return 1;
 }
 
 int8_t TextInputScreen::keyAt(int16_t x, int16_t y) const {

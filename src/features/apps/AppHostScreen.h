@@ -43,6 +43,8 @@ private:
   bool _closeRequested = false;
   bool _running = false;
   bool _canvasMode = false;
+  String _appId;
+  bool _restartPending = false;
   // SDK 4: a viewer or keyboard this screen pushed for the paused app.
   AppRuntime::Navigation _navigation{};
   String _promptText;
@@ -63,11 +65,14 @@ private:
   bool _imageShown = false;
 
   AppRuntime::Status statusSnapshot();
+  void resetHostState();
+  void startApp();
   void publishStatus();
   void redraw();
   void openNavigation();
   void draw();
   void drawFrame();
+  void drawTextBox(const AppRuntime::DrawCommand &command);
   void serviceImage(uint32_t nowMs);
   void hideImage();
   static void paintImageChrome(void *context);

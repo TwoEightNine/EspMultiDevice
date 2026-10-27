@@ -116,6 +116,7 @@ void SdCardController::update() {
 
   if (!present) {
     if (_mounted) {
+      Serial.println(F("[SD] card-detect reports removal; unmounting"));
       unmount();
       _pendingEvent = SdCardEvent::Removed;
       return;
@@ -127,6 +128,7 @@ void SdCardController::update() {
   if (_mounted && now - _lastHealthCheckMs >= HealthCheckIntervalMs) {
     _lastHealthCheckMs = now;
     if (!mountedCardStillResponds()) {
+      Serial.println(F("[SD] health check failed: sector 0 unreadable; unmounting"));
       unmount();
       _pendingEvent = SdCardEvent::Removed;
       return;
@@ -135,6 +137,7 @@ void SdCardController::update() {
 
   if (!_mounted && now >= _nextMountAttemptMs && now - _lastMountAttemptMs >= MountRetryIntervalMs) {
     if (mount()) {
+      Serial.println(F("[SD] remounted"));
       _pendingEvent = SdCardEvent::Mounted;
       return;
     }

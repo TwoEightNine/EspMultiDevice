@@ -6,7 +6,7 @@ Open `esp_media.ino` as an Arduino sketch. Arduino recursively compiles `src/`; 
 
 The standard profile is Arduino-ESP32 3.3.8, **ESP32S3 Dev Module**, 16 MB flash, OPI PSRAM, Custom partition scheme, and 240 MHz CPU. Select USB-OTG (TinyUSB), disable CDC/Firmware MSC/DFU On Boot, and use UART0 / Hardware CDC upload mode. `Serial` consequently resolves to UART0. Run `tools/build_esp32s3.sh` for the reproducible build. It selects that complete profile and overrides Arduino's overly broad generic Custom maximum with the actual application-slot limit of 6,553,600 bytes, then independently checks the emitted binary.
 
-The SD-app interpreter vendors upstream Lua 5.4.9 (MIT) in `third_party/lua/` and compiles only selected C units through `src/vendor_shims/lua/`. The project shim defines the 64-bit limit macros missing from the Arduino-ESP32 C++ limits header so Lua uses the same integer ABI in all translation units. Its integration and excluded libraries are recorded in `third_party/lua/README.esp-media.md`. Test the SDK 1 counter, SDK 2 workout, SDK 3 recorder, SDK 4 files, and SDK 5 images apps in `examples/apps/` after firmware builds; their sources are copied to SD, not linked into the firmware.
+The SD-app interpreter vendors upstream Lua 5.4.9 (MIT) in `third_party/lua/` and compiles only selected C units through `src/vendor_shims/lua/`. The project shim defines the 64-bit limit macros missing from the Arduino-ESP32 C++ limits header so Lua uses the same integer ABI in all translation units. Its integration and excluded libraries are recorded in `third_party/lua/README.esp-media.md`. Test the SDK 1 counter, SDK 2 workout, SDK 3 recorder, SDK 4 files, SDK 5 images, and SDK 6 dvach apps in `examples/apps/` after firmware builds; their sources are copied to SD, not linked into the firmware. The SDK 6 HTTPS client relies on the certificate bundle that the Arduino-ESP32 core's precompiled mbedTLS already embeds; it vendors no trust store.
 
 `partitions.csv` retains NVS at `0x9000`/`0x5000` and OTA data at `0xe000`/`0x2000`, followed by two `0x640000` OTA slots, `0x360000` SPIFFS, and `0x10000` core dump. Flash the partition table when migrating from the old 3 MB/9.9 MB FATFS profile. Preferences/NVS remains compatible because its location and size do not change; internal FATFS content is not preserved or used by ESP Media.
 
@@ -225,7 +225,10 @@ retain at least 8 KiB.
 | `tools/generate_animation_fixtures.py` | With Pillow 12.3.0 (libwebp 1.6.0), creates deterministic GIF/WebP fixtures and verifies them by decoding again. Writes to `tests/animation/fixtures/`. Covers viewport-size, downscaled, odd-size, textured worst-case, delay, loop, truncation, disposal/transparency, alpha, and static-WebP routing cases. GIFs use the script's own encoder; `tests/animation/README.md` lists expected results and the baseline procedure. |
 | `tools/png_to_icon.py` | Converts PNG artwork into project icon assets. |
 | `tools/png_to_rgba565_icon.py` | Converts an RGBA PNG into flash-resident RGB565 colour and 8-bit alpha arrays for antialiased, full-colour UI icons. |
-| `tools/generate_example_app_logos.py` | Regenerates the transparent 64×64 PNG logos shipped with the example Lua packages. |
+| `tools/generate_example_app_logos.py` | Regenerates the transparent 64×64 PNG logos shipped with the example Lua packages; pass app names (for example `dvach`) to regenerate only those. |
+| `tools/mock_dvach.py` | Stdlib-only synthetic 2ch API (catalog, posts-after, emoji captcha, multipart posting). `write DIR` writes the host fixtures; `serve` answers a device on the LAN, optionally as a Cloudflare browser check. |
+| `tests/lua_net_contract/run.sh` | Host build (ASan/UBSan) of the SDK 6 JSON filter and text helpers: escapes, surrogates, invalid UTF-8, limits, key filtering, string/array caps, and split feeding at every byte boundary. Pass a downloaded 2ch `catalog.json` to filter a real document too. |
+| `tests/lua_dvach_mock/run.sh` | Host harness that runs `examples/apps/dvach/main.lua` under the firmware's instruction and Lua-heap limits against a mock `esp` table, answering requests from `tools/mock_dvach.py` fixtures through the real `JsonPick`, and walks a scripted session from opening a board through posting a reply. |
 | `tests/media_cache_contract/` | Hardware-independent Arduino sketch covering cache paths, internal-format registration, text-source extension classification, signatures, and exact source-fingerprint matching. |
 | `tests/assistant_dependency_probe/` | Compile-time-only ESP32 diagnostic and local TLS WebSocket fixture for Stage 0 codec, trust, header, echo, reconnect, heap, timing, and stack gates. |
 | `tests/xiaozhi_compatibility_probe/` | Compile-time-only Stage 1 configurable bootstrap, binding, WSS hello, MCP-disabled/omitted, and automatic-reboot credential-refresh diagnostic. |
@@ -236,7 +239,7 @@ Regenerate a derived asset only through its corresponding tool, review the gener
 
 ## Firmware version
 
-`src/core/FirmwareVersion.h` is the single source of the firmware's semantic version (`MAJOR.MINOR.PATCH`, currently 0.1.0). Edit only the three numeric macros; `FirmwareVersion::Text` is derived from them. Settings → About shows it. Bump the patch for fixes, the minor version for new features or persistent-format changes, and the major version for incompatible changes to the SD app SDK or stored data.
+`src/core/FirmwareVersion.h` is the single source of the firmware's semantic version (`MAJOR.MINOR.PATCH`, currently 0.2.0). Edit only the three numeric macros; `FirmwareVersion::Text` is derived from them. Settings → About shows it. Bump the patch for fixes, the minor version for new features or persistent-format changes, and the major version for incompatible changes to the SD app SDK or stored data.
 
 ## Change checklist
 

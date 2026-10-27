@@ -12,6 +12,7 @@
 #include "../../ui/UiKit.h"
 #include "../../ui/UiText.h"
 #include "../image_viewer/ImageView.h"
+#include "AppTextLayout.h"
 
 AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
                              DisplayController &display, SdCardController &card,
@@ -24,7 +25,14 @@ AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
     _runtime(card, speaker, audioSettings, mic, mediaCache) {}
 
 void AppHostScreen::onEnter(const ScreenData &data) {
+  _appId = data.kind == ScreenDataKind::ExternalApp ? data.text : String();
+  resetHostState();
+  startApp();
+}
+
+void AppHostScreen::resetHostState() {
   _lastTouchDown = false;
+  _restartPending = false;
   _closeRequested = false;
   _revision = 0;
   _frameRevision = 0;
@@ -43,8 +51,10 @@ void AppHostScreen::onEnter(const ScreenData &data) {
   _scene.count = 1;
   snprintf(_scene.rows[0].text, sizeof(_scene.rows[0].text), "Loading app...");
   draw();
-  _running = data.kind == ScreenDataKind::ExternalApp &&
-             _runtime.start(data.text, statusSnapshot());
+}
+
+void AppHostScreen::startApp() {
+  _running = _appId.length() && _runtime.start(_appId, statusSnapshot());
   if (!_running) {
     snprintf(_scene.title, sizeof(_scene.title), "App error");
     snprintf(_scene.rows[0].text, sizeof(_scene.rows[0].text), "Cannot start app");
@@ -95,7 +105,7 @@ void AppHostScreen::openNavigation() {
   ScreenData data;
   bool valid = true;
   if (_navigation.kind == AppRuntime::NavigationKind::Prompt) {
-    data = ScreenData::textInput(_navigation.title, false, _navigation.initial);
+    data = ScreenData::textInput(_navigation.title, _navigation.mask, _navigation.initial);
   } else if (!FileFormats::isOpenable(format)) {
     valid = false;
   } else if (FileFormats::isImage(format)) {
@@ -170,11 +180,30 @@ void AppHostScreen::handleTouch(const TouchPoint &point) {
   if (_closeRequested || point.x < 0 || point.x >= _display.width() ||
       point.y < RowTop || point.y >= RowTop + _scene.count * UiKit::ListCellHeight) return;
   const uint8_t index = (point.y - RowTop) / UiKit::ListCellHeight;
-  if (_scene.rows[index].button) _runtime.sendAction(_scene.rows[index].id);
+  if (!_scene.rows[index].button) return;
+  // The error page's buttons belong to the host once the app has stopped.
+  if (_runtime.stopped() && strcmp(_scene.rows[index].id, AppRuntime::HostRestartAction) == 0) {
+    _restartPending = true;
+  } else if (_runtime.stopped() && strcmp(_scene.rows[index].id, AppRuntime::HostCloseAction) == 0) {
+    _closeRequested = true;
+  } else {
+    _runtime.sendAction(_scene.rows[index].id);
+  }
 }
 
 void AppHostScreen::tick(uint32_t nowMs) {
+  if (_restartPending) {
+    // end() waits for a network request to unwind; retry on later ticks.
+    if (!_runtime.stopped() || !_runtime.end()) return;
+    hideImage();
+    resetHostState();
+    // The finger that pressed Restart must not reach the restarted app.
+    _lastTouchDown = true;
+    startApp();
+    return;
+  }
   if (_running && !_card.isMounted()) {
+    if (!_closeRequested) Serial.println(F("[SD app] closing: SD card no longer mounted"));
     _closeRequested = true;
     _runtime.requestStop();
   }
@@ -358,8 +387,42 @@ void AppHostScreen::drawFrame() {
         UiKit::drawFileListCell(tft, width, a[0], command.text,
                                 static_cast<UiKit::FileIcon>(a[1]),
                                 static_cast<UiKit::ListAction>(a[2])); break;
+      case AppRuntime::DrawOp::TextBox:
+        drawTextBox(command); break;
+      case AppRuntime::DrawOp::Bitmap: {
+        const uint16_t *pixels = nullptr;
+        uint16_t bitmapWidth = 0, bitmapHeight = 0;
+        if (_runtime.lockBitmap(a[2], pixels, bitmapWidth, bitmapHeight)) {
+          tft.pushImage(a[0], a[1], bitmapWidth, bitmapHeight, const_cast<uint16_t *>(pixels));
+          _runtime.unlockBitmap();
+        }
+        break;
+      }
     }
   }
   tft.resetViewport();
   UiKit::drawTopAppBar(tft, width, _frame.title);
+}
+
+void AppHostScreen::drawTextBox(const AppRuntime::DrawCommand &command) {
+  TFT_eSPI &tft = _display.tft();
+  const int32_t *a = command.arg;
+  const UiText::Size size = static_cast<UiText::Size>(a[6]);
+  const size_t length = strlen(command.text);
+  AppTextLayout::Line lines[8];
+  bool more = false;
+  const uint16_t count = AppTextLayout::wrap(command.text, length, a[2], size, lines,
+                                             static_cast<uint16_t>(a[3]), sizeof(command.text), more);
+  const int16_t lineHeight = UiText::lineHeight(size);
+  for (uint16_t i = 0; i < count; ++i) {
+    String line(command.text + lines[i].start);
+    if (i + 1 == count && more) {
+      // The last line carries the rest of the text, ellipsized to fit.
+      line.replace("\n", " ");
+      line = UiText::ellipsize(line, a[2], size);
+    } else {
+      line = line.substring(0, lines[i].length);
+    }
+    UiText::draw(tft, line, a[0], a[1] + i * lineHeight, a[4], a[5], size, TL_DATUM);
+  }
 }

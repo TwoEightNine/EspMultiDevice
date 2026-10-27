@@ -11,6 +11,7 @@
 
 class SdCardController;
 class SpeakerController;
+class AppNetWorker;
 class AudioSettings;
 class MicController;
 struct lua_State;
@@ -19,6 +20,9 @@ struct lua_Debug;
 class AppRuntime {
 public:
   static constexpr uint8_t MaxRows = 10;
+  // Error-page buttons the host acts on after the app has stopped.
+  static constexpr const char *HostRestartAction = "host.restart";
+  static constexpr const char *HostCloseAction = "host.close";
   struct Row {
     bool button;
     char id[33];
@@ -42,7 +46,7 @@ public:
     DrawCircle, FillCircle, DrawRoundRect, FillRoundRect, FillTriangle,
     DrawWideLine, DrawSmoothCircle, FillSmoothCircle,
     DrawSmoothRoundRect, FillSmoothRoundRect, DrawSmoothArc,
-    Text, Button, Progress, ListCell
+    Text, Button, Progress, ListCell, TextBox, Bitmap
   };
   struct DrawCommand {
     DrawOp op;
@@ -59,11 +63,13 @@ public:
   // A host-screen navigation an SDK 4 app asked for. The worker never
   // navigates; the host screen takes the request once the app is paused.
   enum class NavigationKind : uint8_t { None, OpenFile, Prompt };
+  static constexpr size_t MaxPromptBytes = 1024;  // SDK 6; earlier SDKs keep 255.
   struct Navigation {
     NavigationKind kind;
-    char path[256];     // OpenFile: validated absolute SD path.
-    char title[41];     // Prompt: keyboard title.
-    char initial[256];  // Prompt: initial text.
+    bool mask;                           // Prompt: hide the typed text.
+    char path[256];                      // OpenFile: validated absolute SD path.
+    char title[41];                      // Prompt: keyboard title.
+    char initial[MaxPromptBytes + 1];    // Prompt: initial text.
   };
 
   // The host image layer an SDK 5 app asked for. The worker only records what
@@ -111,6 +117,11 @@ public:
   void publishStatus(const Status &status);
   bool takeImage(ImageLayer &layer, uint32_t &revision);
   void publishImage(const ImageStatus &status);
+  // SDK 6 decoded bitmaps for `Bitmap` draw commands. While locked the
+  // pixels stay valid; a handle freed or replaced since the frame was built
+  // fails to lock.
+  bool lockBitmap(int32_t handle, const uint16_t *&pixels, uint16_t &width, uint16_t &height);
+  void unlockBitmap();
 
 private:
   static constexpr size_t LuaMemoryLimit = 512 * 1024;
@@ -118,8 +129,15 @@ private:
   static constexpr int64_t CallbackMaxUs = 20000;
   static constexpr uint32_t TickIntervalMs = 100;
   static constexpr uint32_t WorkerStackBytes = 16384;
+  // Above the app's own network task and the other priority-1 workers, so
+  // their CPU-heavy work (TLS handshakes, JSON streaming, decoding) cannot
+  // stall a callback; system tasks such as Wi-Fi still run first.
+  static constexpr UBaseType_t WorkerPriority = tskIDLE_PRIORITY + 2;
   static constexpr uint16_t MaxFsEntries = 2000;
   static constexpr uint8_t MaxFsDepth = 16;
+  static constexpr uint8_t MaxBitmaps = 16;
+  static constexpr size_t MaxBitmapBytes = 256 * 1024;
+  static constexpr size_t MaxBitmapSourceBytes = 128 * 1024;
   enum class ActionKind : uint8_t { Button, Touch, TouchEnd };
   struct Action { char id[33]; int16_t x; int16_t y; uint32_t heldMs; ActionKind kind; };
   struct CallArgs {
@@ -138,6 +156,7 @@ private:
   enum class FsJob : uint8_t { None, Rename, Remove };
   enum class FsPhase : uint8_t { SourceCleanup, TargetCleanup, Commit, Tree };
   struct Tone { uint16_t frequency; uint16_t durationMs; };
+  struct Bitmap { uint32_t serial; uint16_t width; uint16_t height; uint16_t *pixels; };
 
   SdCardController &_card;
   SpeakerController &_speaker;
@@ -159,10 +178,19 @@ private:
   uint32_t _frameCost = 0;
   uint8_t _sdkVersion = 1;
   bool _filesPermission = false;
+  // SDK 6 network access: the manifest grant, its host allowlist, and the
+  // request task created with the Lua state.
+  bool _networkPermission = false;
+  String _hosts[8];
+  uint8_t _hostCount = 0;
+  AppNetWorker *_net = nullptr;
+  Bitmap _bitmaps[MaxBitmaps]{};
+  uint32_t _bitmapSerial = 0;
+  size_t _bitmapBytes = 0;
   // Navigation hand-off (SDK 4). `_navigation`, `_input`, and their flags are
   // guarded by `_mutex`; `_paused` is written only by the worker.
   Navigation _navigation{};
-  char _input[256]{};
+  char _input[MaxPromptBytes + 1]{};
   bool _navigationPending = false;
   bool _inputProvided = false;
   NavigationKind _pausedFor = NavigationKind::None;
@@ -238,6 +266,7 @@ private:
   size_t _luaBytes = 0;
   uint32_t _hookCount = 0;
   int64_t _callbackStartedUs = 0;
+  const char *_callbackName = nullptr;  // For limit diagnostics.
   lua_State *_lua = nullptr;
   int _appRef = -1;
 
@@ -246,6 +275,11 @@ private:
   void setError(const String &message);
   bool invoke(const char *callback);
   bool invoke(const char *callback, const CallArgs &arguments);
+  // Calls the function below `arguments` values on the stack under the
+  // callback limits, then clears the stack.
+  bool callPrepared(int arguments);
+  void payGcDebt();
+  static int64_t callbackClockUs();
   void pauseForNavigation();
   bool resumeFromNavigation();
   void registerApi();
@@ -289,6 +323,30 @@ private:
   static int luaImageSetBar(lua_State *state);
   static int luaImageClose(lua_State *state);
   void closeImage();
+  // SDK 6 (AppRuntimeSdk6.cpp).
+  void registerSdk6();
+  bool serviceNet();
+  bool invokeResponse(void *result);
+  void releaseBitmaps();
+  static int luaNetRequest(lua_State *state);
+  static int luaNetStatus(lua_State *state);
+  static int luaNetCancel(lua_State *state);
+  static int luaJsonDecode(lua_State *state);
+  static int luaJsonEncode(lua_State *state);
+  static int luaUrlEncode(lua_State *state);
+  static int luaUrlDecode(lua_State *state);
+  static int luaUrlQuery(lua_State *state);
+  static int luaBase64Encode(lua_State *state);
+  static int luaBase64Decode(lua_State *state);
+  static int luaHash(lua_State *state);
+  static int luaHashFind(lua_State *state);
+  static int luaTextFromHtml(lua_State *state);
+  static int luaUiWrap(lua_State *state);
+  static int luaTextBox(lua_State *state);
+  static int luaBitmapDecode(lua_State *state);
+  static int luaBitmapFree(lua_State *state);
+  static int luaDrawBitmap(lua_State *state);
+  static int luaBuildResponse(lua_State *state);
   // Reads Lua argument `index` as an app path; on failure pushes the
   // `false|nil, error` pair and returns false.
   bool checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,

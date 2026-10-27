@@ -137,7 +137,12 @@ void AppCatalogLoader::run() {
     if (_stopRequested) break;
     const uint32_t generation = _requestedGeneration;
     Catalog catalog;
+    const uint32_t startedMs = millis();
     scan(generation, catalog);
+    Serial.printf("[Apps] catalog scan: %u apps in %lu ms%s\n", catalog.count,
+                  static_cast<unsigned long>(millis() - startedMs),
+                  _stopRequested ? " (Home already released)" :
+                  !generationCurrent(generation) ? " (superseded)" : "");
     if (_stopRequested || !generationCurrent(generation)) {
       clearCatalog(catalog);
       continue;
