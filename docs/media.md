@@ -6,6 +6,8 @@
 
 `.eth1`, `.em16`, `.em16z`, `.emga`, and `.empa` are internal cache files; `.emga` is a legacy format that nothing writes any more (`FileFormats::isLegacyCache`). They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
 
+Downloads go through the shared `DownloadStore` (`src/services/storage/`), which verifies each finished file's signature against the format its name or content type declared before an atomic rename. The Browser saves to `/Downloads/`; an SDK 6 app's `download` requests save only to its own `/Downloads/<app name>/` folder (the app id when the display name is not a valid path segment), so the 2ch example's files land in `/Downloads/2ch/`. Both are ordinary visible folders: Files lists, opens, and deletes their contents, and nothing prunes them automatically. SDK 6 apps also decode small PNG/JPEG images straight into PSRAM bitmaps fitted to a box (`AppBitmapDecode` with the `BitmapScale` box filter); those never touch SD or the media caches.
+
 Assistant image and video filename searches use this registry and the same
 normal-SD privacy filter as audio search. They return at most five opaque
 selections, revalidate the selected source before launch, and hand off to the

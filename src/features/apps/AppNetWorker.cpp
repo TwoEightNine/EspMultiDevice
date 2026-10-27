@@ -3,6 +3,8 @@
 #include <esp_heap_caps.h>
 #include <new>
 
+#include "../../services/storage/DownloadStore.h"
+
 namespace {
 constexpr uint32_t WorkerStackBytes = 16384;
 
@@ -17,7 +19,11 @@ class AppNetWorker::Transfer : public HttpClient::Policy, public HttpClient::Sin
 public:
   Transfer(AppNetWorker &owner, Slot &slot, Result &result)
     : _owner(owner), _slot(slot), _result(result), _spec(*slot.spec) {}
-  ~Transfer() { if (_buffer) AppNetWorker::free(_buffer); }
+  ~Transfer() {
+    if (_buffer) AppNetWorker::free(_buffer);
+    if (_pixels) heap_caps_free(_pixels);
+    delete _store;  // Removes an unfinished download's temporary file.
+  }
 
   bool cancelled() const override { return _slot.cancel || _owner._stopping; }
 
@@ -34,9 +40,21 @@ public:
     xSemaphoreGive(_owner._mutex);
   }
 
-  bool begin(int status, const String &contentType, int32_t) override {
-    _json = _spec.json && status >= 200 && status < 300 && jsonContentType(contentType);
+  bool begin(int status, const String &contentType, int32_t contentLength) override {
+    const bool success = status >= 200 && status < 300;
+    _json = _spec.json && success && jsonContentType(contentType);
     _streamed = 0;
+    if (_spec.download[0] && success) {
+      if (!_owner._card) { _error = "SD card unavailable"; return false; }
+      _store = new (std::nothrow) DownloadStore(*_owner._card, _owner._downloads, MaxDownloadBytes);
+      if (!_store) { _error = "App memory unavailable"; return false; }
+      return _store->begin(FileFormats::fromPath(_spec.download), _spec.download, contentLength, 0, _error);
+    }
+    if (_spec.bitmap && success) {
+      _decoding = true;
+      _limit = AppBitmapDecode::MaxSourceBytes;
+      return true;
+    }
     if (_json) {
       _result.json = new (std::nothrow) JsonPick(AppNetWorker::allocate, AppNetWorker::free);
       if (!_result.json || !_result.json->begin(_spec.jsonOptions)) {
@@ -45,12 +63,15 @@ public:
       }
       return true;
     }
-    _limit = _spec.json ? NonJsonBodyBytes : _spec.maxBytes;
+    // A JSON, bitmap, or download request keeps an error reply's text.
+    _limit = (_spec.json || _spec.bitmap || _spec.download[0]) ? NonJsonBodyBytes : _spec.maxBytes;
     return true;
   }
 
   bool write(const uint8_t *data, size_t length) override {
     _streamed += length;
+    if (_store) return _store->write(data, length, _error);
+    if (_decoding && length > _limit - _length) { _error = "Image too large"; return false; }
     if (_json) {
       if (_streamed > MaxJsonStreamBytes) { _error = "Response too large"; return false; }
       if (!_result.json->feed(data, length)) { _error = _result.json->error(); return false; }
@@ -78,12 +99,44 @@ public:
       _result.truncated = _result.json->truncated();
       return true;
     }
+    if (_store) {
+      const uint32_t bytes = _store->bytesWritten();
+      String path;
+      if (!_store->commit(path, _error)) return false;
+      _result.downloaded = path.substring(path.lastIndexOf('/') + 1);
+      _result.downloadedBytes = bytes;
+      return true;
+    }
+    if (_decoding) {
+      // Decoded here, on the network task; the app worker only registers it.
+      const char *failure = nullptr;
+      const uint32_t started = millis();
+      _pixels = AppBitmapDecode::decode(_buffer, _length, _spec.bitmapOptions,
+                                        static_cast<size_t>(AppBitmapDecode::MaxWidth) *
+                                          AppBitmapDecode::MaxHeight * 2,
+                                        _width, _height, failure);
+      if (!_pixels) {
+        _error = failure ? failure : "Cannot decode image";
+        Serial.printf("[App net] bitmap failed: %u bytes, %s\n", static_cast<unsigned>(_length),
+                      _error.c_str());
+        return false;
+      }
+      Serial.printf("[App net] bitmap %ux%u from %u bytes in %lu ms\n", _width, _height,
+                    static_cast<unsigned>(_length), static_cast<unsigned long>(millis() - started));
+    }
     return true;
   }
 
-  // Hands the text body to the result.
+  // Hands the text body or the bitmap to the result.
   void complete() {
-    if (_json) return;
+    if (_json || _store) return;
+    if (_decoding) {
+      _result.pixels = _pixels;
+      _result.width = _width;
+      _result.height = _height;
+      _pixels = nullptr;
+      return;
+    }
     if (!reserve(_length + 1)) return;
     _buffer[_length] = 0;
     _result.body = reinterpret_cast<char *>(_buffer);
@@ -100,7 +153,12 @@ private:
   Result &_result;
   Spec &_spec;
   bool _json = false;
+  bool _decoding = false;
   bool _stoppedAtLimit = false;
+  DownloadStore *_store = nullptr;
+  uint16_t *_pixels = nullptr;
+  uint16_t _width = 0;
+  uint16_t _height = 0;
   uint32_t _streamed = 0;
   uint8_t *_buffer = nullptr;
   size_t _capacity = 0;
@@ -132,10 +190,13 @@ AppNetWorker::~AppNetWorker() {
   if (_mutex) { vSemaphoreDelete(_mutex); _mutex = nullptr; }
 }
 
-void AppNetWorker::configure(const String hosts[], uint8_t hostCount, const String &userAgent) {
+void AppNetWorker::configure(const String hosts[], uint8_t hostCount, const String &userAgent,
+                             SdCardController &card, const String &downloads) {
   _hostCount = hostCount > MaxHosts ? MaxHosts : hostCount;
   for (uint8_t i = 0; i < _hostCount; ++i) _hosts[i] = hosts[i];
   _userAgent = userAgent;
+  _card = &card;
+  _downloads = downloads;
   if (!_mutex) _mutex = xSemaphoreCreateMutex();
   _stopping = false;
 }
@@ -248,6 +309,7 @@ bool AppNetWorker::take(Result *&result) {
 void AppNetWorker::release(Result *result) {
   if (!result) return;
   if (result->body) free(result->body);
+  if (result->pixels) heap_caps_free(result->pixels);
   delete result->json;
   delete result;
 }
@@ -314,6 +376,7 @@ void AppNetWorker::execute(Slot &slot) {
     if (result) result->error = "App memory unavailable";
   } else if (slot.cancel || _stopping) {
     result->error = "Cancelled";
+    Serial.println("[App net] request cancelled before it started");
   } else {
     Spec &spec = *slot.spec;
     HttpClient::Request request;
@@ -325,6 +388,8 @@ void AppNetWorker::execute(Slot &slot) {
     request.bodyLength = spec.bodyLength;
     request.followRedirects = spec.followRedirects;
     request.timeoutMs = spec.timeoutMs;
+    // A download may run for minutes; it fails only when data stops arriving.
+    request.idleTimeoutMs = spec.download[0] ? spec.timeoutMs : 0;
     request.userAgent = _userAgent;
     HttpClient::Response response;
     Transfer transfer(*this, slot, *result);
@@ -348,6 +413,13 @@ void AppNetWorker::execute(Slot &slot) {
     }
     // A request cut at the app's own byte limit is still a response.
     if (transfer.stoppedAtLimit()) result->error = String();
+    // HttpClient logs only completed exchanges; report the rest by host.
+    if (result->error.length()) {
+      HttpClient::Url url;
+      Serial.printf("[App net] %s %s failed: %s\n", HttpClient::methodName(spec.method),
+                    HttpClient::parseUrl(spec.url, url) ? url.host.c_str() : "?",
+                    result->error.c_str());
+    }
   }
   if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
     if (slot.spec) { free(slot.spec->body); delete slot.spec; slot.spec = nullptr; }

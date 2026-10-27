@@ -33,10 +33,14 @@ Text response retention is capped at 512 KiB; longer responses render the retain
 
 Direct BMP, PNG, JPEG, GIF, WebP, WAV, MP3, MP4, and 3GP responses stream to `/Downloads/` and open in the appropriate player. Downloads are capped at 16 MiB, use a temporary file, verify the final signature, and are discarded when malformed, compressed, interrupted, or too large. MP4/3GP downloads additionally validate their ISO-BMFF identity. Downloaded files persist until removed outside the browser.
 
-The internal `BrowserDownloadStore` owns media-response classification, safe
-filename selection, and the complete temporary-file transaction. It bounds and
-serializes each SD write with the shared SPI lock, then exposes only a verified,
-atomically committed path to the Browser screen.
+The internal `BrowserDownloadStore` owns media-response classification and safe
+filename selection. The temporary-file transaction itself is the shared
+`DownloadStore` (`src/services/storage/DownloadStore`), fixed to `/Downloads`
+with the 16 MiB cap; SDK 6 apps use the same store for their own
+`/Downloads/<app name>/` folders, so both apply identical write, cap, and
+verification rules. It bounds and serializes each SD write with the shared SPI
+lock, then exposes only a verified, atomically committed path to the Browser
+screen.
 
 Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. HTTPS certificate parsing and RSA working allocations use PSRAM during the handshake so fragmented internal RAM is not required to provide one large BIGNUM block. This allocator policy does not add certificate verification. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
 

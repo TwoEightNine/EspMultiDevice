@@ -135,9 +135,8 @@ private:
   static constexpr UBaseType_t WorkerPriority = tskIDLE_PRIORITY + 2;
   static constexpr uint16_t MaxFsEntries = 2000;
   static constexpr uint8_t MaxFsDepth = 16;
-  static constexpr uint8_t MaxBitmaps = 16;
-  static constexpr size_t MaxBitmapBytes = 256 * 1024;
-  static constexpr size_t MaxBitmapSourceBytes = 128 * 1024;
+  static constexpr uint8_t MaxBitmaps = 32;  // A handle keeps the slot in its low 5 bits.
+  static constexpr size_t MaxBitmapBytes = 512 * 1024;
   enum class ActionKind : uint8_t { Button, Touch, TouchEnd };
   struct Action { char id[33]; int16_t x; int16_t y; uint32_t heldMs; ActionKind kind; };
   struct CallArgs {
@@ -184,6 +183,9 @@ private:
   String _hosts[8];
   uint8_t _hostCount = 0;
   AppNetWorker *_net = nullptr;
+  // `/Downloads/<display name>` (or `<id>` when the name is not a valid path
+  // segment): the only folder `download` requests and `esp.downloads` reach.
+  String _downloads;
   Bitmap _bitmaps[MaxBitmaps]{};
   uint32_t _bitmapSerial = 0;
   size_t _bitmapBytes = 0;
@@ -328,6 +330,13 @@ private:
   bool serviceNet();
   bool invokeResponse(void *result);
   void releaseBitmaps();
+  // Takes ownership of `pixels`; on failure frees them and sets `error`.
+  bool registerBitmap(uint16_t *pixels, uint16_t width, uint16_t height,
+                      int64_t &handle, const char *&error);
+  // Queues an OpenFile navigation for a checked path; pushes `true` or the
+  // `false, error` pair.
+  int requestOpenFile(lua_State *state, const String &path);
+  bool checkDownloadName(lua_State *state, int index, bool nilOnError, String &path);
   static int luaNetRequest(lua_State *state);
   static int luaNetStatus(lua_State *state);
   static int luaNetCancel(lua_State *state);
@@ -347,6 +356,8 @@ private:
   static int luaBitmapFree(lua_State *state);
   static int luaDrawBitmap(lua_State *state);
   static int luaBuildResponse(lua_State *state);
+  static int luaDownloadsStat(lua_State *state);
+  static int luaDownloadsOpen(lua_State *state);
   // Reads Lua argument `index` as an app path; on failure pushes the
   // `false|nil, error` pair and returns false.
   bool checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,

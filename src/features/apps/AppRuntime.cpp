@@ -142,6 +142,7 @@ bool AppRuntime::end() {
   releaseBitmaps();
   _id = String();
   _displayName = String();
+  _downloads = String();
   return true;
 }
 
@@ -589,7 +590,13 @@ int AppRuntime::luaDraw(lua_State *state) {
     cost = static_cast<uint32_t>(command.arg[widthIndex] * command.arg[heightIndex]);
   else if (radiusIndex >= 0)
     cost = static_cast<uint32_t>(command.arg[radiusIndex] * command.arg[radiusIndex] * 4);
-  else if (op == DrawOp::FillTriangle) cost = 320UL * 432UL;
+  else if (op == DrawOp::FillTriangle) {
+    // The bounding box, capped at the canvas.
+    const int32_t *a = command.arg;
+    const int64_t width = max(a[0], max(a[2], a[4])) - min(a[0], min(a[2], a[4])) + 1;
+    const int64_t height = max(a[1], max(a[3], a[5])) - min(a[1], min(a[3], a[5])) + 1;
+    cost = static_cast<uint32_t>(min<int64_t>(width * height, 320LL * 432LL));
+  }
   if (cost > 400000UL - runtime->_frameCost)
     return luaL_error(state, "frame drawing budget exceeded");
   runtime->_frameCost += cost;
@@ -1585,13 +1592,17 @@ int AppRuntime::luaFsOpen(lua_State *state) {
   runtime->_callbackStartedUs += callbackClockUs() - started;
   if (!locked) return pushFailure(state, false, "SD busy");
   if (!found) return pushFailure(state, false, "File not found");
-  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
+  return runtime->requestOpenFile(state, path);
+}
+
+int AppRuntime::requestOpenFile(lua_State *state, const String &path) {
+  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) != pdTRUE)
     return pushFailure(state, false, "Host busy");
-  runtime->_navigation = Navigation{};
-  runtime->_navigation.kind = NavigationKind::OpenFile;
-  copyText(runtime->_navigation.path, sizeof(runtime->_navigation.path), path.c_str());
-  runtime->_navigationPending = true;
-  xSemaphoreGive(runtime->_mutex);
+  _navigation = Navigation{};
+  _navigation.kind = NavigationKind::OpenFile;
+  copyText(_navigation.path, sizeof(_navigation.path), path.c_str());
+  _navigationPending = true;
+  xSemaphoreGive(_mutex);
   lua_pushboolean(state, true);
   return 1;
 }
@@ -1958,10 +1969,17 @@ void AppRuntime::run() {
   _hostCount = _networkPermission ? package.hostCount : 0;
   for (uint8_t i = 0; i < _hostCount; ++i) _hosts[i] = package.hosts[i];
   if (_networkPermission) {
+    String folder = String("/Downloads/") + _displayName;
+    String checked;
+    if (!PathPolicy::appPath(folder.c_str(), folder.length(), false, checked) ||
+        _displayName.indexOf('/') >= 0)
+      folder = String("/Downloads/") + _id;
+    _downloads = folder;
     _net = new (std::nothrow) AppNetWorker();
     if (!_net) { setError("App memory unavailable"); return; }
     _net->configure(_hosts, _hostCount,
-                    String("ESP-Media-App/") + FirmwareVersion::Text + " (" + _id + ")");
+                    String("ESP-Media-App/") + FirmwareVersion::Text + " (" + _id + ")",
+                    _card, _downloads);
   }
   char *source = nullptr;
   size_t length = 0;

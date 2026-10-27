@@ -41,6 +41,9 @@ public:
     size_t bodyLength = 0;
     bool followRedirects = false;
     uint32_t timeoutMs = 20000;
+    // When set, the body may outlast `timeoutMs` as long as data keeps
+    // arriving at least this often (long downloads).
+    uint32_t idleTimeoutMs = 0;
     String userAgent;
   };
 
@@ -100,6 +103,7 @@ private:
   Url _openUrl;
   uint8_t *_buffer = nullptr;
   size_t _bufferBytes = 0;
+  uint32_t _idleTimeoutMs = 0;  // of the request being performed
 
   struct Exchange {
     int status = 0;

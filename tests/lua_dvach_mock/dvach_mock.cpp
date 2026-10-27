@@ -2,12 +2,16 @@
 // callback limits (100,000 instructions, 512 KiB Lua heap) against a mock
 // `esp` table, answers network requests from tools/mock_dvach.py fixtures
 // through the real JsonPick filter, and drives one scripted session:
-// opening a board (with a mirror fallback), paging, reading a thread, and
-// replying through the emoji captcha. Build and run with run.sh.
+// opening a board (with a mirror fallback), paging, loading thumbnails,
+// reading a thread, downloading and opening files, and replying through the
+// emoji captcha. Bitmap and download responses follow the firmware's
+// contract and budget (32 bitmaps, 512 KiB of pixels). Build and run with
+// run.sh.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <map>
@@ -50,9 +54,16 @@ std::string readFixture(const std::string &name) {
   return buffer.str();
 }
 
+struct BitmapDraw {
+  lua_Integer handle;
+  int x;
+  int y;
+};
+
 struct Frame {
   std::string title;
   std::vector<std::string> texts;
+  std::vector<BitmapDraw> draws;
   int commands = 0;
   int bitmaps = 0;
 };
@@ -67,7 +78,18 @@ struct Request {
   std::vector<std::string> keep;
   uint32_t maxString = 0;
   uint32_t maxItems = 0;
+  bool bitmap = false;
+  int maxWidth = 320;
+  int maxHeight = 432;
+  std::string download;
   bool delivered = false;
+  bool cancelled = false;
+};
+
+struct Bitmap {
+  int width;
+  int height;
+  std::string path;  // empty for esp.bitmap.decode
 };
 
 lua_State *L = nullptr;
@@ -90,8 +112,11 @@ std::map<std::string, std::string> storage;
 std::vector<Request> requests;
 int nextRequestId = 1;
 std::string promptTitle;
-std::map<lua_Integer, std::pair<int, int>> bitmaps;
+std::map<lua_Integer, Bitmap> bitmaps;
+size_t maxBitmaps = 0;
 lua_Integer nextBitmap = 1;
+std::map<std::string, int> downloads;  // name -> bytes
+std::string opened;
 int appRef = LUA_NOREF;
 std::string lastError;
 
@@ -121,9 +146,18 @@ void countCommand(lua_State *state) {
   if (++building.commands > 64) luaL_error(state, "too many draw commands");
 }
 
+// The firmware's 400,000-pixel frame drawing budget (AppRuntime::luaDraw).
+uint32_t frameCost = 0;
+void charge(lua_State *state, int64_t cost) {
+  if (cost < 0 || cost > 400000 - static_cast<int64_t>(frameCost))
+    luaL_error(state, "frame drawing budget exceeded");
+  frameCost += static_cast<uint32_t>(cost);
+}
+
 int tftBeginFrame(lua_State *state) {
   luaL_checkinteger(state, 1);
   building = Frame();
+  frameCost = 0;
   building.title = checkText(state, 2, 40, "frame title");
   return 0;
 }
@@ -138,10 +172,22 @@ int tftDraw(lua_State *state) {
   countCommand(state);
   const int count = lua_gettop(state);
   const bool text = lua_toboolean(state, lua_upvalueindex(1));
+  const std::string name = lua_tostring(state, lua_upvalueindex(2));
   for (int i = 1; i <= count; ++i) {
     if (text && i == 1) building.texts.push_back(checkText(state, 1, 96, "draw text"));
     else luaL_checkinteger(state, i);
   }
+  auto arg = [&](int i) { return static_cast<int64_t>(lua_tointeger(state, i)); };
+  int64_t cost = 1024;
+  if (name == "fillScreen") cost = 320 * 432;
+  else if (name == "fillRect" || name == "drawRect" || name == "fillSmoothRoundRect") cost = arg(3) * arg(4);
+  else if (name == "fillSmoothCircle") cost = arg(3) * arg(3) * 4;
+  else if (name == "fillTriangle") {
+    const int64_t width = std::max({arg(1), arg(3), arg(5)}) - std::min({arg(1), arg(3), arg(5)}) + 1;
+    const int64_t height = std::max({arg(2), arg(4), arg(6)}) - std::min({arg(2), arg(4), arg(6)}) + 1;
+    cost = std::min<int64_t>(width * height, 320 * 432);
+  }
+  charge(state, cost);
   return 0;
 }
 
@@ -149,6 +195,7 @@ int uiButton(lua_State *state) {
   countCommand(state);
   for (int i : {1, 2, 3, 4, 6, 7, 8}) luaL_checkinteger(state, i);
   building.texts.push_back(checkText(state, 5, 96, "button label"));
+  charge(state, lua_tointeger(state, 3) * lua_tointeger(state, 4));
   return 0;
 }
 
@@ -157,6 +204,7 @@ int uiProgress(lua_State *state) {
   for (int i = 1; i <= 8; ++i) luaL_checkinteger(state, i);
   const lua_Integer percent = lua_tointeger(state, 5);
   if (percent < 0 || percent > 100) luaL_error(state, "invalid progress value");
+  charge(state, lua_tointeger(state, 3) * lua_tointeger(state, 4));
   return 0;
 }
 
@@ -164,6 +212,7 @@ int uiListCell(lua_State *state) {
   countCommand(state);
   luaL_checkinteger(state, 1);
   building.texts.push_back(checkText(state, 2, 96, "list cell label"));
+  charge(state, 320 * 40);
   return 0;
 }
 
@@ -173,6 +222,8 @@ int uiTextBox(lua_State *state) {
   const lua_Integer lines = lua_tointeger(state, 4);
   if (lines < 1 || lines > 8) luaL_error(state, "invalid text box lines");
   building.texts.push_back(checkText(state, 5, 96, "text box"));
+  const lua_Integer size = luaL_optinteger(state, 8, 1);
+  charge(state, lua_tointeger(state, 3) * lines * (size == 0 ? 16 : size == 2 ? 27 : 21));
   return 0;
 }
 
@@ -182,7 +233,10 @@ int uiBitmap(lua_State *state) {
   luaL_checkinteger(state, 2);
   luaL_checkinteger(state, 3);
   if (!bitmaps.count(handle)) luaL_error(state, "unknown bitmap");
+  charge(state, static_cast<int64_t>(bitmaps[handle].width) * bitmaps[handle].height);
   ++building.bitmaps;
+  building.draws.push_back({handle, static_cast<int>(lua_tointeger(state, 2)),
+                            static_cast<int>(lua_tointeger(state, 3))});
   return 0;
 }
 
@@ -311,6 +365,26 @@ int netRequest(lua_State *state) {
       if (request.maxString > 65536 || request.maxItems > 10000) luaL_error(state, "invalid json options");
     }
     lua_pop(state, 1);
+    lua_getfield(state, options, "bitmap");
+    if (lua_istable(state, -1)) {
+      if (request.json) luaL_error(state, "json and bitmap together");
+      request.bitmap = true;
+      lua_getfield(state, -1, "max_width"); request.maxWidth = static_cast<int>(luaL_optinteger(state, -1, 320)); lua_pop(state, 1);
+      lua_getfield(state, -1, "max_height"); request.maxHeight = static_cast<int>(luaL_optinteger(state, -1, 432)); lua_pop(state, 1);
+      if (request.maxWidth < 1 || request.maxWidth > 320 || request.maxHeight < 1 || request.maxHeight > 432)
+        luaL_error(state, "invalid bitmap options");
+    }
+    lua_pop(state, 1);
+    lua_getfield(state, options, "download");
+    if (!lua_isnil(state, -1)) {
+      request.download = luaL_checkstring(state, -1);
+      if (request.json || request.bitmap) luaL_error(state, "one response mode only");
+      if (request.download.empty() || request.download.size() > 96 ||
+          request.download.find('/') != std::string::npos || request.download[0] == '.') {
+        lua_pushnil(state); lua_pushliteral(state, "Invalid download name"); return 2;
+      }
+    }
+    lua_pop(state, 1);
     lua_getfield(state, options, "multipart");
     if (lua_istable(state, -1)) {
       const lua_Integer parts = static_cast<lua_Integer>(lua_rawlen(state, -1));
@@ -348,8 +422,44 @@ int netStatus(lua_State *state) {
 
 int netCancel(lua_State *state) {
   Request *request = findRequest(static_cast<int>(luaL_optinteger(state, 1, 0)));
-  if (request) request->delivered = true;
+  if (request) request->delivered = request->cancelled = true;
   return 0;
+}
+
+int downloadsStat(lua_State *state) {
+  const std::string name = luaL_checkstring(state, 1);
+  auto found = downloads.find(name);
+  if (found == downloads.end()) { lua_pushnil(state); lua_pushliteral(state, "File not found"); return 2; }
+  lua_newtable(state);
+  lua_pushstring(state, name.c_str()); lua_setfield(state, -2, "name");
+  lua_pushinteger(state, found->second); lua_setfield(state, -2, "size");
+  return 1;
+}
+
+int downloadsOpen(lua_State *state) {
+  const std::string name = luaL_checkstring(state, 1);
+  if (!downloads.count(name)) { lua_pushboolean(state, false); lua_pushliteral(state, "File not found"); return 2; }
+  opened = name;
+  lua_pushboolean(state, true);
+  return 1;
+}
+
+// Registers a bitmap under the firmware's handle and pixel limits.
+const char *addBitmap(int width, int height, const std::string &path, lua_Integer &handle) {
+  size_t bytes = 0;
+  for (const auto &entry : bitmaps) bytes += static_cast<size_t>(entry.second.width) * entry.second.height * 2;
+  if (bitmaps.size() >= 32) return "Too many bitmaps";
+  if (bytes + static_cast<size_t>(width) * height * 2 > 512 * 1024) return "Bitmap memory full";
+  handle = nextBitmap++;
+  bitmaps[handle] = {width, height, path};
+  if (bitmaps.size() > maxBitmaps) maxBitmaps = bitmaps.size();
+  return nullptr;
+}
+
+size_t countBitmaps(bool thumbnails) {
+  size_t count = 0;
+  for (const auto &entry : bitmaps) if (entry.second.path.empty() != thumbnails) ++count;
+  return count;
 }
 
 int jsonDecode(lua_State *state) {
@@ -459,9 +569,10 @@ int bitmapDecode(lua_State *state) {
            static_cast<uint32_t>(static_cast<uint8_t>(bytes[at + 3]));
   };
   const int width = static_cast<int>(be32(16)), height = static_cast<int>(be32(20));
-  if (bitmaps.size() >= 16) { lua_pushnil(state); lua_pushliteral(state, "Too many bitmaps"); return 2; }
-  const lua_Integer handle = nextBitmap++;
-  bitmaps[handle] = {width, height};
+  lua_Integer handle = 0;
+  if (const char *error = addBitmap(width, height, "", handle)) {
+    lua_pushnil(state); lua_pushstring(state, error); return 2;
+  }
   lua_pushinteger(state, handle);
   lua_pushinteger(state, width);
   lua_pushinteger(state, height);
@@ -484,11 +595,13 @@ void registerEsp() {
   lua_pushcfunction(L, tftBeginFrame); lua_setfield(L, -2, "begin_frame");
   lua_pushcfunction(L, tftPresent); lua_setfield(L, -2, "present");
   for (const char *name : {"fillScreen", "fillRect", "drawRect", "drawLine", "drawFastHLine",
-                           "drawFastVLine", "fillSmoothRoundRect", "fillSmoothCircle"}) {
-    lua_pushboolean(L, false); lua_pushcclosure(L, tftDraw, 1); lua_setfield(L, -2, name);
+                           "drawFastVLine", "fillSmoothRoundRect", "fillSmoothCircle", "fillTriangle"}) {
+    lua_pushboolean(L, false); lua_pushstring(L, name); lua_pushcclosure(L, tftDraw, 2);
+    lua_setfield(L, -2, name);
   }
   for (const char *name : {"drawString", "drawNumber"}) {
-    lua_pushboolean(L, true); lua_pushcclosure(L, tftDraw, 1); lua_setfield(L, -2, name);
+    lua_pushboolean(L, true); lua_pushstring(L, name); lua_pushcclosure(L, tftDraw, 2);
+    lua_setfield(L, -2, name);
   }
   lua_setfield(L, -2, "tft");
   lua_newtable(L);
@@ -516,6 +629,8 @@ void registerEsp() {
   lua_newtable(L); setFunction("from_html", textFromHtml); lua_setfield(L, -2, "text");
   lua_newtable(L); setFunction("decode", bitmapDecode); setFunction("free", bitmapFree);
   lua_setfield(L, -2, "bitmap");
+  lua_newtable(L); setFunction("stat", downloadsStat); setFunction("open", downloadsOpen);
+  lua_setfield(L, -2, "downloads");
   lua_setglobal(L, "esp");
 }
 
@@ -580,9 +695,21 @@ std::string hostOf(const std::string &url) {
   return url.substr(scheme + 3, slash - scheme - 3);
 }
 
+// The oldest page request; thumbnail requests are served separately.
 Request *pendingRequest() {
-  for (Request &request : requests) if (!request.delivered) return &request;
+  for (Request &request : requests) if (!request.delivered && !request.bitmap) return &request;
   return nullptr;
+}
+
+Request *pendingThumbnail() {
+  for (Request &request : requests) if (!request.delivered && request.bitmap) return &request;
+  return nullptr;
+}
+
+int cancelledThumbnails() {
+  int count = 0;
+  for (const Request &request : requests) if (request.bitmap && request.cancelled) ++count;
+  return count;
 }
 
 // Builds the on_response table the way AppRuntime::luaBuildResponse does.
@@ -631,6 +758,87 @@ void respondFixture(Request &request, const char *name) {
   respond(request, 200, "application/json; charset=utf-8", readFixture(name));
 }
 
+// Size of a baseline JPEG from its SOF0 segment.
+bool jpegSize(const std::string &data, int &width, int &height) {
+  for (size_t i = 2; i + 9 < data.size();) {
+    if (static_cast<uint8_t>(data[i]) != 0xFF) return false;
+    const uint8_t marker = static_cast<uint8_t>(data[i + 1]);
+    const size_t length = (static_cast<uint8_t>(data[i + 2]) << 8) | static_cast<uint8_t>(data[i + 3]);
+    if (marker == 0xC0) {
+      height = (static_cast<uint8_t>(data[i + 5]) << 8) | static_cast<uint8_t>(data[i + 6]);
+      width = (static_cast<uint8_t>(data[i + 7]) << 8) | static_cast<uint8_t>(data[i + 8]);
+      return true;
+    }
+    i += 2 + length;
+  }
+  return false;
+}
+
+// Answers a `bitmap` request the way AppRuntime::invokeResponse does: the
+// image fitted into the box, never enlarged, then registered under the budget.
+void respondBitmap(Request &request) {
+  request.delivered = true;
+  int width = 0, height = 0;
+  const bool decoded = jpegSize(readFixture("thumb.jpg"), width, height);
+  int fitWidth = width, fitHeight = height;
+  if (width > request.maxWidth || height > request.maxHeight) {
+    if (width * request.maxHeight >= height * request.maxWidth) {
+      fitWidth = request.maxWidth;
+      fitHeight = std::max(1, (height * request.maxWidth + width / 2) / width);
+    } else {
+      fitHeight = request.maxHeight;
+      fitWidth = std::max(1, (width * request.maxHeight + height / 2) / height);
+    }
+  }
+  lua_Integer handle = 0;
+  const char *error = decoded ? addBitmap(fitWidth, fitHeight, pathOf(request.url), handle) : "Unsupported image";
+  call("on_response", [&] {
+    lua_pushinteger(L, request.id);
+    lua_newtable(L);
+    lua_pushboolean(L, error == nullptr); lua_setfield(L, -2, "ok");
+    lua_pushinteger(L, 200); lua_setfield(L, -2, "status");
+    lua_pushstring(L, request.url.c_str()); lua_setfield(L, -2, "url");
+    lua_newtable(L); lua_setfield(L, -2, "headers");
+    if (error) {
+      lua_pushstring(L, error); lua_setfield(L, -2, "error");
+    } else {
+      lua_pushinteger(L, handle); lua_setfield(L, -2, "bitmap");
+      lua_pushinteger(L, fitWidth); lua_setfield(L, -2, "width");
+      lua_pushinteger(L, fitHeight); lua_setfield(L, -2, "height");
+    }
+    return 2;
+  });
+  tick();
+}
+
+int serveThumbnails() {
+  int served = 0;
+  while (Request *request = pendingThumbnail()) { respondBitmap(*request); ++served; }
+  return served;
+}
+
+// Answers a `download` request: saved under its name, or refused with `error`.
+void respondDownload(Request &request, const std::string &error = "", int bytes = 112 * 1024) {
+  request.delivered = true;
+  if (error.empty()) downloads[request.download] = bytes;
+  call("on_response", [&] {
+    lua_pushinteger(L, request.id);
+    lua_newtable(L);
+    lua_pushboolean(L, error.empty()); lua_setfield(L, -2, "ok");
+    lua_pushinteger(L, 200); lua_setfield(L, -2, "status");
+    lua_pushstring(L, request.url.c_str()); lua_setfield(L, -2, "url");
+    lua_newtable(L); lua_setfield(L, -2, "headers");
+    if (error.empty()) {
+      lua_pushstring(L, request.download.c_str()); lua_setfield(L, -2, "downloaded");
+      lua_pushinteger(L, bytes); lua_setfield(L, -2, "bytes");
+    } else {
+      lua_pushstring(L, error.c_str()); lua_setfield(L, -2, "error");
+    }
+    return 2;
+  });
+  tick();
+}
+
 bool shows(const std::string &needle) {
   for (const std::string &text : shown.texts) if (text.find(needle) != std::string::npos) return true;
   return false;
@@ -639,6 +847,39 @@ bool shows(const std::string &needle) {
 void dumpFrame() {
   printf("  frame \"%s\" (%d commands, %d bitmaps):\n", shown.title.c_str(), shown.commands, shown.bitmaps);
   for (const std::string &text : shown.texts) printf("    | %s\n", text.c_str());
+  for (const BitmapDraw &draw : shown.draws) {
+    auto found = bitmaps.find(draw.handle);
+    printf("    [bitmap %s at %d,%d]\n", found == bitmaps.end() ? "(freed)" : found->second.path.c_str(),
+           draw.x, draw.y);
+  }
+}
+
+const Bitmap *drawnBitmap(const BitmapDraw &draw, const std::string &part) {
+  auto found = bitmaps.find(draw.handle);
+  if (found == bitmaps.end() || found->second.path.find(part) == std::string::npos) return nullptr;
+  return &found->second;
+}
+
+// Taps the middle of the thumbnail drawn for a path containing `part`.
+bool tapThumbnail(const std::string &part) {
+  for (const BitmapDraw &draw : shown.draws) {
+    const Bitmap *bitmap = drawnBitmap(draw, part);
+    if (!bitmap) continue;
+    tap(draw.x + bitmap->width / 2, draw.y + bitmap->height / 2);
+    return true;
+  }
+  return false;
+}
+
+// Pages the thread forward, serving thumbnails, until `part` is drawn.
+bool pageToThumbnail(const std::string &part) {
+  for (int pages = 0; pages < 40; ++pages) {
+    serveThumbnails();
+    for (const BitmapDraw &draw : shown.draws)
+      if (drawnBitmap(draw, part)) return true;
+    tap(280, 400);
+  }
+  return false;
 }
 }  // namespace
 
@@ -685,24 +926,97 @@ int main(int argc, char **argv) {
   printf("  Lua heap live after the catalog: %zu bytes\n", luaBytes);
   check(luaBytes < 200 * 1024, "the loaded board keeps well under the 512 KiB Lua heap");
   check(shown.title == "/pr/ Программирование", "board title includes the board name");
-  check(shows("Тред про программирование №0") && shows("1/5"), "threads and page count are shown");
-  check(shows("Обсуждаем тему 3"), "an empty subject falls back to the opening post text");
+  check(shows("Тред про программирование №0") && shows("1/10"), "threads and page count are shown");
   check(storage["settings.json"].find("\"mirror\":\"https://2ch.hk\"") != std::string::npos &&
         storage["settings.json"].find("\"id\":\"pr\"") != std::string::npos,
         "working mirror and recent board are saved");
 
+  // Thumbnails: one request at a time for the rows on screen.
+  Request *thumb = pendingThumbnail();
+  check(thumb && thumb->bitmap && thumb->maxWidth == 100 && thumb->maxHeight == 100 &&
+        pathOf(thumb->url) == "/pr/thumb/100/1000001s.jpg",
+        "the first row's thumbnail is requested as a 100x100 bitmap");
+  int inFlight = 0;
+  for (const Request &r : requests) if (r.bitmap && !r.delivered) ++inFlight;
+  check(inFlight == 1, "thumbnails are requested one at a time");
+  check(serveThumbnails() == 3, "the three rows on the page load their thumbnails");
+  dumpFrame();
+  check(shown.bitmaps == 3, "the board page draws three thumbnails");
+  check(shown.draws.size() == 3 && shown.draws[0].x == 4 + (100 - 86) / 2 && shown.draws[0].y == 4,
+        "a 216x250 thumbnail is fitted to 86x100 and centered in its cell");
+  check(shows("Тред про программирование №1") && shows("Тред про программирование №2") &&
+        !shows("Тред про программирование №3"), "three threads fit on a page");
+
   tap(280, 400);
-  check(shows("2/5"), "next page");
+  check(shows("2/10"), "next page");
+  check(shows("Обсуждаем тему 3"), "an empty subject falls back to the opening post text");
+  check(shown.texts.size() > 0 && shown.bitmaps == 0, "page 2 waits for its thumbnails");
+  tap(280, 400);
+  check(shows("3/10") && cancelledThumbnails() >= 1, "paging quickly cancels a thumbnail that left the screen");
   tap(100, 400);
-  check(shows("1/5"), "previous page");
+  tap(100, 400);
+  check(shows("1/10"), "previous page");
+  serveThumbnails();
+  check(shown.bitmaps == 3, "returning to a page reuses or reloads its thumbnails");
 
   // Read the pinned thread (number 100).
   tap(100, 20);
   request = pendingRequest();
   check(request && pathOf(request->url) == "/api/mobile/v2/after/pr/100/100", "thread posts requested from the OP");
   respondFixture(*request, "after_first.json");
+  serveThumbnails();
   dumpFrame();
   check(shows("#1  100") && shows("Пост номер 100."), "thread shows the OP header and text");
+  check(shown.bitmaps == 3 && shown.draws[0].x == 6 + 7 && shown.draws[1].x == 110 + 7 &&
+        shown.draws[2].x == 214 + 7, "the OP's three files form a strip of thumbnails");
+
+  // Open the OP's JPEG: downloaded once into the app folder, then reopened.
+  check(tapThumbnail("/1000001s.jpg"), "tap the first thumbnail");
+  request = pendingRequest();
+  check(request && request->download == "1000001.jpg" && pathOf(request->url) == "/pr/src/100/1000001.jpg",
+        "a full file is requested as a download under its 2ch name");
+  check(shown.title == "Downloading" && shows("1000001.jpg"), "a progress page shows while downloading");
+  respondDownload(*request);
+  check(opened == "1000001.jpg" && shown.title != "Downloading", "the saved file opens in the viewer");
+  callNoArgs("on_resume");
+  tick();
+  check(shows("#1  100"), "back from the viewer returns to the same thread position");
+  opened.clear();
+  const size_t before = requests.size();
+  serveThumbnails();
+  check(tapThumbnail("/1000001s.jpg") && opened == "1000001.jpg" && !pendingRequest() &&
+        requests.size() == before, "a file already downloaded opens without a request");
+  callNoArgs("on_resume");
+  opened.clear();
+  check(tapThumbnail("/1000003s.jpg"), "tap the MP4 thumbnail");
+  request = pendingRequest();
+  check(request && request->download == "1000003.mp4", "an MP4 downloads the same way");
+  respondDownload(*request);
+  check(opened == "1000003.mp4", "the MP4 opens");
+  opened.clear();
+  callNoArgs("on_resume");
+  tick();
+
+  check(pageToThumbnail("/1010001s.jpg") && tapThumbnail("/1010001s.jpg"), "tap the WebM thumbnail");
+  check(!pendingRequest() && shows("WebM can't be played on this device"), "WebM is reported, not downloaded");
+  check(pageToThumbnail("/1020009s.jpg") && tapThumbnail("/1020009s.jpg"), "tap the 30 MB file");
+  check(shown.title == "Download" && shows("30.0 MB. Download it?") && !pendingRequest(),
+        "a large file asks before downloading");
+  tap(200, 400);
+  request = pendingRequest();
+  check(request && request->download == "1020009.mp4" && shown.title == "Downloading", "Download starts it");
+  Request *big = request;
+  tap(60, 400);
+  check(big->cancelled && !pendingRequest() && shown.title != "Downloading" && !downloads.count("1020009.mp4"),
+        "Cancel stops the download and returns to the thread");
+  check(pageToThumbnail("/1030066s.jpg") && tapThumbnail("/1030066s.jpg"), "tap the mislabeled file");
+  request = pendingRequest();
+  respondDownload(*request, "Unsupported file download");
+  check(shows("Download failed: Unsupported file download") && opened.empty(),
+        "a file whose content does not match its name is refused");
+  check(pageToThumbnail("/1040004s.jpg"), "a post with four files gets a second strip");
+  check(pageToThumbnail("/1050003s.jpg"), "a strip of three videos draws within the frame budget");
+  check(countBitmaps(true) <= 16, "the app keeps at most 16 thumbnails");
   lua_gc(L, LUA_GCCOLLECT);
   printf("  Lua heap live with the board and a thread batch: %zu bytes\n", luaBytes);
   check(luaBytes < 300 * 1024, "board plus thread stay well under the 512 KiB Lua heap");
@@ -727,13 +1041,14 @@ int main(int argc, char **argv) {
   check(request && pathOf(request->url).rfind("/api/captcha/emoji/show?id=", 0) == 0, "captcha image requested");
   respondFixture(*request, "captcha_show.json");
   dumpFrame();
-  check(shown.title == "Captcha" && shown.bitmaps == 9, "captcha image and eight keys are drawn");
+  check(shown.title == "Captcha" && shown.bitmaps == 9 && !pendingThumbnail(),
+        "captcha image and eight keys are drawn, and no thumbnails are requested");
   tap(40, 190);
   request = pendingRequest();
   check(request && request->method == "POST" && request->body == "{\"captchaTokenID\":\"mock-captcha-token\",\"emojiNumber\":0}",
         "an emoji tap posts the click as JSON");
   respondFixture(*request, "captcha_next.json");
-  check(shown.bitmaps == 9 && bitmaps.size() == 9, "the next captcha step replaces the bitmaps");
+  check(shown.bitmaps == 9 && countBitmaps(false) == 9, "the next captcha step replaces the bitmaps");
   tap(120, 260);
   request = pendingRequest();
   respondFixture(*request, "captcha_success.json");
@@ -744,7 +1059,7 @@ int main(int argc, char **argv) {
         request->body.find("name=\"comment\"\r\n\r\nПривет, мир") != std::string::npos &&
         request->body.find("name=\"captcha_type\"\r\n\r\nemoji_captcha") != std::string::npos,
         "posting fields carry the captcha token, solved challenge, and comment");
-  check(bitmaps.empty(), "captcha bitmaps are freed after solving");
+  check(countBitmaps(false) == 0, "captcha bitmaps are freed after solving");
   respondFixture(*request, "posting_ok.json");
   check(shows("Posted #135"), "success is reported");
 
@@ -752,13 +1067,19 @@ int main(int argc, char **argv) {
   tap(30, 400);
   tap(30, 400);
   check(shown.title == "Двач" && shows("/pr/  Программирование"), "back to home with the recent board");
+  check(bitmaps.empty(), "leaving the board frees every thumbnail");
   tap(160, 30);
   input("zzqx");
   request = pendingRequest();
   respond(*request, 404, "text/html; charset=utf-8", "<html>Not found</html>");
   check(shown.title == "Двач" && shows("No board /zzqx/"), "an unknown board is reported");
-  tap(100, 100, 1200);
+  tap(100, 150, 1200);
   check(!shows("/pr/  Программирование") && shows("Removed /pr/"), "holding a recent board removes it");
+
+  // Thumbnails off: compact rows and no image requests.
+  tap(160, 80);
+  check(shows("Show thumbnails") && storage["settings.json"].find("\"thumbs\":false") != std::string::npos,
+        "the Home toggle turns thumbnails off and saves it");
 
   // A failed load offers Retry on the board and in a thread.
   tap(160, 30);
@@ -770,7 +1091,8 @@ int main(int argc, char **argv) {
   request = pendingRequest();
   check(request && pathOf(request->url) == "/pr/catalog.json", "Retry reloads the board");
   respondFixture(*request, "catalog.json");
-  check(!shows("Retry") && shows("1/5"), "the board appears after Retry");
+  check(!shows("Retry") && shows("1/5") && !pendingThumbnail() && shown.bitmaps == 0,
+        "with thumbnails off the board has six rows a page and requests no images");
   tap(100, 20);
   request = pendingRequest();
   respond(*request, 0, "", "", {});
@@ -779,7 +1101,8 @@ int main(int argc, char **argv) {
   request = pendingRequest();
   check(request && pathOf(request->url) == "/api/mobile/v2/after/pr/100/100", "Retry reloads the thread");
   respondFixture(*request, "after_first.json");
-  check(shows("#1  100"), "the thread appears after Retry");
+  check(shows("#1  100") && !pendingThumbnail() && shows("JPG") && shows("MP4"),
+        "with thumbnails off a thread shows file placeholders without requests");
 
   printf("\nLua heap peak %zu bytes, worst callback %d instructions, %d frames\n",
          luaPeak, worstInstructions, presents);
@@ -788,6 +1111,8 @@ int main(int argc, char **argv) {
   // On the device the Lua heap is in PSRAM and roughly 1,000 instructions
   // take a millisecond, so keep each callback far below the 20 ms limit.
   check(worstInstructions <= 10000, "every callback stays well under the device time limit");
+  printf("most bitmaps held at once: %zu\n", maxBitmaps);
+  check(maxBitmaps <= 32, "the bitmap handle budget is never exceeded");
   lua_close(L);
   if (failures) { printf("%d check(s) failed\n", failures); return 1; }
   printf("dvach_mock: all checks passed\n");

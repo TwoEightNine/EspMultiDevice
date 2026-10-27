@@ -198,6 +198,7 @@ bool HttpClient::perform(const Request &request, Policy &policy, Sink &sink, Res
   size_t bodyLength = request.bodyLength;
   const uint32_t started = millis();
   const uint32_t deadline = started + request.timeoutMs;
+  _idleTimeoutMs = request.idleTimeoutMs;
   for (uint8_t hop = 0; hop <= MaxRedirects; ++hop) {
     Exchange exchange;
     bool reused = false;
@@ -488,6 +489,7 @@ bool HttpClient::readBody(WiFiClient &client, Policy &policy, uint32_t deadline,
   };
   auto deliver = [&](size_t amount) -> bool {
     received += amount;
+    if (_idleTimeoutMs) deadline = millis() + _idleTimeoutMs;
     policy.progress(Receiving, received, exchange.chunked ? -1 : exchange.contentLength);
     if (!sink.write(_buffer, amount)) { error = "Response rejected"; return false; }
     return true;

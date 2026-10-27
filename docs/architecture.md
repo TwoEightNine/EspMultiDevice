@@ -65,7 +65,7 @@ An SDK 4 app never navigates. `esp.fs.open` and `esp.ui.prompt` record a request
 
 `ImageView` is the image pipeline behind both the Image Viewer screen and SDK 5 `esp.image`: one instance is built in the composition root and has one owner at a time, which drives it from the UI task and supplies the app bar through a painter callback. An SDK 5 app only records the layer it wants (path, zoom, bar); `AppHostScreen::tick()` reconciles that with `ImageView`, publishes a status snapshot back to the worker, and forwards the bar's Close and Zoom targets and the image touches to Lua. The host releases the pipeline when the app stops and before it pushes a viewer or keyboard over a paused app.
 
-An SDK 6 app with the `network` permission also owns an `AppNetWorker`: an `app-net` task (16 KiB, core 0, created on the first request) that runs one `HttpClient` request at a time from a four-slot queue. Lua validates and enqueues requests, polls progress, and cancels; the network task streams each body into a PSRAM buffer or the `JsonPick` filter and parks the finished result in its slot. The app worker takes results only while not paused and converts them into the `on_response` table inside a protected Lua call. Neither task draws or navigates. `AppRuntime::end()` returns false until the network task has observed cancellation and exited, so the host retries `releaseResources()` while a connect unwinds. Decoded SDK 6 bitmaps are PSRAM buffers owned by `AppRuntime`; the UI task draws them only while holding the runtime mutex and only when the handle's serial still matches, so a bitmap the worker freed is skipped instead of read.
+An SDK 6 app with the `network` permission also owns an `AppNetWorker`: an `app-net` task (16 KiB, core 0, created on the first request) that runs one `HttpClient` request at a time from a four-slot queue. Lua validates and enqueues requests, polls progress, and cancels; the network task streams each body into a PSRAM buffer, the `JsonPick` filter, the shared `DownloadStore` (a `download` request, into the app's `/Downloads/<app name>` folder), or a PSRAM buffer that it decodes and fits into a bitmap (`AppBitmapDecode`), and parks the finished result in its slot. A decoded bitmap joins the app's 32-handle, 512 KiB budget only when the app worker delivers the response. The app worker takes results only while not paused and converts them into the `on_response` table inside a protected Lua call. Neither task draws or navigates. `AppRuntime::end()` returns false until the network task has observed cancellation and exited, so the host retries `releaseResources()` while a connect unwinds. Decoded SDK 6 bitmaps are PSRAM buffers owned by `AppRuntime`; the UI task draws them only while holding the runtime mutex and only when the handle's serial still matches, so a bitmap the worker freed is skipped instead of read.
 
 Home owns a separate app-catalog worker. It scans bounded `/Apps` entries, validates runnable packages, and decodes exact 64×64 alpha PNG logos into PSRAM under generation cancellation. It publishes only complete catalogs; the UI task merges them with built-ins, sorts and draws them, and passes the selected package ID through `Navigator`. SD reads use `SpiBusLock`, and the worker never draws, consumes the shared SD event, or navigates. See [external-apps.md](external-apps.md) for the SD format and SDK.
 
@@ -153,12 +153,15 @@ returns a typed terminal result containing text, a download path, or an error.
 It may read and update browser cookies through `BrowserPersistentState`, but it
 never parses a `BrowserDocument`, draws, updates history/recents, or navigates.
 
-`BrowserDownloadStore` owns response media classification, safe download names,
-the single active `/Downloads` transaction, bounded incremental SD writes,
-signature and ISO-BMFF validation, and atomic commit or cleanup. It is injected
+`BrowserDownloadStore` owns response media classification and safe download
+names on top of the shared `DownloadStore` (`src/services/storage`), which owns
+one download transaction into a fixed folder: bounded incremental SD writes
+under `SpiBusLock`, a byte cap, signature and ISO-BMFF validation, and atomic
+commit or cleanup. The Browser's store is fixed to `/Downloads` and injected
 into `BrowserTransport`, which owns HTTP body framing, cancellation polling,
-and progress callbacks. The store contains all download-specific `SD`,
-`SpiBusLock`, and `FileFormats` policy.
+and progress callbacks. `AppNetWorker` creates one per SDK 6 `download`
+request for the app's `/Downloads/<app name>` folder. `DownloadStore` contains
+all download-specific `SD`, `SpiBusLock`, and `FileFormats` policy.
 
 Browser transport allocates one bounded receive buffer in PSRAM and falls back
 to a 512-byte internal allocation only when necessary. The serialized transport

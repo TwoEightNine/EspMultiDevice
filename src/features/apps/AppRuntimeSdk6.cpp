@@ -1,8 +1,9 @@
 // SDK 6 additions to AppRuntime: network requests, JSON, URL, Base64, hashes,
-// HTML-to-text, wrapped text, and decoded bitmaps.
+// HTML-to-text, wrapped text, decoded bitmaps, and the app downloads folder.
 #include "AppRuntime.h"
 
 #include <FS.h>
+#include <SD.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_random.h>
@@ -17,11 +18,6 @@
 #include <string>
 #include <vector>
 
-// JPEGDEC's filesystem overload refers to File without its fs namespace.
-using File = fs::File;
-#include <JPEGDEC.h>
-#include <PNGdec.h>
-
 #include "../../vendor_shims/lua/LuaConfig.h"
 
 extern "C" {
@@ -30,8 +26,14 @@ extern "C" {
 #include "../../../third_party/lua/lualib.h"
 }
 
+#include "../../core/SpiBusLock.h"
+#include "../../media/FileFormats.h"
+#include "../../services/storage/PathPolicy.h"
+#include "../../services/storage/SdCardController.h"
+#include "AppBitmapDecode.h"
 #include "AppLuaJson.h"
 #include "AppNetWorker.h"
+#include "AppPackage.h"
 #include "AppText.h"
 #include "AppTextLayout.h"
 #include "JsonPick.h"
@@ -168,41 +170,35 @@ bool collectPairs(lua_State *state, int index, std::vector<std::pair<std::string
   return true;
 }
 
-struct PngTarget {
-  PNG *png;
-  uint16_t *pixels;
-  uint16_t width;
-  uint16_t height;
-  uint32_t background;
-};
-
-int pngDraw(PNGDRAW *draw) {
-  PngTarget *target = static_cast<PngTarget *>(draw->pUser);
-  if (!target || draw->y < 0 || draw->y >= target->height || draw->iWidth != target->width) return 0;
-  target->png->getLineAsRGB565(draw, target->pixels + static_cast<size_t>(draw->y) * target->width,
-                               PNG_RGB565_LITTLE_ENDIAN, target->background);
-  return 1;
+// Reads `{max_width, max_height, background}` from the table at `table`.
+void readBitmapOptions(lua_State *state, int table, AppBitmapDecode::Options &options) {
+  lua_Integer value = 0;
+  if (optionalInteger(state, table, "max_width", 1, AppBitmapDecode::MaxWidth, value) && value)
+    options.maxWidth = static_cast<uint16_t>(value);
+  value = 0;
+  if (optionalInteger(state, table, "max_height", 1, AppBitmapDecode::MaxHeight, value) && value)
+    options.maxHeight = static_cast<uint16_t>(value);
+  value = -1;
+  if (optionalInteger(state, table, "background", 0, 65535, value) && value >= 0)
+    options.background = static_cast<uint16_t>(value);
 }
 
-struct JpegTarget {
-  uint16_t *pixels;
-  uint16_t width;
-  uint16_t height;
-};
-
-int jpegDraw(JPEGDRAW *draw) {
-  JpegTarget *target = static_cast<JpegTarget *>(draw->pUser);
-  if (!target) return 0;
-  for (int row = 0; row < draw->iHeight; ++row) {
-    const int y = draw->y + row;
-    if (y < 0 || y >= target->height) continue;
-    const int columns = std::min<int>(draw->iWidth, target->width - draw->x);
-    if (columns <= 0) continue;
-    memcpy(target->pixels + static_cast<size_t>(y) * target->width + draw->x,
-           draw->pPixels + static_cast<size_t>(row) * draw->iWidth, columns * sizeof(uint16_t));
-  }
-  return 1;
+// A plain file name for the app downloads folder: one valid path segment of
+// 1-96 bytes with an image, audio, or video extension.
+bool validDownloadName(const char *name, size_t length) {
+  if (!name || !length || length > AppNetWorker::MaxDownloadNameBytes ||
+      memchr(name, '/', length) || memchr(name, 0, length)) return false;
+  String path;
+  const String candidate = String("/") + name;
+  if (!PathPolicy::appPath(candidate.c_str(), candidate.length(), false, path)) return false;
+  return FileFormats::isDownloadable(FileFormats::fromPath(candidate));
 }
+
+// What luaBuildResponse turns into the `response` table.
+struct ResponseView {
+  const AppNetWorker::Result *result;
+  lua_Integer bitmap;  // 0 when the response carries none
+};
 }  // namespace
 
 void AppRuntime::registerSdk6() {
@@ -266,6 +262,13 @@ void AppRuntime::registerSdk6() {
   setFunction(_lua, this, luaBitmapDecode, "decode");
   setFunction(_lua, this, luaBitmapFree, "free");
   lua_setfield(_lua, -2, "bitmap");
+
+  if (_networkPermission) {
+    lua_newtable(_lua);
+    setFunction(_lua, this, luaDownloadsStat, "stat");
+    setFunction(_lua, this, luaDownloadsOpen, "open");
+    lua_setfield(_lua, -2, "downloads");
+  }
 }
 
 int AppRuntime::luaNetRequest(lua_State *state) {
@@ -302,10 +305,15 @@ int AppRuntime::luaNetRequest(lua_State *state) {
     }
     if (optionsIndex) luaL_checktype(state, optionsIndex, LUA_TTABLE);
   }
-  if (memchr(url, 0, urlLength)) return pushFailure(state, true, "Invalid URL");
+  // Refusals are logged by reason only, like HttpClient's own lines.
+  auto refuse = [&](const char *reason) {
+    Serial.printf("[App net] request refused: %s\n", reason);
+    return pushFailure(state, true, reason);
+  };
+  if (memchr(url, 0, urlLength)) return refuse("Invalid URL");
   HttpClient::Url parsed;
-  if (!HttpClient::parseUrl(String(url), parsed)) return pushFailure(state, true, "Invalid URL");
-  if (!runtime->_net->hostAllowed(parsed.host)) return pushFailure(state, true, "Host not allowed");
+  if (!HttpClient::parseUrl(String(url), parsed)) return refuse("Invalid URL");
+  if (!runtime->_net->hostAllowed(parsed.host)) return refuse("Host not allowed");
 
   PendingRequest **box = static_cast<PendingRequest **>(lua_newuserdatauv(state, sizeof(PendingRequest *), 0));
   *box = nullptr;
@@ -373,6 +381,24 @@ int AppRuntime::luaNetRequest(lua_State *state) {
       spec->json = true;
       spec->jsonOptions = JsonPick::Options();
       readJsonOptions(state, lua_gettop(state), spec->jsonOptions, spec->keepText);
+    }
+    lua_pop(state, 1);
+    lua_getfield(state, optionsIndex, "bitmap");
+    if (!failure && !lua_isnil(state, -1)) {
+      luaL_checktype(state, -1, LUA_TTABLE);
+      if (spec->json) failure = "Use one of json, bitmap, or download";
+      spec->bitmap = true;
+      readBitmapOptions(state, lua_gettop(state), spec->bitmapOptions);
+    }
+    lua_pop(state, 1);
+    lua_getfield(state, optionsIndex, "download");
+    if (!failure && !lua_isnil(state, -1)) {
+      size_t nameLength = 0;
+      const char *name = luaL_checklstring(state, -1, &nameLength);
+      if (spec->json || spec->bitmap) failure = "Use one of json, bitmap, or download";
+      else if (!validDownloadName(name, nameLength)) failure = "Invalid download name";
+      else if (!runtime->_card.isMounted()) failure = "SD card unavailable";
+      else copyText(spec->download, sizeof(spec->download), name);
     }
     lua_pop(state, 1);
     lua_getfield(state, optionsIndex, "multipart");
@@ -452,13 +478,13 @@ int AppRuntime::luaNetRequest(lua_State *state) {
   if (!failure && WiFi.status() != WL_CONNECTED) failure = "Wi-Fi not connected";
   if (failure) {
     freePending(*box);
-    return pushFailure(state, true, failure);
+    return refuse(failure);
   }
   (*box)->spec = nullptr;
   freePending(*box);
   String error;
   const uint32_t id = runtime->_net->submit(spec, error);
-  if (!id) return pushFailure(state, true, error.c_str());
+  if (!id) return refuse(error.c_str());
   lua_pushinteger(state, static_cast<lua_Integer>(id));
   return 1;
 }
@@ -498,8 +524,8 @@ bool AppRuntime::serviceNet() {
 }
 
 int AppRuntime::luaBuildResponse(lua_State *state) {
-  const AppNetWorker::Result *result =
-    static_cast<const AppNetWorker::Result *>(lua_touserdata(state, 1));
+  const ResponseView *view = static_cast<const ResponseView *>(lua_touserdata(state, 1));
+  const AppNetWorker::Result *result = view ? view->result : nullptr;
   lua_createtable(state, 0, 8);
   if (!result) {
     lua_pushboolean(state, false); lua_setfield(state, -2, "ok");
@@ -538,6 +564,15 @@ int AppRuntime::luaBuildResponse(lua_State *state) {
     AppLuaJson::push(state, *result->json, 0);
     lua_setfield(state, -2, "json");
   }
+  if (view->bitmap) {
+    lua_pushinteger(state, view->bitmap); lua_setfield(state, -2, "bitmap");
+    lua_pushinteger(state, result->width); lua_setfield(state, -2, "width");
+    lua_pushinteger(state, result->height); lua_setfield(state, -2, "height");
+  }
+  if (result->downloaded.length()) {
+    lua_pushstring(state, result->downloaded.c_str()); lua_setfield(state, -2, "downloaded");
+    lua_pushinteger(state, result->downloadedBytes); lua_setfield(state, -2, "bytes");
+  }
   return 1;
 }
 
@@ -558,17 +593,40 @@ bool AppRuntime::invokeResponse(void *pointer) {
     return false;
   }
   lua_pushinteger(_lua, id);
+  // A decoded bitmap joins the app's budget only now; a full budget turns
+  // the response into an error.
+  ResponseView view{result, 0};
+  if (result->pixels) {
+    int64_t handle = 0;
+    const char *failure = nullptr;
+    if (registerBitmap(result->pixels, result->width, result->height, handle, failure)) {
+      view.bitmap = static_cast<lua_Integer>(handle);
+    } else {
+      result->error = failure;
+      Serial.printf("[SD app] %s: response bitmap rejected: %s\n", _id.c_str(), failure);
+    }
+    result->pixels = nullptr;
+  }
   // Converting a large response may exhaust the Lua heap; build it protected
   // so the app receives an error instead of stopping.
   lua_pushcfunction(_lua, luaBuildResponse);
-  lua_pushlightuserdata(_lua, result);
+  lua_pushlightuserdata(_lua, &view);
   int built = lua_pcall(_lua, 1, 1, 0);
   AppNetWorker::release(result);
   if (built != LUA_OK) {
+    // The app never saw the handle.
+    if (view.bitmap && xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE) {
+      Bitmap &bitmap = _bitmaps[view.bitmap & 0x1f];
+      heap_caps_free(bitmap.pixels);
+      _bitmapBytes -= static_cast<size_t>(bitmap.width) * bitmap.height * 2;
+      bitmap = Bitmap{};
+      xSemaphoreGive(_mutex);
+    }
     lua_pop(_lua, 1);
     lua_gc(_lua, LUA_GCCOLLECT);
+    ResponseView failed{nullptr, 0};
     lua_pushcfunction(_lua, luaBuildResponse);
-    lua_pushlightuserdata(_lua, nullptr);
+    lua_pushlightuserdata(_lua, &failed);
     built = lua_pcall(_lua, 1, 1, 0);
     if (built != LUA_OK) {
       lua_settop(_lua, 0);
@@ -851,9 +909,9 @@ int AppRuntime::luaDrawBitmap(lua_State *state) {
   const lua_Integer x = luaL_checkinteger(state, 2);
   const lua_Integer y = luaL_checkinteger(state, 3);
   if (x < -512 || x > 1024 || y < -512 || y > 1024) return luaL_error(state, "draw argument out of range");
-  const uint8_t slot = static_cast<uint8_t>(handle & 0x0f);
+  const uint8_t slot = static_cast<uint8_t>(handle & 0x1f);
   const Bitmap &bitmap = runtime->_bitmaps[slot];
-  if (handle <= 0 || !bitmap.pixels || bitmap.serial != static_cast<uint32_t>(handle >> 4))
+  if (handle <= 0 || !bitmap.pixels || bitmap.serial != static_cast<uint32_t>(handle >> 5))
     return luaL_error(state, "unknown bitmap");
   const uint32_t cost = static_cast<uint32_t>(bitmap.width) * bitmap.height;
   if (cost > 400000UL - runtime->_frameCost) return luaL_error(state, "frame drawing budget exceeded");
@@ -867,94 +925,60 @@ int AppRuntime::luaDrawBitmap(lua_State *state) {
   return 0;
 }
 
+bool AppRuntime::registerBitmap(uint16_t *pixels, uint16_t width, uint16_t height,
+                                int64_t &handle, const char *&error) {
+  const size_t bytes = static_cast<size_t>(width) * height * 2;
+  int slot = -1;
+  error = nullptr;
+  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    error = "Host busy";
+  } else {
+    for (int i = 0; i < MaxBitmaps; ++i) if (!_bitmaps[i].pixels) { slot = i; break; }
+    if (slot < 0) error = "Too many bitmaps";
+    else if (bytes > MaxBitmapBytes - _bitmapBytes) error = "Bitmap memory full";
+    else {
+      _bitmapSerial = (_bitmapSerial + 1) & 0x03ffffffu;
+      if (!_bitmapSerial) _bitmapSerial = 1;
+      _bitmaps[slot] = {_bitmapSerial, width, height, pixels};
+      _bitmapBytes += bytes;
+      handle = (static_cast<int64_t>(_bitmapSerial) << 5) | slot;
+    }
+    xSemaphoreGive(_mutex);
+  }
+  if (error) heap_caps_free(pixels);
+  return error == nullptr;
+}
+
 int AppRuntime::luaBitmapDecode(lua_State *state) {
   AppRuntime *runtime = self(state);
   size_t length = 0;
   const char *bytes = luaL_checklstring(state, 1, &length);
-  const lua_Integer background = luaL_optinteger(state, 2, 0);
-  if (background < 0 || background > 65535) return luaL_error(state, "invalid background color");
-  if (length > MaxBitmapSourceBytes) return pushFailure(state, true, "Image too large");
-  int slot = -1;
-  for (int i = 0; i < MaxBitmaps; ++i) if (!runtime->_bitmaps[i].pixels) { slot = i; break; }
-  if (slot < 0) return pushFailure(state, true, "Too many bitmaps");
+  AppBitmapDecode::Options options;
+  if (lua_istable(state, 2)) {
+    readBitmapOptions(state, 2, options);
+  } else {
+    const lua_Integer background = luaL_optinteger(state, 2, 0);
+    if (background < 0 || background > 65535) return luaL_error(state, "invalid background color");
+    options.background = static_cast<uint16_t>(background);
+  }
+  if (length > AppBitmapDecode::MaxSourceBytes) return pushFailure(state, true, "Image too large");
   const uint8_t *data = reinterpret_cast<const uint8_t *>(bytes);
-  const bool png = length >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0;
-  const bool jpeg = length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
-  if (!png && !jpeg) return pushFailure(state, true, "Unsupported image");
+  if (!AppBitmapDecode::supported(data, length)) return pushFailure(state, true, "Unsupported image");
+  // Refuse before decoding when no handle could be issued.
+  bool slotFree = false;
+  for (const Bitmap &bitmap : runtime->_bitmaps) if (!bitmap.pixels) { slotFree = true; break; }
+  if (!slotFree) return pushFailure(state, true, "Too many bitmaps");
   const int64_t started = callbackClockUs();
   const char *failure = nullptr;
-  uint16_t *pixels = nullptr;
   uint16_t width = 0, height = 0;
-  if (png) {
-    void *storage = heap_caps_malloc(sizeof(PNG), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    PNG *decoder = storage ? new (storage) PNG() : nullptr;
-    if (!decoder) {
-      failure = "App memory unavailable";
-    } else if (decoder->openRAM(const_cast<uint8_t *>(data), static_cast<int>(length), pngDraw) != PNG_SUCCESS ||
-               decoder->isInterlaced()) {
-      failure = "Unsupported image";
-    } else {
-      width = static_cast<uint16_t>(decoder->getWidth());
-      height = static_cast<uint16_t>(decoder->getHeight());
-      const size_t pixelBytes = static_cast<size_t>(width) * height * 2;
-      if (!width || !height || width > 320 || height > 432) failure = "Image too large";
-      else if (pixelBytes > MaxBitmapBytes - runtime->_bitmapBytes) failure = "Bitmap memory full";
-      else if (!(pixels = static_cast<uint16_t *>(heap_caps_calloc(1, pixelBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))))
-        failure = "App memory unavailable";
-      else {
-        // PNGdec blends alpha over a 0x00BBGGRR background.
-        const uint32_t red = ((background >> 11) & 0x1f) * 255 / 31;
-        const uint32_t green = ((background >> 5) & 0x3f) * 255 / 63;
-        const uint32_t blue = (background & 0x1f) * 255 / 31;
-        PngTarget target{decoder, pixels, width, height, red | (green << 8) | (blue << 16)};
-        if (decoder->decode(&target, PNG_CHECK_CRC) != PNG_SUCCESS) failure = "Cannot decode image";
-      }
-      decoder->close();
-    }
-    if (decoder) decoder->~PNG();
-    heap_caps_free(storage);
-  } else {
-    void *storage = heap_caps_malloc(sizeof(JPEGDEC), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    JPEGDEC *decoder = storage ? new (storage) JPEGDEC() : nullptr;
-    if (!decoder) {
-      failure = "App memory unavailable";
-    } else if (decoder->openRAM(const_cast<uint8_t *>(data), static_cast<int>(length), jpegDraw) != 1 ||
-               decoder->getJPEGType() != JPEG_MODE_BASELINE) {
-      failure = "Unsupported image";
-    } else {
-      width = static_cast<uint16_t>(decoder->getWidth());
-      height = static_cast<uint16_t>(decoder->getHeight());
-      const size_t pixelBytes = static_cast<size_t>(width) * height * 2;
-      if (!width || !height || width > 320 || height > 432) failure = "Image too large";
-      else if (pixelBytes > MaxBitmapBytes - runtime->_bitmapBytes) failure = "Bitmap memory full";
-      else if (!(pixels = static_cast<uint16_t *>(heap_caps_calloc(1, pixelBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT))))
-        failure = "App memory unavailable";
-      else {
-        JpegTarget target{pixels, width, height};
-        decoder->setUserPointer(&target);
-        decoder->setPixelType(RGB565_LITTLE_ENDIAN);
-        if (decoder->decode(0, 0, 0) != 1) failure = "Cannot decode image";
-      }
-      decoder->close();
-    }
-    if (decoder) decoder->~JPEGDEC();
-    heap_caps_free(storage);
-  }
+  uint16_t *pixels = AppBitmapDecode::decode(data, length, options, MaxBitmapBytes - runtime->_bitmapBytes,
+                                             width, height, failure);
   runtime->_callbackStartedUs += callbackClockUs() - started;
-  if (failure) {
-    heap_caps_free(pixels);
+  if (!pixels) return pushFailure(state, true, failure ? failure : "Cannot decode image");
+  int64_t handle = 0;
+  if (!runtime->registerBitmap(pixels, width, height, handle, failure))
     return pushFailure(state, true, failure);
-  }
-  if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-    heap_caps_free(pixels);
-    return pushFailure(state, true, "Host busy");
-  }
-  runtime->_bitmapSerial = (runtime->_bitmapSerial + 1) & 0x07ffffffu;
-  if (!runtime->_bitmapSerial) runtime->_bitmapSerial = 1;
-  runtime->_bitmaps[slot] = {runtime->_bitmapSerial, width, height, pixels};
-  runtime->_bitmapBytes += static_cast<size_t>(width) * height * 2;
-  xSemaphoreGive(runtime->_mutex);
-  lua_pushinteger(state, (static_cast<lua_Integer>(runtime->_bitmapSerial) << 4) | slot);
+  lua_pushinteger(state, static_cast<lua_Integer>(handle));
   lua_pushinteger(state, width);
   lua_pushinteger(state, height);
   return 3;
@@ -964,10 +988,10 @@ int AppRuntime::luaBitmapFree(lua_State *state) {
   AppRuntime *runtime = self(state);
   const lua_Integer handle = luaL_checkinteger(state, 1);
   if (handle <= 0) return 0;
-  const uint8_t slot = static_cast<uint8_t>(handle & 0x0f);
+  const uint8_t slot = static_cast<uint8_t>(handle & 0x1f);
   if (xSemaphoreTake(runtime->_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return luaL_error(state, "host busy");
   Bitmap &bitmap = runtime->_bitmaps[slot];
-  if (bitmap.pixels && bitmap.serial == static_cast<uint32_t>(handle >> 4)) {
+  if (bitmap.pixels && bitmap.serial == static_cast<uint32_t>(handle >> 5)) {
     heap_caps_free(bitmap.pixels);
     runtime->_bitmapBytes -= static_cast<size_t>(bitmap.width) * bitmap.height * 2;
     bitmap = Bitmap{};
@@ -978,8 +1002,8 @@ int AppRuntime::luaBitmapFree(lua_State *state) {
 
 bool AppRuntime::lockBitmap(int32_t handle, const uint16_t *&pixels, uint16_t &width, uint16_t &height) {
   if (handle <= 0 || !_mutex || xSemaphoreTake(_mutex, pdMS_TO_TICKS(20)) != pdTRUE) return false;
-  const Bitmap &bitmap = _bitmaps[handle & 0x0f];
-  if (!bitmap.pixels || bitmap.serial != static_cast<uint32_t>(handle >> 4)) {
+  const Bitmap &bitmap = _bitmaps[handle & 0x1f];
+  if (!bitmap.pixels || bitmap.serial != static_cast<uint32_t>(handle >> 5)) {
     xSemaphoreGive(_mutex);
     return false;
   }
@@ -999,4 +1023,66 @@ void AppRuntime::releaseBitmaps() {
     bitmap = Bitmap{};
   }
   _bitmapBytes = 0;
+}
+
+bool AppRuntime::checkDownloadName(lua_State *state, int index, bool nilOnError, String &path) {
+  size_t length = 0;
+  const char *name = luaL_checklstring(state, index, &length);
+  const char *error = nullptr;
+  if (!_downloads.length()) error = "Network permission required";
+  else if (!validDownloadName(name, length)) error = "Invalid download name";
+  else if (!_card.isMounted()) error = "SD card unavailable";
+  if (!error) {
+    path = _downloads + "/" + name;
+    return true;
+  }
+  pushFailure(state, nilOnError, error);
+  return false;
+}
+
+int AppRuntime::luaDownloadsStat(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkDownloadName(state, 1, true, path)) return 2;
+  const int64_t started = callbackClockUs();
+  bool found = false;
+  uint32_t size = 0, modified = 0;
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
+  if (locked) {
+    fs::File file = SD.open(path.c_str(), FILE_READ);
+    found = file && !file.isDirectory();
+    if (found) {
+      size = static_cast<uint32_t>(file.size());
+      modified = static_cast<uint32_t>(file.getLastWrite());
+    }
+    if (file) file.close();
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += callbackClockUs() - started;
+  if (!locked) return pushFailure(state, true, "SD busy");
+  if (!found) return pushFailure(state, true, "File not found");
+  const String name = path.substring(path.lastIndexOf('/') + 1);
+  pushFsEntry(state, name.c_str(), false, size, modified,
+              static_cast<uint8_t>(FileFormats::fromPath(name)));
+  return 1;
+}
+
+int AppRuntime::luaDownloadsOpen(lua_State *state) {
+  AppRuntime *runtime = self(state);
+  String path;
+  if (!runtime->checkDownloadName(state, 1, false, path)) return 2;
+  if (runtime->_navigationPending) return pushFailure(state, false, "Navigation pending");
+  const int64_t started = callbackClockUs();
+  bool found = false;
+  const bool locked = SpiBusLock::lock(AppPackage::SdLockTimeout);
+  if (locked) {
+    fs::File file = SD.open(path.c_str(), FILE_READ);
+    found = file && !file.isDirectory();
+    if (file) file.close();
+    SpiBusLock::unlock();
+  }
+  runtime->_callbackStartedUs += callbackClockUs() - started;
+  if (!locked) return pushFailure(state, false, "SD busy");
+  if (!found) return pushFailure(state, false, "File not found");
+  return runtime->requestOpenFile(state, path);
 }
