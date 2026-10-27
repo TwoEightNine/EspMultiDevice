@@ -12,6 +12,10 @@ The SD-app interpreter vendors upstream Lua 5.4.9 (MIT) in `third_party/lua/` an
 
 Install `TFT_eSPI`, `PNGdec`, and `JPEGDEC` through Arduino Library Manager. The TFT setup is a library-level configuration described in [hardware.md](hardware.md), not a source change in this repository.
 
+## Project license
+
+ESP Media's own code is GPL-3.0-or-later; the notice is in the [README](../README.md#license) and the text in `LICENSE`. The Helix AAC core is RPSL/RCSL, which the FSF considers GPL-incompatible, although the RPSL itself lists the GPL as a compatible source license. The README therefore carries a GPLv3 section 7 additional permission for combining the project with Helix AAC. Before vendoring another dependency, confirm that its license is GPL-3.0-compatible; if it is not, replace the dependency rather than widening that permission.
+
 ## Bundled dependencies
 
 The source trees below are pinned under `third_party/`, retained with their notices, and compiled only through project shims:
