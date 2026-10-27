@@ -1,3 +1,0 @@
-arduinoWebSockets 2.7.2
-Source: https://github.com/Links2004/arduinoWebSockets/releases/tag/2.7.2
-Archive SHA-256: cace4969401d5a015d3558fd501c7449a946beaa90b7313cc5b262014b54ae7e

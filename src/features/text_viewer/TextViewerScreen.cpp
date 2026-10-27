@@ -83,7 +83,7 @@ void TextViewerScreen::onEnter(const ScreenData &data) {
     fail(F("SD card unavailable"));
   } else if (_secretAccess && !_secretStorage.unlocked()) {
     _secretNeedsUnlock = true;
-    fail(F("Close and unlock secret files again"));
+    fail(F("Close and unlock hidden files again"));
   } else {
     _state = State::Opening;
     _loadingStartedMs = millis();
@@ -190,7 +190,7 @@ void TextViewerScreen::openFileStep() {
   if (!_sdMounted) return;
   if (_secretAccess && !_secretStorage.unlocked()) {
     _secretNeedsUnlock = true;
-    fail(F("Close and unlock secret files again"));
+    fail(F("Close and unlock hidden files again"));
     return;
   }
   if (!SpiBusLock::lock(SpiTimeout)) return;
@@ -507,7 +507,7 @@ void TextViewerScreen::handleSdCardEvent(SdCardEvent event) {
     _waitingForMount = false;
     if (_secretAccess || _secretNeedsUnlock) {
       _secretNeedsUnlock = true;
-      fail(F("Close and unlock secret files again"));
+      fail(F("Close and unlock hidden files again"));
       return;
     }
     closeFile();

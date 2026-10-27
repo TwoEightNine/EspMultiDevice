@@ -769,7 +769,7 @@ void FilesScreen::onEnter(const ScreenData &data) {
   if (data.kind != ScreenDataKind::SecretFiles || !_sdMounted) return;
   String error;
   if (!_secretStorage.unlock(data.pin, error)) {
-    showMessage(error.length() ? error : String(F("Secret storage unavailable")), 3000);
+    showMessage(error.length() ? error : String(F("Hidden storage unavailable")), 3000);
     draw();
     return;
   }
@@ -1177,7 +1177,7 @@ void FilesScreen::drawContextMenu() {
                x + 14, _renameBounds.y + _renameBounds.h / 2, TFT_WHITE, MenuColor,
                UiText::Size::Compact, ML_DATUM);
   if (canMove) {
-    UiText::draw(tft, movingOut ? F("Move out of secret") : F("Move to secret"),
+    UiText::draw(tft, movingOut ? F("Move out of hidden") : F("Move to hidden"),
                  x + 14, _moveBounds.y + _moveBounds.h / 2,
                  TFT_WHITE, MenuColor, UiText::Size::Compact, ML_DATUM);
   }
@@ -1509,7 +1509,7 @@ bool FilesScreen::appendDirectoryEntry(DirectoryCache &cache, const String &stor
     ? _secretStorage.displayName(decrypted) : decrypted;
   next.storageName = stored;
   if (_secretMode && cache.path == "/" && stored == String(SecretStorage::Directory).substring(1)) {
-    next.name = F("secret");
+    next.name = F("hidden");
   }
   next.directory = directory;
   next.format = directory ? FileFormats::Format::Unknown : FileFormats::fromPath(decrypted);
@@ -1903,7 +1903,7 @@ void FilesScreen::applyRename(const String &newName) {
   if (secretFile) {
     String error;
     if (!_secretStorage.encryptName(newName, targetName, error)) {
-      showMessage(error.length() ? error : String(F("Cannot rename secret file")));
+      showMessage(error.length() ? error : String(F("Cannot rename hidden file")));
       draw();
       return;
     }
@@ -2011,7 +2011,7 @@ void FilesScreen::beginMove() {
     return;
   }
   _operationState = OperationState::MovePreflight;
-  showMessage(_moveOutOfSecret ? F("Preparing decrypted copy...")
+  showMessage(_moveOutOfSecret ? F("Preparing restored copy...")
                                 : (entry->directory ? F("Checking folder...") : F("Checking file...")),
               60000);
   draw();
@@ -2082,9 +2082,9 @@ bool FilesScreen::prepareMoveTarget(const Entry &entry) {
           break;
         }
       }
-      if (!stageAvailable) error = F("Secret staging area is busy");
+      if (!stageAvailable) error = F("Hidden staging area is busy");
       else if (SD.exists(_moveTargetPath.c_str())) {
-        error = entry.directory ? F("Secret folder already exists") : F("Secret file already exists");
+        error = entry.directory ? F("Hidden folder already exists") : F("Hidden file already exists");
       } else {
         _moveStagedPath = _moveStagePath + "/" + encoded;
       }
@@ -2161,9 +2161,9 @@ void FilesScreen::updateMovePreflight() {
   if (_taskIndex >= _taskCount) {
     _taskIndex = 0;
     _operationState = OperationState::MoveCopying;
-    showMessage(_moveOutOfSecret ? F("Decrypting to Documents...")
-                                 : (_moveSourceDirectory ? F("Moving folder to secret...")
-                                                         : F("Moving to secret...")),
+    showMessage(_moveOutOfSecret ? F("Restoring to Documents...")
+                                 : (_moveSourceDirectory ? F("Moving folder to hidden...")
+                                                         : F("Moving to hidden...")),
                 60000);
     return;
   }
@@ -2208,7 +2208,7 @@ void FilesScreen::updateMoveCopy() {
     SpiBusLock::unlock();
     if (!ready) {
       failMove(_moveOutOfSecret ? String(F("Cannot prepare Documents folder"))
-                                 : String(F("Cannot prepare secret storage")));
+                                 : String(F("Cannot prepare hidden storage")));
       return;
     }
     _moveStageCreated = true;
@@ -2219,8 +2219,8 @@ void FilesScreen::updateMoveCopy() {
     const bool written = count <= 0 || _moveTarget.write(_moveBuffer, (size_t)count) == (size_t)count;
     SpiBusLock::unlock();
     if (count < 0 || !written) {
-      failMove(_moveOutOfSecret ? String(F("Decrypted copy write failed"))
-                                 : String(F("Secret move write failed")));
+      failMove(_moveOutOfSecret ? String(F("Restored copy write failed"))
+                                 : String(F("Hidden move write failed")));
       return;
     }
     _moveBytes += count > 0 ? (uint32_t)count : 0;
@@ -2249,7 +2249,7 @@ void FilesScreen::updateMoveCopy() {
     const bool made = _secretStorage.mkdir(task.target);
     SpiBusLock::unlock();
     if (!made) {
-      failMove(F("Cannot create secret folder"));
+      failMove(F("Cannot create hidden folder"));
       return;
     }
     _taskIndex++;
@@ -2260,7 +2260,7 @@ void FilesScreen::updateMoveCopy() {
   _moveTarget = _secretStorage.open(task.target, FILE_WRITE, !_moveOutOfSecret);
   SpiBusLock::unlock();
   if (!_moveSource || !_moveTarget) {
-    failMove(_moveOutOfSecret ? String(F("Cannot open secret file for export"))
+    failMove(_moveOutOfSecret ? String(F("Cannot open hidden file for export"))
                                : String(F("Cannot copy source file")));
   }
 }
@@ -2285,8 +2285,8 @@ void FilesScreen::updateMoveCommit() {
   if (committed) SD.rmdir(_moveStagePath.c_str());
   SpiBusLock::unlock();
   if (!committed) {
-    _operationFailure = _moveOutOfSecret ? String(F("Decrypted copy commit failed"))
-                                         : String(F("Secret move commit failed"));
+    _operationFailure = _moveOutOfSecret ? String(F("Restored copy commit failed"))
+                                         : String(F("Hidden move commit failed"));
     _cacheRelocation.nextPublish = 0;
     _operationState = OperationState::MoveDiscardDestinationCacheTemps;
     return;
@@ -2304,13 +2304,13 @@ void FilesScreen::updateMovePublishCaches() {
   _operationState = OperationState::MoveRemoveSource;
   clearTasks();
   _taskIndex = 0;
-  showMessage(_moveOutOfSecret ? F("Removing encrypted original...") : F("Removing original..."), 60000);
+  showMessage(_moveOutOfSecret ? F("Removing hidden original...") : F("Removing original..."), 60000);
 }
 
 void FilesScreen::updateMoveDiscardDestinationCacheTemps() {
   const MediaCache::Result result = _mediaCache.discardRelocationStep(_cacheRelocation);
   if (result == MediaCache::Result::Busy || result == MediaCache::Result::More) return;
-  failMove(_operationFailure.length() ? _operationFailure : String(F("Secret move commit failed")));
+  failMove(_operationFailure.length() ? _operationFailure : String(F("Hidden move commit failed")));
 }
 
 void FilesScreen::updateRecursiveDelete() {
@@ -2322,15 +2322,15 @@ void FilesScreen::updateRecursiveDelete() {
       const MediaCache::Result cleanup = _mediaCache.cleanupStep(_cacheCleanup);
       if (cleanup == MediaCache::Result::Busy || cleanup == MediaCache::Result::More) return;
       if (cleanup != MediaCache::Result::Complete) {
-        finishOperation(false, _moveOutOfSecret ? String(F("Decrypted copy kept; cache cleanup failed"))
-                                                 : String(F("Secret copy kept; cache cleanup failed")));
+        finishOperation(false, _moveOutOfSecret ? String(F("Restored copy kept; cache cleanup failed"))
+                                                 : String(F("Hidden copy kept; cache cleanup failed")));
         return;
       }
     }
     _moveCachesCleaned = true;
     if (!appendTask(_moveSourcePath, "", _moveSourceDirectory)) {
-      finishOperation(false, _moveOutOfSecret ? String(F("Decrypted copy kept; cleanup ran out of memory"))
-                                               : String(F("Secret copy kept; cleanup ran out of memory")));
+      finishOperation(false, _moveOutOfSecret ? String(F("Restored copy kept; cleanup ran out of memory"))
+                                               : String(F("Hidden copy kept; cleanup ran out of memory")));
       return;
     }
   }
@@ -2338,9 +2338,9 @@ void FilesScreen::updateRecursiveDelete() {
     if (_operationState == OperationState::Deleting) {
       finishOperation(true, F("Deleted"));
     } else if (_operationState == OperationState::MoveCleanupStage) {
-      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Hidden move failed")));
     } else {
-      finishOperation(true, _moveOutOfSecret ? String(F("Moved to Documents")) : String(F("Moved to secret")));
+      finishOperation(true, _moveOutOfSecret ? String(F("Moved to Documents")) : String(F("Moved to hidden")));
     }
     return;
   }
@@ -2351,10 +2351,10 @@ void FilesScreen::updateRecursiveDelete() {
       if (_operationState == OperationState::Deleting) {
         finishOperation(false, F("Delete failed"));
       } else if (_operationState == OperationState::MoveCleanupStage) {
-        finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+        finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Hidden move failed")));
       } else {
-        finishOperation(false, _moveOutOfSecret ? String(F("Decrypted copy kept; source cleanup failed"))
-                                                 : String(F("Secret copy kept; source cleanup failed")));
+        finishOperation(false, _moveOutOfSecret ? String(F("Restored copy kept; source cleanup failed"))
+                                                 : String(F("Hidden copy kept; source cleanup failed")));
       }
     }
     return;
@@ -2363,10 +2363,10 @@ void FilesScreen::updateRecursiveDelete() {
     if (_operationState == OperationState::Deleting) {
       finishOperation(false, F("Delete failed"));
     } else if (_operationState == OperationState::MoveCleanupStage) {
-      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Secret move failed")));
+      finishOperation(false, _operationFailure.length() ? _operationFailure : String(F("Hidden move failed")));
     } else {
-      finishOperation(false, _moveOutOfSecret ? String(F("Decrypted copy kept; source cleanup failed"))
-                                               : String(F("Secret copy kept; source cleanup failed")));
+      finishOperation(false, _moveOutOfSecret ? String(F("Restored copy kept; source cleanup failed"))
+                                               : String(F("Hidden copy kept; source cleanup failed")));
     }
   }
 }

@@ -42,7 +42,7 @@ verification rules. It bounds and serializes each SD write with the shared SPI
 lock, then exposes only a verified, atomically committed path to the Browser
 screen.
 
-Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. HTTPS certificate parsing and RSA working allocations use PSRAM during the handshake so fragmented internal RAM is not required to provide one large BIGNUM block. This allocator policy does not add certificate verification. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
+Transfers use an 8 KiB PSRAM receive buffer, falling back to 512 bytes if allocation fails. HTTPS certificate parsing and RSA working allocations use PSRAM during the handshake so fragmented internal RAM is not required to provide one large BIGNUM block. This allocator policy changes memory placement only. SD download writes and session-page cache I/O use 4 KiB transactions, releasing the shared touch/SD SPI lock and yielding after each transaction. These are tuned defaults, not protocol or hardware chunk limits: servers and TLS commonly expose different boundaries, including 16 KiB records. Serial logs report DNS, connection, first-byte, body, cache/SD-write timing, connection reuse, RSSI, and observed HTTP chunk counts/largest sizes.
 
 Browser workers and transport storage are scoped to an open Browser session.
 Page and preview workers start lazily; closing Browser invalidates active work,
@@ -53,7 +53,7 @@ storage, and unloads the in-memory copy of durable browser state. Navigator's
 
 To retune on a physical device, compare 1/2/4/8 KiB receive buffers with 512-byte SD writes, then compare 512 B, 1/2/4/8 KiB SD writes using the fastest receive size. Run each candidate three times over controlled fixed-length and chunked HTTPS media responses, then keep the fastest median that completes ten cancel/retry cycles without corruption or missed touch input.
 
-TLS certificate validation is deliberately disabled for compatibility. Do not use the browser for private information or sensitive accounts.
+HTTPS validates the server certificate chain and hostname against the full Mozilla root bundle that ESP-IDF's mbedTLS links into every Arduino-ESP32 image, the same trust store as the SDK 6 `HttpClient`. The bundle is attached before every handshake, including the resolved-address retry, because `stop()` clears it. Certificate validity periods need a real clock, so HTTPS fails with `Clock not set` until SNTP has synchronized after Wi-Fi connects; plain HTTP is unaffected. A handshake that fails after TCP connects reports `Secure connection failed`, which covers untrusted, expired, or mismatched certificates and servers that require TLS features mbedTLS lacks. There is no per-site override. Validation does not make the Browser a secure client: cookies, recents, favorites, and cached pages stay in plaintext on the SD card, so do not use it for sensitive accounts.
 
 The internal `BrowserTransport` component owns the complete HTTP protocol
 transfer, including the private HTTP and HTTPS clients, serialization of

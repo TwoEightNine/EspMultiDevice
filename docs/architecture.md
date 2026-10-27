@@ -167,8 +167,8 @@ Browser transport allocates one bounded receive buffer in PSRAM and falls back
 to a 512-byte internal allocation only when necessary. The serialized transport
 is its sole user. HTTPS handshake certificate/RSA/parser allocations also use
 PSRAM through the shared scoped mbedTLS allocator; this changes allocation
-placement only and does not change the Browser's insecure compatibility trust
-policy. Download and session-page-cache operations take the shared
+placement only and does not change the Browser's trust policy, which validates
+every HTTPS server against the core's linked Mozilla root bundle. Download and session-page-cache operations take the shared
 SPI lock only for bounded 4 KiB SD transactions, release it, and yield.
 `BrowserTransport::closeWhenIdle()` is UI-safe: it closes an idle connection
 immediately or asks the serialized worker to close after cancellation, so the

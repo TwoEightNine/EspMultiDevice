@@ -184,7 +184,7 @@ void HomeScreen::tick(uint32_t nowMs) {
     if (inside && nowMs - _gestureStartedMs >= 1000) {
       _filesHoldTriggered = true;
       _gestureCancelled = true;
-      _navigator.push(ScreenId::TextInput, ScreenData::pinInput("Secret PIN"));
+      _navigator.push(ScreenId::TextInput, ScreenData::pinInput("Hidden files PIN"));
       return;
     }
   }

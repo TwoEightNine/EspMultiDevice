@@ -4,6 +4,7 @@
 #include <esp32-hal-psram.h>
 #include <esp_heap_caps.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "BrowserDownloadStore.h"
 #include "BrowserLimits.h"
@@ -11,7 +12,21 @@
 #include "../../services/network/TlsMemoryScope.h"
 #include "../../services/network/WiFiController.h"
 
+// The full Mozilla root bundle that ESP-IDF's mbedTLS component links into
+// every Arduino-ESP32 3.x image.
+extern const uint8_t x509CertificateBundleStart[] asm("_binary_x509_crt_bundle_start");
+extern const uint8_t x509CertificateBundleEnd[] asm("_binary_x509_crt_bundle_end");
+
 namespace {
+constexpr time_t ValidClockEpoch = 1609459200;  // 2021-01-01
+
+// stop() clears the SSL context, including the bundle hook, so attach the
+// linked root bundle before every handshake.
+void attachRootBundle(WiFiClientSecure &client) {
+  client.setCACertBundle(x509CertificateBundleStart,
+                         static_cast<size_t>(x509CertificateBundleEnd - x509CertificateBundleStart));
+}
+
 void browserLog(const __FlashStringHelper *message) {
   Serial.print(F("[Browser] "));
   Serial.println(message);
@@ -363,17 +378,22 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
   browserLog(String(reusedConnection ? F("reusing: ") : F("connecting: ")) + url.scheme +
              F("://") + url.host + F(":") + String(url.port));
   if (!reusedConnection) {
+    // Certificate validity periods cannot be checked before SNTP sets the clock.
+    if (url.scheme == "https" && time(nullptr) < ValidClockEpoch) {
+      browserLog(String(F("HTTPS blocked until the clock is set: host=")) + url.host);
+      error = "Clock not set";
+      return false;
+    }
     // Certificate parsing and RSA public-key operations need a larger
     // contiguous working set than internal RAM can reliably provide after
     // other screen workers have started. This changes only allocation
-    // placement; the Browser's documented compatibility trust policy stays
-    // independent from the Assistant's verified TLS policy.
+    // placement, not the trust policy.
     TlsMemoryScope tlsMemory(url.scheme == "https");
     stopClients();
     clearConnection();
     client = &_plainClient;
     if (url.scheme == "https") {
-      _secureClient.setInsecure();
+      attachRootBundle(_secureClient);
       _secureClient.setHandshakeTimeout(BrowserLimits::ConnectTimeoutMs / 1000);
       client = &_secureClient;
     }
@@ -405,6 +425,7 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
     _plainClient.stop();
     if (rawTcpState == "connected") {
       _secureClient.stop();
+      attachRootBundle(_secureClient);
       _secureClient.setHandshakeTimeout(BrowserLimits::TlsRetryHandshakeTimeoutSeconds);
       browserLog(String(F("HTTPS retrying resolved address: host=")) + url.host + F(", address=") +
                  resolvedAddress.toString() + F(", handshakeTimeoutSeconds=") +
@@ -430,7 +451,9 @@ bool BrowserTransport::requestOne(const Browser::Url &url, Browser::HttpMethod m
                String(tlsError) + F(", tlsDetail=") + tlsErrorText + F(", retryConnectMs=") +
                String(retryConnectElapsedMs) + F(", rawTcp=") + rawTcpState + F(", ") +
                clientState(*client));
-    error = observer.cancelled() ? "Loading cancelled" : "Connection failed";
+    if (observer.cancelled()) error = "Loading cancelled";
+    else if (rawTcpState == "connected") error = "Secure connection failed";
+    else error = "Connection failed";
     return false;
   }
   browserLog(String(F("connection ready: reused=no, connectMs=")) +

@@ -42,7 +42,7 @@ Firmware upload and 115200-baud Serial output stay on the board's USB-to-UART co
 
 The first upload after changing from the old 3 MB/9.9 MB FATFS scheme must flash the new partition table. Preferences/NVS remains at the same offset and is compatible. Contents of the old, now-unused internal FATFS region are not preserved; ESP Media user media remains on SD.
 
-The project vendors its remaining decoders and Stage 0 assistant dependencies under `third_party/`; they compile through controlled wrappers in `src/vendor_shims/`. Do not add those upstream source trees directly to the Arduino library search path.
+The project vendors its remaining decoders and the Assistant's Opus codec under `third_party/`; they compile through controlled wrappers in `src/vendor_shims/`. Do not add those upstream source trees directly to the Arduino library search path.
 
 ## Project layout
 
@@ -111,4 +111,12 @@ for the parts of the Helix AAC decoder used as well as that of the
 covered work.
 ```
 
-The full license text is in [LICENSE](LICENSE). Bundled code under `third_party/` and the generated fonts keep their own licenses; see [docs/development.md](docs/development.md#bundled-dependencies).
+The full license text is in [LICENSE](LICENSE). Bundled code under `third_party/`, the generated fonts, and the linked Arduino libraries keep their own licenses; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists them and the notice files that must accompany a source or binary distribution.
+
+### Patents
+
+Some supported media formats, such as H.264 and AAC, may be covered by patents in some countries, and the bundled H.264 decoder's license explicitly grants no patent rights. This rarely matters for sharing source code. If you build and distribute devices running this firmware, check whether you need codec patent licenses.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for the firmware's known security limits.

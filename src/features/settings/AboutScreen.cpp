@@ -41,14 +41,16 @@ void AboutScreen::draw() {
   tft.fillScreen(TFT_BLACK);
   UiKit::drawTopAppBar(tft, width, F("About"));
 
-  // The version sits at the bottom; the repository block is centered in the
-  // space between the app bar and the version line.
-  const int16_t versionLine = UiText::lineHeight(UiText::Size::Content);
-  const int16_t versionY = _display.height() - UiKit::ContentPadding - versionLine;
+  // The GPL notice and version sit at the bottom; the repository block is
+  // centered in the space between the app bar and the notice.
+  const int16_t contentLine = UiText::lineHeight(UiText::Size::Content);
+  const int16_t versionY = _display.height() - UiKit::ContentPadding - contentLine;
+  const int16_t licenseY = versionY - contentLine;
+  const int16_t copyrightY = licenseY - contentLine;
   const int16_t titleLine = UiText::lineHeight(UiText::Size::Title);
   const int16_t blockHeight = titleLine + LogoGap + UiKit::LogoHeight + LogoGap + titleLine;
   const int16_t blockY = UiKit::AppBarHeight +
-                         (versionY - UiKit::AppBarHeight - blockHeight) / 2;
+                         (copyrightY - UiKit::AppBarHeight - blockHeight) / 2;
   const int16_t logoY = blockY + titleLine + LogoGap;
 
   UiText::draw(tft, F("github.com/"), centerX, blockY, TFT_WHITE, TFT_BLACK,
@@ -57,6 +59,11 @@ void AboutScreen::draw() {
                   TFT_BLACK);
   UiText::draw(tft, F("/EspMultiDevice"), centerX, logoY + UiKit::LogoHeight + LogoGap,
                TFT_WHITE, TFT_BLACK, UiText::Size::Title, TC_DATUM);
+
+  UiText::draw(tft, F("Copyright 2026 TwoEightNine"), centerX, copyrightY, TFT_WHITE,
+               TFT_BLACK, UiText::Size::Content, TC_DATUM);
+  UiText::draw(tft, F("GPL-3.0+, no warranty"), centerX, licenseY, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Content, TC_DATUM);
 
   String version = F("Version: ");
   version += FirmwareVersion::Text;

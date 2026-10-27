@@ -12,9 +12,9 @@ Files keeps an LRU of up to eight directories during one Files-screen visit. Lis
 
 The bottom pager has Previous, Page, and Next controls. Ordinary files and folders have a three-dot menu: Rename opens the keyboard with its complete name, and Delete requires a one-second hold. Folder deletion is recursive.
 
-Holding the Home Files tile for one second opens a four-digit PIN input. The PIN selects the first byte of `/.configs/index`, a randomly generated 10,000-byte key file created only if absent. Names are hex-armored for FAT compatibility and names/source/cache bytes are XOR transformed. In normal folders, secret mode adds **Move to secret**; folder moves use a hidden staging directory before source removal. A single-file move prepares its published media sidecars in the destination cache directory with the destination's encryption mode and fingerprints them from the staged file, then publishes them after the primary file, so cache hits survive the move; an unavailable or failed sidecar is discarded without preventing the file move. Non-directory entries inside `/.configs` expose Rename, hold-to-delete, and **Move out of secret** actions; moving out writes a fully decrypted plaintext copy to `/Documents` through a hidden staging directory, auto-renaming collisions as `name (1).ext`, then removes the encrypted source only after commit. Secret folders remain browse-only.
+Holding the Home Files tile for one second opens a four-digit PIN input. The PIN selects the first byte of `/.configs/index`, a randomly generated 10,000-byte key file created only if absent. Names are hex-armored for FAT compatibility and names/source/cache bytes are XOR transformed. The UI calls this area *hidden files* (`SecretStorage` in code): the PIN prompt is titled **Hidden files PIN** and its root is listed as `hidden`. In normal folders, hidden mode adds **Move to hidden**; folder moves use a hidden staging directory before source removal. A single-file move prepares its published media sidecars in the destination cache directory with the destination's encryption mode and fingerprints them from the staged file, then publishes them after the primary file, so cache hits survive the move; an unavailable or failed sidecar is discarded without preventing the file move. Non-directory entries inside `/.configs` expose Rename, hold-to-delete, and **Move out of hidden** actions; moving out writes a fully restored plaintext copy to `/Documents` through a hidden staging directory, auto-renaming collisions as `name (1).ext`, then removes the obscured source only after commit. Hidden folders remain browse-only.
 
-This is intentional lightweight obfuscation, not authenticated encryption or secure password protection. An incorrect PIN opens unusable names/content. `SecretStorage` never overwrites a malformed existing key, and it locks whenever the SD card unmounts.
+This is intentional lightweight obfuscation, not authenticated encryption or secure password protection, which is why the UI avoids the words secret, encrypted, and decrypted. An incorrect PIN opens unusable names/content. `SecretStorage` never overwrites a malformed existing key, and it locks whenever the SD card unmounts.
 
 Files hides common macOS bookkeeping entries (`._*`, `.DS_Store`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, and `.DocumentRevisions-V100`) without deleting them. They can still exist on the card and remain visible when Finder is configured to show hidden files.
 
@@ -60,9 +60,8 @@ The test reuses an 8 KiB PSRAM buffer, falls back to 1 KiB of internal RAM,
 overwrites it with zeroes before upload, and runs blocking network work on a
 screen-owned opposite-core task. Closing the screen cancels by generation and
 waits for the task and TLS client to stop.
-The Cloudflare connection uses the same compatibility-mode unverified HTTPS
-policy as Browser because it sends only synthetic bytes and no credentials or
-user data. This does not make the measurement trustworthy against an active
+The Cloudflare connection skips certificate validation because it sends only
+synthetic bytes and no credentials or user data. This does not make the measurement trustworthy against an active
 network interceptor: interception can falsify the displayed result.
 
 The SD option reuses `SdCardController`'s verified throughput benchmark on a
@@ -244,8 +243,8 @@ reference-counts the process-global allocator hook, places temporary
 certificate/RSA/parser allocations in PSRAM with the ESP allocator as a
 fallback, and restores the platform hook after the final overlapping scope.
 It changes memory placement, never trust policy: `SecureWebSocketClient` still
-requires a trust store and never uses the Browser's insecure HTTPS
-compatibility behavior.
+requires a project-supplied trust store rather than the Browser's general
+Mozilla root bundle.
 
 The Stage 0 `OpusCodec` adapter encodes only mono 16 kHz PCM in exact 60 ms (960-sample) frames. Its decoder is initialized explicitly for 16 or 24 kHz, with maximum output of 960 or 1,440 samples respectively. Codec state lives in PSRAM. This dependency foundation does not capture, stream, or play audio in normal firmware; a future assistant must continue to arbitrate the shared BCLK and WS lines half-duplex through the microphone and speaker controllers.
 

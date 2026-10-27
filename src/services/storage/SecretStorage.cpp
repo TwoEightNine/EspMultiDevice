@@ -109,18 +109,18 @@ void SecretStorage::lock() {
 
 bool SecretStorage::loadIndex(String &error) {
   error = "";
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { error = F("Secret storage busy"); return false; }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { error = F("Hidden storage busy"); return false; }
   fs::File file = SD.open(IndexPath, FILE_READ);
   const bool valid = file && file.size() == KeyBytes && file.read(_key, KeyBytes) == KeyBytes;
   if (file) file.close();
   SpiBusLock::unlock();
-  if (!valid) { memset(_key, 0, sizeof(_key)); error = F("Secret key is invalid"); }
+  if (!valid) { memset(_key, 0, sizeof(_key)); error = F("Hidden storage key is invalid"); }
   return valid;
 }
 
 bool SecretStorage::createIndex(String &error) {
   error = "";
-  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { error = F("Secret storage busy"); return false; }
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(100))) { error = F("Hidden storage busy"); return false; }
   bool ready = (SD.exists(Directory) || SD.mkdir(Directory));
   const String temporary = String(IndexPath) + F(".tmp");
   if (ready) SD.remove(temporary.c_str());
@@ -136,7 +136,7 @@ bool SecretStorage::createIndex(String &error) {
   if (written) written = SD.rename(temporary.c_str(), IndexPath);
   if (!written) SD.remove(temporary.c_str());
   SpiBusLock::unlock();
-  if (!written) error = F("Cannot create secret key");
+  if (!written) error = F("Cannot create hidden storage key");
   return written;
 }
 
@@ -153,8 +153,8 @@ bool SecretStorage::mkdir(const String &path) const { return SD.exists(path.c_st
 bool SecretStorage::encryptName(const String &plain, String &encoded, String &error) const {
   encoded = "";
   error = "";
-  if (!_unlocked) { error = F("Secret storage is locked"); return false; }
-  if (plain.length() == 0 || plain.length() > 127) { error = F("File name is too long for secret storage"); return false; }
+  if (!_unlocked) { error = F("Hidden storage is locked"); return false; }
+  if (plain.length() == 0 || plain.length() > 127) { error = F("File name is too long for hidden storage"); return false; }
   encoded.reserve(plain.length() * 2);
   for (uint16_t i = 0; i < plain.length(); i++) {
     const uint8_t value = (uint8_t)plain[i] ^ _key[(_pin + i) % KeyBytes];
