@@ -23,7 +23,7 @@
 #include "get_bits.h"
 #include "mpegvideo.h"
 #include "vlc.h"
-#include "libavutil/mem_internal.h"
+#include "../libavutil/mem_internal.h"
 
 // The defines below define the number of bits that are read at once for
 // reading vlc values. Changing these may improve speed and data cache needs

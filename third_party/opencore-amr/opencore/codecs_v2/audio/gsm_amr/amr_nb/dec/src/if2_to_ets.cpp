@@ -37,9 +37,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "frame_type_3gpp.h"
+#include "../../common/include/frame_type_3gpp.h"
 #include "if2_to_ets.h"
-#include "typedef.h"
+#include "../../common/include/typedef.h"
 /*----------------------------------------------------------------------------
 ; MACROS
 ; Define module specific macros here

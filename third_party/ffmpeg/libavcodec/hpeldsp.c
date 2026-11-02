@@ -27,8 +27,8 @@
  * Half-pel DSP functions.
  */
 
-#include "libavutil/attributes.h"
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/intreadwrite.h"
 #include "hpeldsp.h"
 
 #define BIT_DEPTH 8

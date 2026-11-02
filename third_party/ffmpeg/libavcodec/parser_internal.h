@@ -21,7 +21,7 @@
 
 #include <stdint.h>
 
-#include "libavutil/macros.h"
+#include "../libavutil/macros.h"
 #include "avcodec.h"
 
 typedef struct FFCodecParser {

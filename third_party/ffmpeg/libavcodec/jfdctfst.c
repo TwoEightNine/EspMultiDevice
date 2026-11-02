@@ -67,7 +67,7 @@
  */
 
 #include <stdint.h>
-#include "libavutil/attributes.h"
+#include "../libavutil/attributes.h"
 #include "fdctdsp.h"
 
 #define DCTSIZE 8

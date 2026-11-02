@@ -29,12 +29,12 @@
 
 #include <inttypes.h>
 
-#include "libavutil/attributes.h"
-#include "libavutil/avconfig.h"
-#include "libavutil/bprint.h"
-#include "libavutil/display.h"
-#include "libavutil/intreadwrite.h"
-#include "libavutil/mem.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/avconfig.h"
+#include "../libavutil/bprint.h"
+#include "../libavutil/display.h"
+#include "../libavutil/intreadwrite.h"
+#include "../libavutil/mem.h"
 
 #include "bytestream.h"
 #include "exif_internal.h"

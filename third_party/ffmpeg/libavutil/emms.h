@@ -23,14 +23,14 @@
 #include <stdlib.h>
 
 #include "config.h"
-#include "libavutil/attributes.h"
-#include "libavutil/log.h"
+#include "attributes.h"
+#include "log.h"
 
 #if ARCH_X86
 
 #if HAVE_MMX_INLINE
 #ifndef __MMX__
-#include "libavutil/cpu.h"
+#include "cpu.h"
 #endif
 
 #   define emms_c emms_c

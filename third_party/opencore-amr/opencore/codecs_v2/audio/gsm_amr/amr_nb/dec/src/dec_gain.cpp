@@ -43,15 +43,15 @@ terms listed above has been obtained from the copyright holder.
 ----------------------------------------------------------------------------*/
 
 #include "dec_gain.h"
-#include "typedef.h"
-#include "mode.h"
-#include "cnst.h"
-#include "pow2.h"
-#include "log2.h"
-#include "gc_pred.h"
-#include "basic_op.h"
-#include "qua_gain_tbl.h"
-#include "qgain475_tab.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/mode.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/pow2.h"
+#include "../../common/include/log2.h"
+#include "../../common/include/gc_pred.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/qua_gain_tbl.h"
+#include "../../common/include/qgain475_tab.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

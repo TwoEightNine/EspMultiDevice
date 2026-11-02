@@ -51,10 +51,10 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "typedef.h"
-#include    "mode.h"
-#include    "frame_type_3gpp.h"
-#include    "pvamrnbdecoder_api.h"
+#include    "../../common/include/typedef.h"
+#include    "../../common/include/mode.h"
+#include    "../../common/include/frame_type_3gpp.h"
+#include    "../include/pvamrnbdecoder_api.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

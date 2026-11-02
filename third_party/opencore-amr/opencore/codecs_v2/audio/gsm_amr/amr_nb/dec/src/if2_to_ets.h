@@ -51,9 +51,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "frame_type_3gpp.h"
-#include "typedef.h"
-#include "get_const_tbls.h"
+#include "../../common/include/frame_type_3gpp.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/get_const_tbls.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

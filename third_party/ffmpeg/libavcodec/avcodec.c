@@ -26,16 +26,16 @@
 #include <assert.h>
 
 #include "config.h"
-#include "libavutil/avassert.h"
-#include "libavutil/avstring.h"
-#include "libavutil/bprint.h"
-#include "libavutil/channel_layout.h"
-#include "libavutil/common.h"
-#include "libavutil/emms.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/mem.h"
-#include "libavutil/opt.h"
-#include "libavutil/thread.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/avstring.h"
+#include "../libavutil/bprint.h"
+#include "../libavutil/channel_layout.h"
+#include "../libavutil/common.h"
+#include "../libavutil/emms.h"
+#include "../libavutil/imgutils.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/opt.h"
+#include "../libavutil/thread.h"
 #include "avcodec.h"
 #include "avcodec_internal.h"
 #include "bsf.h"
@@ -45,7 +45,7 @@
 #include "frame_thread_encoder.h"
 #include "hwconfig.h"
 #include "internal.h"
-#include "libavutil/refstruct.h"
+#include "../libavutil/refstruct.h"
 
 /**
  * Maximum size in bytes of extradata.

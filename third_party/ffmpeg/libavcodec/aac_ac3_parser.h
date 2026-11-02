@@ -24,7 +24,7 @@
 #define AVCODEC_AAC_AC3_PARSER_H
 
 #include <stdint.h>
-#include "libavutil/crc.h"
+#include "../libavutil/crc.h"
 #include "avcodec.h"
 #include "parser.h"
 

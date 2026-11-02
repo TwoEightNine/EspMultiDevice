@@ -48,8 +48,8 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 
-#include "gsm_amr_typedefs.h"
-#include "pvamrnbdecoder_api.h"
+#include "../../common/include/gsm_amr_typedefs.h"
+#include "../include/pvamrnbdecoder_api.h"
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus
 extern "C"

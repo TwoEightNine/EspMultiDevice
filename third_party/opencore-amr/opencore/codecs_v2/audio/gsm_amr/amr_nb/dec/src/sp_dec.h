@@ -49,12 +49,12 @@ terms listed above has been obtained from the copyright holder.
 *                         INCLUDE FILES
 *****************************************************************************
 */
-#include "typedef.h"
-#include "cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
 #include "dec_amr.h"
 #include "pstfilt.h"
 #include "post_pro.h"
-#include "mode.h"
+#include "../../common/include/mode.h"
 
 /*
 *****************************************************************************

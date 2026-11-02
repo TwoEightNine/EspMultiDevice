@@ -23,7 +23,7 @@
 
 #include <stdint.h>
 
-#include "libavutil/frame.h"
+#include "../libavutil/frame.h"
 
 #include "avcodec.h"
 

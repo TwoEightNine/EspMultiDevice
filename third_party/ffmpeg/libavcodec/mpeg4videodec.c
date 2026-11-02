@@ -24,11 +24,11 @@
 
 #include "config_components.h"
 
-#include "libavutil/avassert.h"
-#include "libavutil/internal.h"
-#include "libavutil/mem.h"
-#include "libavutil/opt.h"
-#include "libavutil/thread.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/opt.h"
+#include "../libavutil/thread.h"
 #include "codec_internal.h"
 #include "error_resilience.h"
 #include "hwconfig.h"

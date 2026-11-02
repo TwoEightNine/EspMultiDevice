@@ -21,12 +21,12 @@
 
 #include <string.h>
 
-#include "libavutil/avassert.h"
-#include "libavutil/avutil.h"
-#include "libavutil/container_fifo.h"
-#include "libavutil/mathematics.h"
-#include "libavutil/mem.h"
-#include "libavutil/rational.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/avutil.h"
+#include "../libavutil/container_fifo.h"
+#include "../libavutil/mathematics.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/rational.h"
 
 #include "defs.h"
 #include "packet.h"

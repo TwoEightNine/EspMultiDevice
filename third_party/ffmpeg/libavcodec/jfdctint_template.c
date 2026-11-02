@@ -59,7 +59,7 @@
  * Independent JPEG Group's slow & accurate dct.
  */
 
-#include "libavutil/common.h"
+#include "../libavutil/common.h"
 #include "fdctdsp.h"
 
 #include "bit_depth_template.c"

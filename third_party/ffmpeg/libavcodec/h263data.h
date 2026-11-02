@@ -31,7 +31,7 @@
 
 #include <stdint.h>
 
-#include "libavutil/rational.h"
+#include "../libavutil/rational.h"
 
 #include "rl.h"
 

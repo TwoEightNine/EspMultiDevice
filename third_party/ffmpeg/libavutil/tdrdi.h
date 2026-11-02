@@ -28,7 +28,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/avassert.h"
+#include "avassert.h"
 
 /**
  * @defgroup lavu_video_3d_reference_displays_info 3D Reference Displays Information

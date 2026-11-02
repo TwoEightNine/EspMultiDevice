@@ -40,11 +40,11 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "int_lpc.h"
-#include "typedef.h"
-#include "cnst.h"
-#include "lsp_az.h"
-#include "basic_op.h"
+#include "../include/int_lpc.h"
+#include "../include/typedef.h"
+#include "../include/cnst.h"
+#include "../include/lsp_az.h"
+#include "../include/basic_op.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

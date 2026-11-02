@@ -35,9 +35,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "gmed_n.h"
-#include    "typedef.h"
-#include    "oscl_mem.h"
+#include    "../include/gmed_n.h"
+#include    "../include/typedef.h"
+#include    "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

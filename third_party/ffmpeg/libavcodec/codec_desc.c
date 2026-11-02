@@ -22,8 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "libavutil/internal.h"
-#include "libavutil/macros.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/macros.h"
 
 #include "codec_id.h"
 #include "codec_desc.h"

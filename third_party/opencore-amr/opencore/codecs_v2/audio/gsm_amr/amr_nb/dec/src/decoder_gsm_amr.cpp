@@ -26,16 +26,16 @@ Portions of this file are derived from the following 3GPP standard:
 Permission to distribute, modify and use this file under the standard license
 terms listed above has been obtained from the copyright holder.
 ****************************************************************************************/
-#include "decoder_gsm_amr.h"
+#include "../include/decoder_gsm_amr.h"
 #include "sp_dec.h"
 #include "amrdecode.h"
-#include "pvamrnbdecoder_api.h"
+#include "../include/pvamrnbdecoder_api.h"
 
 // Use default DLL entry point
 #include "oscl_dll.h"
 #include "oscl_error_codes.h"
 #include "oscl_exception.h"
-#include "oscl_mem.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 #define KCAI_CODEC_INIT_FAILURE -1
 

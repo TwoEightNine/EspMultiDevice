@@ -42,7 +42,7 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "get_const_tbls.h"
+#include "../include/get_const_tbls.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

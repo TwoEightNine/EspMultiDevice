@@ -30,7 +30,7 @@ terms listed above has been obtained from the copyright holder.
 #ifndef __PVGSMAMRDECODER_H
 #define __PVGSMAMRDECODER_H
 
-#include "oscl_base.h"
+#include "../../../../../../../oscl/oscl_base.h"
 
 #include "gsmamr_dec.h"
 #include "gsmamrdpidecoder.h"

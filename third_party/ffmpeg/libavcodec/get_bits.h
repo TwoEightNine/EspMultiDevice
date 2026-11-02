@@ -28,9 +28,9 @@
 
 #include <stdint.h>
 
-#include "libavutil/common.h"
-#include "libavutil/intreadwrite.h"
-#include "libavutil/avassert.h"
+#include "../libavutil/common.h"
+#include "../libavutil/intreadwrite.h"
+#include "../libavutil/avassert.h"
 
 #include "defs.h"
 #include "mathops.h"

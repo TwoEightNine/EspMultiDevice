@@ -23,7 +23,7 @@
 #define AVCODEC_RAW_PIX_FMT_TAGS_H
 
 #include "raw.h"
-#include "libavutil/macros.h"
+#include "../libavutil/macros.h"
 
 static const PixelFormatTag raw_pix_fmt_tags[] = {
     { AV_PIX_FMT_YUV420P,         MKTAG('I', '4', '2', '0') }, /* Planar formats */

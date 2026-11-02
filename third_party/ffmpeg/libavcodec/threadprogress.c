@@ -23,8 +23,8 @@
 
 #include "pthread_internal.h"
 #include "threadprogress.h"
-#include "libavutil/attributes.h"
-#include "libavutil/thread.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/thread.h"
 
 DEFINE_OFFSET_ARRAY(ThreadProgress, thread_progress, init,
                     (offsetof(ThreadProgress, progress_mutex)),

@@ -74,7 +74,11 @@ covering only the area below the status bar and above the page dots. Horizontal
 dragging moves a viewport through that strip, while the dots interpolate the
 visible page position. Release advances one non-wrapping page after 48 px or a
 650 px/s flick and otherwise settles back with a bounded cubic ease-out;
-outward edge motion is reduced to one third. Home retains the strip and the
+outward edge motion is reduced to one third. A press that begins on a tile
+remains a tap while it stays inside that tile and becomes a page drag only
+after 48 px of horizontal travel, so resistive-panel jitter on the outer
+columns cannot steal the tap; the viewport then starts moving from that point
+rather than jumping. Presses outside tiles start dragging after 24 px. Home retains the strip and the
 last composed viewport while another screen covers it, then restores that
 cached viewport without rerasterizing its circles and icons. The buffers are
 released only when Home's stack entry is permanently released. Each displayed

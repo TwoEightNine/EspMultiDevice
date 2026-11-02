@@ -25,8 +25,8 @@
  * @author Thilo Borgmann <thilo.borgmann _at_ mail.de>
  */
 
-#include "libavutil/bprint.h"
-#include "libavutil/mem.h"
+#include "../libavutil/bprint.h"
+#include "../libavutil/mem.h"
 #include "tiff_common.h"
 
 

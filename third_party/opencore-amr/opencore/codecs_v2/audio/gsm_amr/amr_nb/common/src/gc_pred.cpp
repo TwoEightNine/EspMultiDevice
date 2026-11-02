@@ -46,11 +46,11 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "gc_pred.h"
-#include "basicop_malloc.h"
-#include "basic_op.h"
-#include "cnst.h"
-#include "log2.h"
+#include "../include/gc_pred.h"
+#include "../include/basicop_malloc.h"
+#include "../include/basic_op.h"
+#include "../include/cnst.h"
+#include "../include/log2.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

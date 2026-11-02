@@ -25,8 +25,8 @@
  */
 
 #include "avcodec.h"
-#include "libavutil/pixdesc.h"
-#include "libavutil/pixfmt.h"
+#include "../libavutil/pixdesc.h"
+#include "../libavutil/pixfmt.h"
 
 enum AVPixelFormat avcodec_find_best_pix_fmt_of_list(const enum AVPixelFormat *pix_fmt_list,
                                             enum AVPixelFormat src_pix_fmt,

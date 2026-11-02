@@ -87,13 +87,13 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "d_plsf.h"
-#include "typedef.h"
-#include "basic_op.h"
-#include "lsp_lsf.h"
-#include "reorder.h"
-#include "oscl_mem.h"
-#include "q_plsf_3_tbl.h"
+#include "../../common/include/d_plsf.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/lsp_lsf.h"
+#include "../../common/include/reorder.h"
+#include "../../../../../../../oscl/oscl_mem.h"
+#include "../../common/include/q_plsf_3_tbl.h"
 
 
 /*----------------------------------------------------------------------------

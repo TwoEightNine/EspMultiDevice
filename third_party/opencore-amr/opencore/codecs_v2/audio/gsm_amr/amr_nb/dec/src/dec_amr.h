@@ -51,19 +51,19 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "cnst.h"
-#include "mode.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/mode.h"
 #include "dtx_dec.h"
-#include "d_plsf.h"
-#include "gc_pred.h"
+#include "../../common/include/d_plsf.h"
+#include "../../common/include/gc_pred.h"
 #include "ec_gains.h"
 #include "ph_disp.h"
 #include "c_g_aver.h"
 #include "bgnscd.h"
 #include "lsp_avg.h"
-#include "frame.h"
-#include "get_const_tbls.h"
+#include "../../common/include/frame.h"
+#include "../../common/include/get_const_tbls.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

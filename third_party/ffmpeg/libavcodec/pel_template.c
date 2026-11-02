@@ -19,7 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/intreadwrite.h"
 #include "pixels.h"
 #include "rnd_avg.h"
 

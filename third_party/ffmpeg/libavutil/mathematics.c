@@ -28,8 +28,8 @@
 
 #include "avutil.h"
 #include "mathematics.h"
-#include "libavutil/intmath.h"
-#include "libavutil/common.h"
+#include "intmath.h"
+#include "common.h"
 #include "avassert.h"
 
 /* Stein's binary GCD algorithm:

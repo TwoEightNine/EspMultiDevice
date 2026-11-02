@@ -26,7 +26,7 @@
 #include <stdint.h>
 
 #include "avcodec.h"
-#include "libavutil/refstruct.h"
+#include "../libavutil/refstruct.h"
 
 #define HWACCEL_CAP_ASYNC_SAFE      (1 << 0)
 #define HWACCEL_CAP_THREAD_SAFE     (1 << 1)

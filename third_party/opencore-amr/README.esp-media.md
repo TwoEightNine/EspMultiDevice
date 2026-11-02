@@ -6,6 +6,9 @@ This directory vendors the decoder-only AMR-NB source subset from OpenCORE AMR
 
 It is used only for 3GP/MP4 `samr` tracks (8 kHz mono AMR-NB).  AMR-NB
 encoding and AMR-WB are excluded.  `OpenCoreAmr_*.c` and `OpenCoreAmr_api.c`
-are build wrappers; the upstream source and Apache-2.0 notice are retained in
-this directory.  The root-level header symlinks expose the dependency headers
-to Arduino's sketch-only include search.
+in `src/vendor_shims/opencore_amr/` are build wrappers; the upstream source and
+Apache-2.0 notice are retained in this directory.  Quoted includes of headers in
+other directories of the tree are rewritten relative to the including file by
+`tools/localize_vendor_includes.py`, because Arduino offers no per-project
+include paths.  This include-path-only patch changes no declarations,
+definitions, or behavior.

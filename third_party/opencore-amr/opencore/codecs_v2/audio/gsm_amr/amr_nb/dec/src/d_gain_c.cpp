@@ -86,17 +86,17 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "d_gain_c.h"
-#include "typedef.h"
-#include "mode.h"
+#include "../../common/include/d_gain_c.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/mode.h"
 
-#include "oper_32b.h"
-#include "cnst.h"
-#include "log2.h"
-#include "pow2.h"
-#include "gc_pred.h"
+#include "../../common/include/oper_32b.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/log2.h"
+#include "../../common/include/pow2.h"
+#include "../../common/include/gc_pred.h"
 
-#include "basic_op.h"
+#include "../../common/include/basic_op.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

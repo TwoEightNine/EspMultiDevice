@@ -49,10 +49,10 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "gc_pred.h"
-#include "mode.h"
-#include "get_const_tbls.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/gc_pred.h"
+#include "../../common/include/mode.h"
+#include "../../common/include/get_const_tbls.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

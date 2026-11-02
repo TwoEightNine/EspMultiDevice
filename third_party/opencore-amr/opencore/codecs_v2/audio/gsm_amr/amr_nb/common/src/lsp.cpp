@@ -40,13 +40,13 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "lsp.h"
-#include "typedef.h"
-#include "q_plsf.h"
-#include "az_lsp.h"
-#include "int_lpc.h"
-#include "lsp_tab.h"
-#include "oscl_mem.h"
+#include "../include/lsp.h"
+#include "../include/typedef.h"
+#include "../include/q_plsf.h"
+#include "../include/az_lsp.h"
+#include "../include/int_lpc.h"
+#include "../include/lsp_tab.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

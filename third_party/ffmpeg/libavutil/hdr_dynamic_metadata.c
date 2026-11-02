@@ -21,9 +21,9 @@
 #include "avassert.h"
 #include "hdr_dynamic_metadata.h"
 #include "mem.h"
-#include "libavcodec/defs.h"
-#include "libavcodec/get_bits.h"
-#include "libavcodec/put_bits.h"
+#include "../libavcodec/defs.h"
+#include "../libavcodec/get_bits.h"
+#include "../libavcodec/put_bits.h"
 
 static const int64_t luminance_den = 1;
 static const int32_t peak_luminance_den = 15;

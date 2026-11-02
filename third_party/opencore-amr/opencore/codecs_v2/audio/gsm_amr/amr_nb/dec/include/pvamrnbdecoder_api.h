@@ -50,8 +50,8 @@ terms listed above has been obtained from the copyright holder.
 #ifndef _PVAMRNBDECODER_API_H
 #define _PVAMRNBDECODER_API_H
 
-#include    "oscl_base.h"    /* Basic data types used within the lib */
-#include    "pvgsmamrdecoderinterface.h"
+#include    "../../../../../../../oscl/oscl_base.h"    /* Basic data types used within the lib */
+#include    "../../../common/dec/include/pvgsmamrdecoderinterface.h"
 
 
 /*----------------------------------------------------------------------------

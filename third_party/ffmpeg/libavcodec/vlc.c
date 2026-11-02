@@ -26,16 +26,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "libavutil/attributes.h"
-#include "libavutil/avassert.h"
-#include "libavutil/error.h"
-#include "libavutil/internal.h"
-#include "libavutil/intreadwrite.h"
-#include "libavutil/log.h"
-#include "libavutil/macros.h"
-#include "libavutil/mem.h"
-#include "libavutil/qsort.h"
-#include "libavutil/reverse.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/error.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/intreadwrite.h"
+#include "../libavutil/log.h"
+#include "../libavutil/macros.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/qsort.h"
+#include "../libavutil/reverse.h"
 #include "vlc.h"
 
 #define GET_DATA(v, table, i, wrap, size)                   \

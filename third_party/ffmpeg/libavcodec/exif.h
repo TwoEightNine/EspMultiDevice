@@ -33,9 +33,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/buffer.h"
-#include "libavutil/dict.h"
-#include "libavutil/rational.h"
+#include "../libavutil/buffer.h"
+#include "../libavutil/dict.h"
+#include "../libavutil/rational.h"
 
 /** Data type identifiers for TIFF tags */
 enum AVTiffDataType {

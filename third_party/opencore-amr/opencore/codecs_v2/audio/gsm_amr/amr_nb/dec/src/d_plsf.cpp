@@ -44,12 +44,12 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "basic_op.h"
-#include "cnst.h"
-#include "oscl_mem.h"
-#include "d_plsf.h"
-#include "q_plsf_5_tbl.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/cnst.h"
+#include "../../../../../../../oscl/oscl_mem.h"
+#include "../../common/include/d_plsf.h"
+#include "../../common/include/q_plsf_5_tbl.h"
 
 
 /*----------------------------------------------------------------------------

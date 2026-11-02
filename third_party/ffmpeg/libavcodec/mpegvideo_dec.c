@@ -24,11 +24,11 @@
 
 #include "config_components.h"
 
-#include "libavutil/avassert.h"
-#include "libavutil/emms.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/internal.h"
-#include "libavutil/video_enc_params.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/emms.h"
+#include "../libavutil/imgutils.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/video_enc_params.h"
 
 #include "avcodec.h"
 #include "decode.h"
@@ -39,7 +39,7 @@
 #include "mpegvideo.h"
 #include "mpegvideodec.h"
 #include "mpeg4videodec.h"
-#include "libavutil/refstruct.h"
+#include "../libavutil/refstruct.h"
 #include "thread.h"
 #include "threadprogress.h"
 #include "wmv2dec.h"

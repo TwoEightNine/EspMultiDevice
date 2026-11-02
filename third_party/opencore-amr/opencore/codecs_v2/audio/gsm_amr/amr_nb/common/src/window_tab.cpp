@@ -80,7 +80,7 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "window_tab.h"
+#include    "../include/window_tab.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

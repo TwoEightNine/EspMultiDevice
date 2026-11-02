@@ -43,15 +43,15 @@ terms listed above has been obtained from the copyright holder.
 *                         MODULE INCLUDE FILE AND VERSION ID
 ********************************************************************************
 */
-#include "set_zero.h"
+#include "../include/set_zero.h"
 
 /*
 ********************************************************************************
 *                         INCLUDE FILES
 ********************************************************************************
 */
-#include "typedef.h"
-#include "basic_op.h"
+#include "../include/typedef.h"
+#include "../include/basic_op.h"
 
 /*
 ********************************************************************************

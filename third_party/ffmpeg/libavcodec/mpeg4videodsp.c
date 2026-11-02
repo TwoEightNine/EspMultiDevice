@@ -17,8 +17,8 @@
  */
 
 #include "config.h"
-#include "libavutil/attributes.h"
-#include "libavutil/common.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/common.h"
 #include "mpeg4videodsp.h"
 
 static void gmc1_c(uint8_t *dst, const uint8_t *src, int stride, int h,

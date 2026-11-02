@@ -49,7 +49,7 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
+#include "../../common/include/typedef.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

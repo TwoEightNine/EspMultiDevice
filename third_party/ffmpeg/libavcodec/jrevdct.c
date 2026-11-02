@@ -65,7 +65,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/intreadwrite.h"
 
 #include "dct.h"
 #include "idctdsp.h"

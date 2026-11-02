@@ -36,21 +36,21 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "cnst.h"
-#include "oper_32b.h"
+#include "../include/typedef.h"
+#include "../include/cnst.h"
+#include "../include/oper_32b.h"
 #include "vad2.h"
-#include "sub.h"
-#include "add.h"
-#include "shr.h"
-#include "shl.h"
-#include "l_mult.h"
-#include "l_mac.h"
-#include "l_msu.h"
-#include "round.h"
-#include "l_negate.h"
+#include "../include/sub.h"
+#include "../include/add.h"
+#include "../include/shr.h"
+#include "../include/shl.h"
+#include "../include/l_mult.h"
+#include "../include/l_mac.h"
+#include "../include/l_msu.h"
+#include "../include/round.h"
+#include "../include/l_negate.h"
 #include "l_deposit_h.h"
-#include "l_shr.h"
+#include "../include/l_shr.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

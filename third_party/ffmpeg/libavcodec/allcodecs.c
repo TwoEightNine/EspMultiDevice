@@ -935,7 +935,7 @@ const FFCodec * codec_list[] = {
     NULL
 };
 #else
-#include "libavcodec/codec_list.c"
+#include "codec_list.c"
 #endif
 
 const AVCodec *av_codec_iterate(void **opaque)

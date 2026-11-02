@@ -22,7 +22,7 @@
 
 #include <stddef.h>
 
-#include "libavutil/avassert.h"
+#include "../libavutil/avassert.h"
 #include "bit_depth_template.c"
 
 #define H264_CHROMA_MC(OPNAME, OP)\

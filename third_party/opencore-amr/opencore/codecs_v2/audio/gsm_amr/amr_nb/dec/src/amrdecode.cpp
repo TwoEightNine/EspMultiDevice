@@ -39,13 +39,13 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "amrdecode.h"
-#include "cnst.h"
-#include "typedef.h"
-#include "frame.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/frame.h"
 #include "sp_dec.h"
-#include "wmf_to_ets.h"
+#include "../../common/include/wmf_to_ets.h"
 #include "if2_to_ets.h"
-#include "frame_type_3gpp.h"
+#include "../../common/include/frame_type_3gpp.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

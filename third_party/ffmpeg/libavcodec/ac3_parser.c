@@ -22,8 +22,8 @@
 
 #include "config_components.h"
 
-#include "libavutil/channel_layout.h"
-#include "libavutil/mem.h"
+#include "../libavutil/channel_layout.h"
+#include "../libavutil/mem.h"
 #include "parser.h"
 #include "ac3defs.h"
 #include "ac3tab.h"

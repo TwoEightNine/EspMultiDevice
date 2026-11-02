@@ -22,7 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/intreadwrite.h"
 
 static inline void copy_block2(uint8_t *dst, const uint8_t *src, ptrdiff_t dstStride, ptrdiff_t srcStride, int h)
 {

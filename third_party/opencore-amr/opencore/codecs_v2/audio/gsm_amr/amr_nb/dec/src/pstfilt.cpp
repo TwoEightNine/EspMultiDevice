@@ -50,16 +50,16 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "pstfilt.h"
-#include "typedef.h"
-#include "mode.h"
-#include "basicop_malloc.h"
-#include "basic_op.h"
-#include "weight_a.h"
-#include "residu.h"
-#include "syn_filt.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/mode.h"
+#include "../../common/include/basicop_malloc.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/weight_a.h"
+#include "../../common/include/residu.h"
+#include "../../common/include/syn_filt.h"
 #include "preemph.h"
-#include "cnst.h"
-#include "oscl_mem.h"
+#include "../../common/include/cnst.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

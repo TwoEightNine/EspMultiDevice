@@ -19,9 +19,9 @@
  */
 
 #include "config.h"
-#include "libavutil/attributes.h"
-#include "libavutil/avassert.h"
-#include "libavutil/macros.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/macros.h"
 #include "videodsp.h"
 
 #define BIT_DEPTH 8

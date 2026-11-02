@@ -30,7 +30,7 @@
 #include "mpegvideo.h"
 #include "mpeg4videodsp.h"
 
-#include "libavutil/mem_internal.h"
+#include "../libavutil/mem_internal.h"
 
 typedef struct Mpeg4DecContext {
     H263DecContext h;

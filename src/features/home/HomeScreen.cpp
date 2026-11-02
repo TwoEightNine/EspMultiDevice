@@ -64,6 +64,7 @@ HomeScreen::HomeScreen(Navigator &navigator,
     _pressedIndex(-1),
     _gestureStartX(0),
     _gestureStartY(0),
+    _dragSlopX(0),
     _gestureStartedMs(0),
     _velocityStartX(0),
     _velocityEndX(0),
@@ -149,6 +150,7 @@ void HomeScreen::handleTouch(const TouchPoint &point) {
     _gestureActive = true;
     _gestureCancelled = false;
     _horizontalDrag = false;
+    _dragSlopX = 0;
     _filesHoldTriggered = false;
     _gestureStartX = point.x;
     _gestureStartY = point.y;
@@ -717,15 +719,29 @@ void HomeScreen::updateGesture(uint16_t x, uint16_t y) {
   const int32_t deltaY = static_cast<int32_t>(y) - _gestureStartY;
   const int32_t absX = abs(deltaX);
   const int32_t absY = abs(deltaY);
-  if (absX > TapSlop || absY > TapSlop) _gestureCancelled = true;
   if (!_horizontalDrag) {
-    if (absX <= TapSlop || absX <= absY) return;
+    const bool onTile = _pressedIndex >= 0 && _pressedIndex < _appCount;
+    if (onTile) {
+      // Panel jitter must not cancel a tap on the outer columns; only leaving
+      // the pressed tile does.
+      const AppTile &app = _apps[_pressedIndex];
+      if (x < app.x || x >= app.x + app.w || y < app.y || y >= app.y + app.h) {
+        _gestureCancelled = true;
+      }
+    } else if (absX > TapSlop || absY > TapSlop) {
+      _gestureCancelled = true;
+    }
+    const int16_t slop = onTile ? SwipeThreshold : TapSlop;
+    if (absX <= slop || absX <= absY) return;
     _horizontalDrag = true;
     _gestureCancelled = true;
     _pressedIndex = -1;
+    // Start the viewport from where the drag engaged so it does not jump by
+    // the slop distance.
+    _dragSlopX = deltaX < 0 ? -slop : slop;
   }
 
-  int32_t nextScroll = _gestureBaseScroll - deltaX;
+  int32_t nextScroll = _gestureBaseScroll - (deltaX - _dragSlopX);
   const int32_t maximum = static_cast<int32_t>(pageCount() - 1) * _display.width();
   if (nextScroll < 0) nextScroll /= 3;
   else if (nextScroll > maximum) nextScroll = maximum + (nextScroll - maximum) / 3;
@@ -827,6 +843,7 @@ void HomeScreen::resetGesture() {
   _horizontalDrag = false;
   _filesHoldTriggered = false;
   _pressedIndex = -1;
+  _dragSlopX = 0;
 }
 
 String HomeScreen::clockText(const struct tm &localTime) const {

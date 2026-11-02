@@ -18,7 +18,7 @@
 
 #include "mathops.h"
 #include "rnd_avg.h"
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/intreadwrite.h"
 
 #ifndef BIT_DEPTH
 #define BIT_DEPTH 8

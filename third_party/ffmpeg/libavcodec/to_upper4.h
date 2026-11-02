@@ -23,7 +23,7 @@
 #ifndef AVCODEC_TO_UPPER4_H
 #define AVCODEC_TO_UPPER4_H
 
-#include "libavutil/avstring.h"
+#include "../libavutil/avstring.h"
 #include "internal.h"
 
 unsigned int ff_toupper4(unsigned int x)

@@ -25,7 +25,7 @@
 #include <time.h>
 #include "avstring.h"
 #include "bprint.h"
-#include "compat/va_copy.h"
+#include "../compat/va_copy.h"
 #include "error.h"
 #include "macros.h"
 #include "mem.h"

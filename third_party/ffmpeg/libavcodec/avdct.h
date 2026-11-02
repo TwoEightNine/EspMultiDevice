@@ -22,7 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/opt.h"
+#include "../libavutil/opt.h"
 
 /**
  * AVDCT context.

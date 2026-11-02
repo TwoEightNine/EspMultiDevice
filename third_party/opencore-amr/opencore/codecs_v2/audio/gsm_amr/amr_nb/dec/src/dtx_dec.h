@@ -52,12 +52,12 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "d_plsf.h"
-#include "gc_pred.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/d_plsf.h"
+#include "../../common/include/gc_pred.h"
 #include "c_g_aver.h"
-#include "frame.h"
-#include "dtx_common_def.h"
+#include "../../common/include/frame.h"
+#include "../../common/include/dtx_common_def.h"
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus
 extern "C"

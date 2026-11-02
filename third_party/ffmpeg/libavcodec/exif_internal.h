@@ -30,8 +30,8 @@
 #ifndef AVCODEC_EXIF_INTERNAL_H
 #define AVCODEC_EXIF_INTERNAL_H
 
-#include "libavutil/buffer.h"
-#include "libavutil/frame.h"
+#include "../libavutil/buffer.h"
+#include "../libavutil/frame.h"
 
 #include "exif.h"
 

@@ -36,8 +36,8 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "pow2.h"
-#include    "basic_op.h"
+#include    "../include/pow2.h"
+#include    "../include/basic_op.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

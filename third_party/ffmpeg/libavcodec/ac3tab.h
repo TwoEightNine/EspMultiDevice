@@ -26,7 +26,7 @@
 
 #include "ac3defs.h"
 
-#include "libavutil/attributes_internal.h"
+#include "../libavutil/attributes_internal.h"
 
 FF_VISIBILITY_PUSH_HIDDEN
 extern const uint16_t ff_ac3_frame_size_tab[38][3];

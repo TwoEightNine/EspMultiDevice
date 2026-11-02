@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "libavutil/attributes.h"
+#include "../libavutil/attributes.h"
 
 #include "rl.h"
 

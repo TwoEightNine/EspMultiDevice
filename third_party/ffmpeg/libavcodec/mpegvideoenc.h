@@ -30,9 +30,9 @@
 
 #include <float.h>
 
-#include "libavutil/avassert.h"
-#include "libavutil/mem_internal.h"
-#include "libavutil/opt.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/mem_internal.h"
+#include "../libavutil/opt.h"
 #include "fdctdsp.h"
 #include "motion_est.h"
 #include "mpegvideo.h"

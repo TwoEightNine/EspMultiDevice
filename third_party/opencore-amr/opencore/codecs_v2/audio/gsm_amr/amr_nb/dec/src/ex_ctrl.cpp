@@ -40,12 +40,12 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "ex_ctrl.h"
-#include "typedef.h"
-#include "cnst.h"
-#include "set_zero.h"
-#include "gmed_n.h"
-#include "sqrt_l.h"
-#include "basic_op.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/set_zero.h"
+#include "../../common/include/gmed_n.h"
+#include "../../common/include/sqrt_l.h"
+#include "../../common/include/basic_op.h"
 /*----------------------------------------------------------------------------
 ; MACROS
 ; Define module specific macros here

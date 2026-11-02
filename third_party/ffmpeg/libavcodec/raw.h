@@ -27,7 +27,7 @@
 #ifndef AVCODEC_RAW_H
 #define AVCODEC_RAW_H
 
-#include "libavutil/pixfmt.h"
+#include "../libavutil/pixfmt.h"
 
 typedef struct PixelFormatTag {
     enum AVPixelFormat pix_fmt;

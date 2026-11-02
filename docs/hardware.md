@@ -43,7 +43,7 @@ Set `SD_CARD_DETECT_PIN` in `esp_media.ino` only if a card-detect switch is wire
 
 ## TFT_eSPI configuration
 
-TFT_eSPI reads its library-level `User_Setup.h`, not a project-local copy. In `/Users/fkdplc/Documents/Arduino/libraries/TFT_eSPI/User_Setup.h`, enable only the ILI9488 driver and use this parallel block:
+The sketch-root [`tft_setup.h`](../tft_setup.h) configures TFT_eSPI 2.5, which loads it in place of the library-level `User_Setup.h`; do not edit the library's own setup files. It enables only the ILI9488 driver, the font set, and this parallel block:
 
 ```cpp
 #define TFT_PARALLEL_8_BIT

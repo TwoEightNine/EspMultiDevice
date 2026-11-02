@@ -39,12 +39,12 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "q_plsf.h"
-#include "typedef.h"
-#include "basic_op.h"
-#include "lsp_lsf.h"
-#include "reorder.h"
-#include "lsfwt.h"
+#include "../include/q_plsf.h"
+#include "../include/typedef.h"
+#include "../include/basic_op.h"
+#include "../include/lsp_lsf.h"
+#include "../include/reorder.h"
+#include "../include/lsfwt.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

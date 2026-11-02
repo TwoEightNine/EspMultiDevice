@@ -17,7 +17,7 @@
  */
 
 #include "config.h"
-#include "libavutil/attributes.h"
+#include "../libavutil/attributes.h"
 #include "h264chroma.h"
 
 #define BIT_DEPTH 8

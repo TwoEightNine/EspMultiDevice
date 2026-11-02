@@ -39,5 +39,5 @@ ESP Media is an Arduino firmware project for an ESP32-S3 media device. Treat the
 
 - Verify a build after C++ or configuration changes when the local Arduino environment is available.
 - For media changes, exercise a representative supported file and any relevant cache invalidation path. Regenerate only the relevant fixture or generated asset with the documented tool.
-- For hardware changes, keep the constants in `esp_media.ino`, the TFT_eSPI instructions, pin tables, and affected wiring prose consistent.
+- For hardware changes, keep the constants in `esp_media.ino`, `tft_setup.h`, pin tables, and affected wiring prose consistent.
 - Do not remove unrelated work in a dirty tree. Document material behavior changes in the focused `docs/*.md` file and keep README summaries concise.

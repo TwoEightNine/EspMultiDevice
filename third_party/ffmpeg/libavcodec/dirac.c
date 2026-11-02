@@ -28,8 +28,8 @@
 
 #include "config.h"
 
-#include "libavutil/mem.h"
-#include "libavutil/pixdesc.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/pixdesc.h"
 
 #include "dirac.h"
 #include "get_bits.h"

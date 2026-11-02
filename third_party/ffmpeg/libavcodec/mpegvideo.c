@@ -27,12 +27,12 @@
  * The simplest mpeg encoder (well, it was the simplest!).
  */
 
-#include "libavutil/attributes.h"
-#include "libavutil/avassert.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/internal.h"
-#include "libavutil/intreadwrite.h"
-#include "libavutil/mem.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/imgutils.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/intreadwrite.h"
+#include "../libavutil/mem.h"
 
 #include "avcodec.h"
 #include "blockdsp.h"
@@ -42,7 +42,7 @@
 #include "mpegutils.h"
 #include "mpegvideo.h"
 #include "mpegvideodata.h"
-#include "libavutil/refstruct.h"
+#include "../libavutil/refstruct.h"
 
 
 static void gray16(uint8_t *dst, const uint8_t *src, ptrdiff_t linesize, int h)

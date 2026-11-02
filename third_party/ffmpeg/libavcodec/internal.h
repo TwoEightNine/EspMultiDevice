@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 
-#include "libavutil/channel_layout.h"
+#include "../libavutil/channel_layout.h"
 #include "avcodec.h"
 #include "config.h"
 

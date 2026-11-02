@@ -41,8 +41,8 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "d2_11pf.h"
-#include "typedef.h"
-#include "cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
 
 
 /*----------------------------------------------------------------------------

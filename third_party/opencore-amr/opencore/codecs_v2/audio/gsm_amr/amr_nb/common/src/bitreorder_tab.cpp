@@ -82,7 +82,7 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "bitreorder_tab.h"
+#include "../include/bitreorder_tab.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

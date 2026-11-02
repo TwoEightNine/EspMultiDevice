@@ -37,9 +37,9 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "bits2prm.h"
-#include "typedef.h"
-#include "mode.h"
-#include "bitno_tab.h"
+#include "../include/typedef.h"
+#include "../include/mode.h"
+#include "../include/bitno_tab.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

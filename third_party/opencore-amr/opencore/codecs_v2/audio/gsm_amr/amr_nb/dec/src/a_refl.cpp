@@ -42,9 +42,9 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "a_refl.h"
-#include "typedef.h"
-#include "cnst.h"
-#include "basic_op.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
+#include "../../common/include/basic_op.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS [optional]

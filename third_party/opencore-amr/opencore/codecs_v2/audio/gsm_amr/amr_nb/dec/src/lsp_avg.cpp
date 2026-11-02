@@ -44,10 +44,10 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "lsp_avg.h"
-#include "basic_op.h"
-#include "oper_32b.h"
-#include "oscl_mem.h"
-#include "q_plsf_5_tbl.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/oper_32b.h"
+#include "../../../../../../../oscl/oscl_mem.h"
+#include "../../common/include/q_plsf_5_tbl.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

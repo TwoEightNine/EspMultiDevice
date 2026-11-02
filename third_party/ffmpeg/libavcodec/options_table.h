@@ -28,7 +28,7 @@
 #include <limits.h>
 #include <stdint.h>
 
-#include "libavutil/opt.h"
+#include "../libavutil/opt.h"
 #include "avcodec.h"
 #include "version_major.h"
 

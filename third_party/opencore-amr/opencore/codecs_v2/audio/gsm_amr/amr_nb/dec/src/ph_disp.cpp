@@ -53,9 +53,9 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "ph_disp.h"
-#include "typedef.h"
-#include "basic_op.h"
-#include "cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/basic_op.h"
+#include "../../common/include/cnst.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

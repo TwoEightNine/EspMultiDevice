@@ -39,9 +39,10 @@ private:
   static constexpr int16_t PageFrameHeight = PageFrameBottom - StatusBarHeight;
   static constexpr int16_t IconDiameter = 80;
   static constexpr int16_t SwipeThreshold = 48;
-  // The calibrated resistive panel is least stable near its left edge. Keep
-  // taps tolerant there while the separate 48px threshold still decides
-  // whether a page changes.
+  // The calibrated resistive panel jitters most near its side edges, where
+  // the outer tile columns sit. A press on a tile stays a tap while it remains
+  // inside that tile and only becomes a page drag after the full swipe
+  // threshold; presses outside tiles start dragging after this smaller slop.
   static constexpr int16_t TapSlop = 24;
   static constexpr int16_t FlickVelocity = 650;
   static constexpr uint16_t VelocityWindowMs = 100;
@@ -95,6 +96,7 @@ private:
   int8_t _pressedIndex;
   uint16_t _gestureStartX;
   uint16_t _gestureStartY;
+  int16_t _dragSlopX;
   uint32_t _gestureStartedMs;
   int16_t _velocityStartX;
   int16_t _velocityEndX;

@@ -25,7 +25,7 @@
 #ifndef AVCODEC_AVCODEC_INTERNAL_H
 #define AVCODEC_AVCODEC_INTERNAL_H
 
-#include "libavutil/frame.h"
+#include "../libavutil/frame.h"
 
 #include "packet.h"
 

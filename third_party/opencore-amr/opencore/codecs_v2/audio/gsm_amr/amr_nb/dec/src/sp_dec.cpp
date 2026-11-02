@@ -50,14 +50,14 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "sp_dec.h"
-#include "typedef.h"
-#include "cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/cnst.h"
 #include "dec_amr.h"
 #include "pstfilt.h"
-#include "mode.h"
+#include "../../common/include/mode.h"
 #include "post_pro.h"
-#include "oscl_mem.h"
-#include "bitno_tab.h"
+#include "../../../../../../../oscl/oscl_mem.h"
+#include "../../common/include/bitno_tab.h"
 
 
 /*----------------------------------------------------------------------------

@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/avassert.h"
-#include "libavutil/mem.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/mem.h"
 #include "error_resilience.h"
 #include "mpegvideo.h"
 #include "mpegvideodec.h"

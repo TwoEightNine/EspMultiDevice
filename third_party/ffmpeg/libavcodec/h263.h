@@ -20,7 +20,7 @@
 #ifndef AVCODEC_H263_H
 #define AVCODEC_H263_H
 
-#include "libavutil/rational.h"
+#include "../libavutil/rational.h"
 #include "mpegvideo.h"
 
 #define FF_ASPECT_EXTENDED 15

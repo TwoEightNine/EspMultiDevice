@@ -35,9 +35,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "log2.h"
-#include "basic_op.h"
-#include "log2_norm.h"
+#include "../include/log2.h"
+#include "../include/basic_op.h"
+#include "../include/log2_norm.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

@@ -39,8 +39,8 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "qua_gain_tbl.h"
-#include "qua_gain.h"
+#include "../include/qua_gain_tbl.h"
+#include "../include/qua_gain.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

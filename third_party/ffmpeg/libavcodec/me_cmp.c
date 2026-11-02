@@ -22,9 +22,9 @@
 
 #include <stddef.h>
 
-#include "libavutil/attributes.h"
-#include "libavutil/internal.h"
-#include "libavutil/mem_internal.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/mem_internal.h"
 #include "avcodec.h"
 #include "copy_block.h"
 #include "mathops.h"

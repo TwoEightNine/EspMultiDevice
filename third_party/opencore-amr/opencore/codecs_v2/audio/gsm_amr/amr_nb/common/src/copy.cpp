@@ -51,9 +51,9 @@ terms listed above has been obtained from the copyright holder.
 *                         INCLUDE FILES
 ********************************************************************************
 */
-#include "typedef.h"
-#include "basic_op.h"
-#include "oscl_mem.h"
+#include "../include/typedef.h"
+#include "../include/basic_op.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 /*
 ********************************************************************************

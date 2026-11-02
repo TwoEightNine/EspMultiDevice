@@ -35,9 +35,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "inv_sqrt.h"
-#include    "typedef.h"
-#include    "basic_op.h"
+#include    "../include/inv_sqrt.h"
+#include    "../include/typedef.h"
+#include    "../include/basic_op.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

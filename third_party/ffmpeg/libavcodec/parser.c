@@ -24,9 +24,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "libavutil/attributes.h"
-#include "libavutil/avassert.h"
-#include "libavutil/mem.h"
+#include "../libavutil/attributes.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/mem.h"
 
 #include "codec_desc.h"
 #include "parser.h"

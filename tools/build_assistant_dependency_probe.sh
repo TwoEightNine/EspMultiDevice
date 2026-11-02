@@ -1,36 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/arduino_build_common.sh"
 
-project_dir="$(cd "$(dirname "$0")/.." && pwd)"
-arduino_cli="${ARDUINO_CLI:-/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli}"
-build_dir="${ESP_MEDIA_PROBE_BUILD_DIR:-/private/tmp/esp-media-assistant-probe-build}"
 # The probe uses the same two-port profile as production and prints its
 # hardware gates through UART0 on the board's USB-to-UART connector.
-fqbn='espressif:esp32:esp32s3:FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default'
-application_limit=6553600
+build_dir="${ESP_MEDIA_PROBE_BUILD_DIR:-$(default_build_dir assistant-probe)}"
+compile_sketch "$build_dir" \
+  --build-property 'compiler.cpp.extra_flags=-DESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE=1'
 
-if [[ ! -x "$arduino_cli" ]]; then
-  echo "arduino-cli not found; set ARDUINO_CLI to its absolute path" >&2
-  exit 2
-fi
-
-mkdir -p "$build_dir"
-cd "$project_dir"
-"$arduino_cli" compile \
-  --fqbn "$fqbn" \
-  --build-property "upload.maximum_size=$application_limit" \
-  --build-property 'compiler.cpp.extra_flags=-DESP_MEDIA_ASSISTANT_DEPENDENCY_PROBE=1' \
-  --build-path "$build_dir" \
-  --warnings default \
-  .
-
-firmware_bin="$build_dir/esp_media.ino.bin"
-if [[ ! -f "$firmware_bin" ]]; then
-  echo "expected diagnostic binary was not produced: $firmware_bin" >&2
-  exit 3
-fi
-
-firmware_size="$(wc -c < "$firmware_bin" | tr -d ' ')"
+firmware_size="$(binary_size "$build_dir")"
 if (( firmware_size > application_limit )); then
   echo "diagnostic is $firmware_size bytes; slot limit is $application_limit bytes" >&2
   exit 4

@@ -29,8 +29,8 @@
 
 #include <stdint.h>
 
-#include "libavutil/avassert.h"
-#include "libavutil/mem.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/mem.h"
 #include "vlc.h"
 
 /* run length table */

@@ -36,9 +36,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include    "weight_a.h"
-#include    "typedef.h"
-#include    "cnst.h"
+#include    "../include/weight_a.h"
+#include    "../include/typedef.h"
+#include    "../include/cnst.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

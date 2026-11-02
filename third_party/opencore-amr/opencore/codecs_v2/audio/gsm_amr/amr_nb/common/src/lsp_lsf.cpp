@@ -43,9 +43,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "lsp_lsf.h"
-#include "basicop_malloc.h"
-#include "basic_op.h"
+#include "../include/lsp_lsf.h"
+#include "../include/basicop_malloc.h"
+#include "../include/basic_op.h"
 
 /*--------------------------------------------------------------------------*/
 #ifdef __cplusplus

@@ -16,7 +16,7 @@
  * -------------------------------------------------------------------
  */
 #ifndef GET_CONST_TBLS_H
-#include "get_const_tbls.h"
+#include "../include/get_const_tbls.h"
 #endif
 
 #ifdef __cplusplus

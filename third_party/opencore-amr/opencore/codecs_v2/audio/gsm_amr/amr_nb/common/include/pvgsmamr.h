@@ -34,7 +34,7 @@ terms listed above has been obtained from the copyright holder.
 #include <e32std.h>
 #include <e32base.h>
 
-#include "sp_dec.h"
+#include "../../dec/src/sp_dec.h"
 #include "pvglobals.h"
 
 

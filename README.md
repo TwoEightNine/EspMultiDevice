@@ -26,11 +26,11 @@ The default pin map and important electrical constraints are in [docs/hardware.m
 
 1. Install Arduino-ESP32 3.3.8 and select **ESP32S3 Dev Module**, **16MB Flash**, **OPI PSRAM**, **240MHz**, and **Custom** partition scheme. Select **USB-OTG (TinyUSB)**, disable **USB CDC On Boot**, **USB Firmware MSC On Boot**, and **USB DFU On Boot**, then select **UART0 / Hardware CDC** upload mode.
 2. Install these Arduino libraries through Library Manager:
-   - `TFT_eSPI`
-   - `PNGdec`
-   - `JPEGDEC`
-3. Configure the `TFT_eSPI` library’s `User_Setup.h` with the ILI9488 8-bit parallel pin block in [docs/hardware.md](docs/hardware.md#tft_espi-configuration).
-4. Run `tools/build_esp32s3.sh`, or open `esp_media.ino` with the exact profile above and build/upload. The script additionally enforces the real 6,553,600-byte application limit, which Arduino's generic Custom profile does not. `build_opt.h` is read automatically.
+   - `TFT_eSPI` 2.5.43
+   - `PNGdec` 1.1.6
+   - `JPEGDEC` 1.8.4
+3. Leave TFT_eSPI's own `User_Setup.h` alone: the sketch's [`tft_setup.h`](tft_setup.h) supplies the ILI9488 8-bit parallel configuration, and TFT_eSPI uses it instead. Edit it only if your wiring differs from [docs/hardware.md](docs/hardware.md#tft_espi-configuration).
+4. Run `tools/build_esp32s3.sh` (in Git Bash on Windows), or open `esp_media.ino` with the exact profile above and build/upload. The script additionally enforces the real 6,553,600-byte application limit, which Arduino's generic Custom profile does not. `tools/build_esp32s3.sh --profile` instead builds against the exact board package and library versions pinned in [`sketch.yaml`](sketch.yaml), which arduino-cli installs on first use.
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
 6. For the assistant, copy src/services/assistant/LocalAssistantBackendConfig.example.h to the ignored LocalAssistantBackendConfig.h, set the self-hosted HTTPS endpoints, and paste the Caddy root CA. Copy a non-interlaced 320×432 `background.png` to `/.system/ai_avatars/background.png`; it is drawn exactly below the app bar and contains the fixed chat-bubble artwork. Copy the five 320×240 avatar PNGs (`w.png`, `n.png`, `s.png`, `h.png`, `t.png`) into `/.system/ai_avatars/default/`. Optional additional sets use the same five filenames in `/.system/ai_avatars/<dir>/`; list them in `/.system/ai_avatars/avatars.config` as one `Name:dir` entry per line. A missing, corrupt, or wrong-sized background falls back to black. The Assistant shows only the latest live user/reply pair: user text is two lines with ellipsis, while assistant captions page through three spoken lines every two seconds. Its 60×60 avatar-overlay control is blue while ready, green while listening, and gray when unavailable. Hold it for 800 ms to enable session auto-listen; a short cyan pulse confirms it, and the next tap disables it. The overflow menu contains New conversation and the Avatar submenu. Local captions survive screens opened by Assistant and disappear only after its app-bar X closes the session; the local backend retains a summary plus the last 12 completed exchanges per device until New conversation is confirmed. It uses OpenAI `gpt-transcribe`, GPT-5.6 Luna for all LLM work, and Azure neural voices for English, Simplified Chinese, and Russian. Configure the private OpenAI/Azure credentials and validate the custom pinned backend through tools/xiaozhi_local/README.md. There is no public-service fallback.
 
@@ -48,7 +48,9 @@ The project vendors its remaining decoders and the Assistant's Opus codec under 
 
 ```text
 esp_media.ino      hardware composition, screen registration, main loop
-build_opt.h        Arduino compiler options for bundled decoders
+build_opt.h        Arduino compiler defines for bundled decoders
+sketch.yaml        arduino-cli profile pinning the board package and libraries
+tft_setup.h        TFT_eSPI display driver and pin configuration
 partitions.csv     16 MiB dual-OTA application/SPIFFS layout
 src/app/           Navigator and screen stack
 src/core/          display, touch, battery, SPI lock, base Screen contract

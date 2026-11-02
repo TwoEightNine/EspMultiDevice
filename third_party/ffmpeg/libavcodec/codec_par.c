@@ -24,7 +24,7 @@
  */
 
 #include <string.h>
-#include "libavutil/mem.h"
+#include "../libavutil/mem.h"
 #include "avcodec.h"
 #include "codec_par.h"
 #include "packet.h"

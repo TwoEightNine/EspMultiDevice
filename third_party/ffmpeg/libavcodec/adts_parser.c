@@ -22,8 +22,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "libavutil/error.h"
-#include "libavutil/mem.h"
+#include "../libavutil/error.h"
+#include "../libavutil/mem.h"
 #include "adts_header.h"
 #include "adts_parser.h"
 

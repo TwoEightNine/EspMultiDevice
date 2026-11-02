@@ -29,7 +29,7 @@
 
 #include "config.h"
 
-#include "libavutil/thread.h"
+#include "../libavutil/thread.h"
 #include "mpegvideo.h"
 #include "h263.h"
 #include "h263data.h"

@@ -40,12 +40,12 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "vad.h"
-#include "typedef.h"
-#include "shr.h"
-#include "basic_op.h"
-#include "cnst_vad.h"
-#include "oscl_mem.h"
+#include "../include/vad.h"
+#include "../include/typedef.h"
+#include "../include/shr.h"
+#include "../include/basic_op.h"
+#include "../include/cnst_vad.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

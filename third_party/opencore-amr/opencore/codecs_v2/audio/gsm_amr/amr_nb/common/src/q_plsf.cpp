@@ -47,16 +47,16 @@ terms listed above has been obtained from the copyright holder.
 *                         MODULE INCLUDE FILE AND VERSION ID
 ********************************************************************************
 */
-#include "q_plsf.h"
+#include "../include/q_plsf.h"
 
 /*
 ********************************************************************************
 *                         INCLUDE FILES
 ********************************************************************************
 */
-#include "typedef.h"
-#include "basic_op.h"
-#include "oscl_mem.h"
+#include "../include/typedef.h"
+#include "../include/basic_op.h"
+#include "../../../../../../../oscl/oscl_mem.h"
 
 
 /*

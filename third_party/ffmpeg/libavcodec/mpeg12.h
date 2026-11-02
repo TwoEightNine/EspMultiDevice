@@ -22,7 +22,7 @@
 #ifndef AVCODEC_MPEG12_H
 #define AVCODEC_MPEG12_H
 
-#include "libavutil/rational.h"
+#include "../libavutil/rational.h"
 
 /* Start codes. */
 #define SEQ_END_CODE            0x000001b7

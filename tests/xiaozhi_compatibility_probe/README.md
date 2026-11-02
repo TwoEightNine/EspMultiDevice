@@ -20,8 +20,8 @@ HTTPS URLs, and paste the Caddy root PEM created by
 `tools/xiaozhi_local/`. The same root is required for both bootstrap and WSS;
 plaintext endpoints and empty trust are rejected.
 
-Upload the generated image from
-`/private/tmp/esp-media-xiaozhi-probe-build` with the Arduino IDE or the same
+Upload the generated image from `$TMPDIR/esp-media-xiaozhi-probe-build`
+(or `ESP_MEDIA_XIAOZHI_PROBE_BUILD_DIR`) with the Arduino IDE or the same
 `arduino-cli` and board port used for normal ESP Media firmware.
 
 The probe uses the same two-port USB profile as production. Monitor UART0 on

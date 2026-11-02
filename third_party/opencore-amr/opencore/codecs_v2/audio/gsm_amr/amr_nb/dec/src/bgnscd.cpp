@@ -47,12 +47,12 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include    "bgnscd.h"
-#include    "typedef.h"
-#include    "basic_op.h"
-#include    "cnst.h"
-#include    "gmed_n.h"
-#include    "sqrt_l.h"
-#include    "oscl_mem.h"
+#include    "../../common/include/typedef.h"
+#include    "../../common/include/basic_op.h"
+#include    "../../common/include/cnst.h"
+#include    "../../common/include/gmed_n.h"
+#include    "../../common/include/sqrt_l.h"
+#include    "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

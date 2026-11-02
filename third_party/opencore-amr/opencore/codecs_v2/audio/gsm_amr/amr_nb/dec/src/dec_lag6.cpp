@@ -98,8 +98,8 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include "dec_lag6.h"
-#include "typedef.h"
-#include "basic_op.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/basic_op.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

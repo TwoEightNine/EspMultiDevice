@@ -24,7 +24,7 @@
 #ifndef _PVGSMAMR_DECODER_INTERFACE_H
 #define _PVGSMAMR_DECODER_INTERFACE_H
 
-#include "oscl_base.h"
+#include "../../../../../../../oscl/oscl_base.h"
 
 /*----------------------------------------------------------------------------
 ; ENUMERATED TYPEDEF'S

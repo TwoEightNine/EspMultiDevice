@@ -50,12 +50,12 @@ terms listed above has been obtained from the copyright holder.
 ; INCLUDES
 ----------------------------------------------------------------------------*/
 #include    "c_g_aver.h"
-#include    "typedef.h"
-#include    "mode.h"
-#include    "cnst.h"
+#include    "../../common/include/typedef.h"
+#include    "../../common/include/mode.h"
+#include    "../../common/include/cnst.h"
 
-#include    "basic_op.h"
-#include    "oscl_mem.h"
+#include    "../../common/include/basic_op.h"
+#include    "../../../../../../../oscl/oscl_mem.h"
 
 /*----------------------------------------------------------------------------
 ; MACROS

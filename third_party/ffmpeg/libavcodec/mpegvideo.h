@@ -38,7 +38,7 @@
 #include "qpeldsp.h"
 #include "videodsp.h"
 
-#include "libavutil/mem_internal.h"
+#include "../libavutil/mem_internal.h"
 
 #define MAX_THREADS 32
 

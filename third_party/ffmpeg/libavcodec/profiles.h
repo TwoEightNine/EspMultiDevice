@@ -21,7 +21,7 @@
 
 #include "codec.h"
 #include "defs.h"
-#include "libavutil/opt.h"
+#include "../libavutil/opt.h"
 
 #define FF_AVCTX_PROFILE_OPTION(name, description, type, value) \
     {name, description, 0, AV_OPT_TYPE_CONST, {.i64 = value }, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM | AV_OPT_FLAG_## type ##_PARAM, .unit = "avctx.profile"},

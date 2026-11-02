@@ -1,0 +1,16 @@
+# arduino-cli build profile pinning the board package and libraries.
+# Build with:  tools/build_esp32s3.sh --profile
+# or directly: arduino-cli compile --profile esp32s3
+# arduino-cli installs the pinned versions on first use, separately from
+# anything installed through the IDE. See docs/development.md.
+profiles:
+  esp32s3:
+    notes: ESP32-S3 N16R8, 16 MB flash, OPI PSRAM, custom dual-OTA partitions.
+    fqbn: esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CPUFreq=240,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default
+    platforms:
+      - platform: esp32:esp32 (3.3.8)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - TFT_eSPI (2.5.43)
+      - PNGdec (1.1.6)
+      - JPEGDEC (1.8.4)

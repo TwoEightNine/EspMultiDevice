@@ -35,8 +35,8 @@ terms listed above has been obtained from the copyright holder.
 #ifndef _DECODER_AMR_NB_H
 #define _DECODER_AMR_NB_H
 
-#include "oscl_base.h"
-#include "pvgsmamrdecoderinterface.h"
+#include "../../../../../../../oscl/oscl_base.h"
+#include "../../../common/dec/include/pvgsmamrdecoderinterface.h"
 
 // CDecoder_AMR_WB
 class CDecoder_AMRInterface;

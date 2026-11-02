@@ -2,15 +2,17 @@
 
 ## Build inputs
 
-Open `esp_media.ino` as an Arduino sketch. Arduino recursively compiles `src/`; `build_opt.h` supplies `PNG_MAX_BUFFERED_PIXELS=32832` and include paths for the bundled codec subsets.
+Open `esp_media.ino` as an Arduino sketch. Arduino recursively compiles `src/`; `build_opt.h` supplies `PNG_MAX_BUFFERED_PIXELS=32832` and FFmpeg's `HAVE_AV_CONFIG_H`. Arduino copies that file into the build without expanding placeholders such as `{build.source.path}`, and Arduino IDE compiler processes have no stable working directory, so it cannot add include paths. Vendored code instead reaches its own headers through file-relative includes; see [Bundled dependencies](#bundled-dependencies).
 
 The standard profile is Arduino-ESP32 3.3.8, **ESP32S3 Dev Module**, 16 MB flash, OPI PSRAM, Custom partition scheme, and 240 MHz CPU. Select USB-OTG (TinyUSB), disable CDC/Firmware MSC/DFU On Boot, and use UART0 / Hardware CDC upload mode. `Serial` consequently resolves to UART0. Run `tools/build_esp32s3.sh` for the reproducible build. It selects that complete profile and overrides Arduino's overly broad generic Custom maximum with the actual application-slot limit of 6,553,600 bytes, then independently checks the emitted binary.
+
+All `tools/build_*.sh` scripts share `tools/arduino_build_common.sh`. They use `arduino-cli` from `ARDUINO_CLI`, then `PATH`, then the macOS Arduino IDE bundle; detect whether the core is installed as the Boards Manager `esp32:esp32` package or as a sketchbook `hardware/espressif/esp32` checkout (`ESP_MEDIA_FQBN` overrides the board ID); and write to a build directory under `$TMPDIR` unless the script's own `ESP_MEDIA_*_BUILD_DIR` variable is set. They run in any bash, including Git Bash on Windows. Pass `--profile` (or set `ESP_MEDIA_PROFILE`) to build the `esp32s3` profile in `sketch.yaml` instead, which pins `esp32:esp32` 3.3.8, TFT_eSPI 2.5.43, PNGdec 1.1.6, and JPEGDEC 1.8.4 and installs them on first use separately from IDE-installed packages. Update those pins together with the versions in the README.
 
 The SD-app interpreter vendors upstream Lua 5.4.9 (MIT) in `third_party/lua/` and compiles only selected C units through `src/vendor_shims/lua/`. The project shim defines the 64-bit limit macros missing from the Arduino-ESP32 C++ limits header so Lua uses the same integer ABI in all translation units. Its integration and excluded libraries are recorded in `third_party/lua/README.esp-media.md`. Test the SDK 1 counter, SDK 2 workout, SDK 3 recorder, SDK 4 files, SDK 5 images, and SDK 6 dvach apps in `examples/apps/` after firmware builds; their sources are copied to SD, not linked into the firmware. The SDK 6 HTTPS client relies on the certificate bundle that the Arduino-ESP32 core's precompiled mbedTLS already embeds; it vendors no trust store.
 
 `partitions.csv` retains NVS at `0x9000`/`0x5000` and OTA data at `0xe000`/`0x2000`, followed by two `0x640000` OTA slots, `0x360000` SPIFFS, and `0x10000` core dump. Flash the partition table when migrating from the old 3 MB/9.9 MB FATFS profile. Preferences/NVS remains compatible because its location and size do not change; internal FATFS content is not preserved or used by ESP Media.
 
-Install `TFT_eSPI`, `PNGdec`, and `JPEGDEC` through Arduino Library Manager. The TFT setup is a library-level configuration described in [hardware.md](hardware.md), not a source change in this repository.
+Install `TFT_eSPI` 2.5.43, `PNGdec` 1.1.6, and `JPEGDEC` 1.8.4 through Arduino Library Manager. TFT_eSPI 2.5 loads `tft_setup.h` from the include path in place of its library-level `User_Setup.h`; the ESP32 core puts the sketch folder on the include path for library builds too, so the project's root `tft_setup.h` configures the display without editing the library. [hardware.md](hardware.md#tft_espi-configuration) documents its pins.
 
 ## Project license
 
@@ -18,7 +20,7 @@ ESP Media's own code is GPL-3.0-or-later; the notice is in the [README](../READM
 
 ## Bundled dependencies
 
-The source trees below are pinned under `third_party/`, retained with their notices, and compiled only through project shims:
+The source trees below are pinned under `third_party/`, retained with their notices, and compiled only through project shims. Because Arduino offers no per-project include paths, imports whose upstream build relies on `-I` directories carry an include-path-only portability patch: quoted includes that cross directories are rewritten relative to the including file, with no other source change. esp-opus records its patch in its own README; FFmpeg (324 includes in 132 files) and OpenCORE AMR (392 includes in 133 files) are rewritten by `tools/localize_vendor_includes.py`. Run that tool after importing or upgrading either subset, and run it with `--check` to confirm nothing is left. Never reintroduce sketch-root header copies or symlinks; Git for Windows checks symlinks out as plain text files by default.
 
 | Dependency | Project role | License / source note |
 | --- | --- | --- |

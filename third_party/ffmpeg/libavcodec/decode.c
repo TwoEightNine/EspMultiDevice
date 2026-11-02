@@ -29,17 +29,17 @@
 # include <iconv.h>
 #endif
 
-#include "libavutil/avassert.h"
-#include "libavutil/channel_layout.h"
-#include "libavutil/common.h"
-#include "libavutil/emms.h"
-#include "libavutil/frame.h"
-#include "libavutil/hwcontext.h"
-#include "libavutil/imgutils.h"
-#include "libavutil/internal.h"
-#include "libavutil/mastering_display_metadata.h"
-#include "libavutil/mem.h"
-#include "libavutil/stereo3d.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/channel_layout.h"
+#include "../libavutil/common.h"
+#include "../libavutil/emms.h"
+#include "../libavutil/frame.h"
+#include "../libavutil/hwcontext.h"
+#include "../libavutil/imgutils.h"
+#include "../libavutil/internal.h"
+#include "../libavutil/mastering_display_metadata.h"
+#include "../libavutil/mem.h"
+#include "../libavutil/stereo3d.h"
 
 #include "avcodec.h"
 #include "avcodec_internal.h"
@@ -56,7 +56,7 @@
 #include "lcevcdec.h"
 #include "packet_internal.h"
 #include "progressframe.h"
-#include "libavutil/refstruct.h"
+#include "../libavutil/refstruct.h"
 #include "thread.h"
 #include "threadprogress.h"
 

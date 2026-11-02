@@ -22,7 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "libavutil/macros.h"
+#include "../libavutil/macros.h"
 
 #define VLC_MULTI_MAX_SYMBOLS 6
 

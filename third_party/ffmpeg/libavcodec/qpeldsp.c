@@ -30,7 +30,7 @@
 
 #include "config.h"
 #include "config_components.h"
-#include "libavutil/attributes.h"
+#include "../libavutil/attributes.h"
 #include "copy_block.h"
 #include "qpeldsp.h"
 #include "diracdsp.h"

@@ -32,8 +32,8 @@
 #include <string.h>
 
 #include "config.h"
-#include "libavutil/avassert.h"
-#include "libavutil/intreadwrite.h"
+#include "../libavutil/avassert.h"
+#include "../libavutil/intreadwrite.h"
 #include "put_bits.h"
 
 void ff_put_string(PutBitContext *pb, const char *string, int terminate_string)

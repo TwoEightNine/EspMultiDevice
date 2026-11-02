@@ -50,9 +50,9 @@ terms listed above has been obtained from the copyright holder.
 /*----------------------------------------------------------------------------
 ; INCLUDES
 ----------------------------------------------------------------------------*/
-#include "typedef.h"
-#include "mode.h"
-#include "cnst.h"
+#include "../../common/include/typedef.h"
+#include "../../common/include/mode.h"
+#include "../../common/include/cnst.h"
 #include "preemph.h"
 #include "agc.h"
 

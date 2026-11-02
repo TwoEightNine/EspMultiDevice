@@ -29,7 +29,7 @@
 #define AVCODEC_MPEG12DATA_H
 
 #include <stdint.h>
-#include "libavutil/rational.h"
+#include "../libavutil/rational.h"
 
 extern const uint16_t ff_mpeg1_default_intra_matrix[];
 extern const uint16_t ff_mpeg1_default_non_intra_matrix[64];

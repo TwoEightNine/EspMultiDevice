@@ -40,7 +40,7 @@ terms listed above has been obtained from the copyright holder.
 *
 ********************************************************************************
 */
-#include "oscl_base_macros.h"// has integer values of PV_COMPILER
+#include "../../../../../../../oscl/oscl_base_macros.h"// has integer values of PV_COMPILER
 #ifndef typedef_h
 #define typedef_h "$Id $"
 
