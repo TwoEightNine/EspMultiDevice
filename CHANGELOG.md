@@ -16,6 +16,12 @@ version follows the rules in
   uses for thumbnails.
 - `sketch.yaml` pins the board package and libraries for reproducible
   `--profile` builds.
+- SD app manifests accept `"show_in_home": false` to leave an app out of
+  Home, so only other apps open it.
+- Settings → Apps enables or disables each SD app on this device; disabled
+  apps leave Home and cannot be started.
+- SD app SDK 7 adds `esp.apps.status(id)` and `esp.apps.open(id)` to check
+  and open other apps, with a launcher example.
 
 ### Changed
 

@@ -40,11 +40,13 @@ USBMSC *usbMsc = nullptr;
 #include "src/core/DisplayOrientation.h"
 #include "src/services/audio/AudioSettings.h"
 #include "src/services/led/LedSettings.h"
+#include "src/services/apps/AppSettings.h"
 #include "src/services/assistant/AssistantBackendConfigLoader.h"
 #include "src/services/assistant/AssistantController.h"
 #include "src/features/assistant/AssistantScreen.h"
 #include "src/features/settings/AboutScreen.h"
 #include "src/features/settings/AudioSettingsScreen.h"
+#include "src/features/settings/AppsSettingsScreen.h"
 #include "src/features/settings/BatteryInfoScreen.h"
 #include "src/features/settings/LedScreen.h"
 #include "src/features/audio_player/AudioPlayerScreen.h"
@@ -151,6 +153,7 @@ SecretStorage *secretStorage = nullptr;
 MediaCache *mediaCache = nullptr;
 AudioSettings *audioSettings = nullptr;
 LedSettings *ledSettings = nullptr;
+AppSettings *appSettings = nullptr;
 WiFiController *wifiController = nullptr;
 TimeController *timeController = nullptr;
 BatteryController *batteryController = nullptr;
@@ -166,6 +169,7 @@ VoiceRecorderScreen *voiceRecorderScreen = nullptr;
 FilesScreen *filesScreen = nullptr;
 SettingsScreen *settingsScreen = nullptr;
 AudioSettingsScreen *audioSettingsScreen = nullptr;
+AppsSettingsScreen *appsSettingsScreen = nullptr;
 LedScreen *ledScreen = nullptr;
 BatteryInfoScreen *batteryInfoScreen = nullptr;
 AboutScreen *aboutScreen = nullptr;
@@ -381,6 +385,9 @@ void setup() {
   Serial.print(F("Audio volume: "));
   Serial.println(audioSettings->volume());
 
+  appSettings = new AppSettings();
+  appSettings->begin();
+
   ledSettings = new LedSettings(BUILTIN_RGB_LED_PIN);
   if (ledSettings->begin()) {
     Serial.println(F("Built-in RGB LED ready."));
@@ -411,13 +418,15 @@ void setup() {
   }
 
   homeScreen = new HomeScreen(*navigator, *touch, *display, *sdCard, *wifiController,
-                              *timeController, *batteryHistory);
+                              *timeController, *batteryHistory, *appSettings);
   splashScreen = new SplashScreen(*navigator, *touch, *display, *wifiController,
                                   *batteryHistory);
   voiceRecorderScreen = new VoiceRecorderScreen(*navigator, *touch, *display, *sdCard, *mic, *speaker);
   filesScreen = new FilesScreen(*navigator, *touch, *display, *sdCard, *secretStorage, *mediaCache);
   settingsScreen = new SettingsScreen(*navigator, *touch, *display);
   audioSettingsScreen = new AudioSettingsScreen(*navigator, *touch, *display, *audioSettings);
+  appsSettingsScreen = new AppsSettingsScreen(*navigator, *touch, *display, *sdCard,
+                                              *appSettings);
   ledScreen = new LedScreen(*navigator, *touch, *display, *ledSettings);
   batteryInfoScreen = new BatteryInfoScreen(*navigator, *touch, *display, *batteryHistory);
   aboutScreen = new AboutScreen(*navigator, *touch, *display);
@@ -442,7 +451,7 @@ void setup() {
   appHostScreen = new AppHostScreen(*navigator, *touch, *display, *sdCard,
                                     *wifiController, *batteryHistory,
                                     *speaker, *audioSettings, *mic, *mediaCache,
-                                    *imageView);
+                                    *imageView, *appSettings);
 
   if (!navigator->registerScreen(ScreenId::Splash, *splashScreen)) {
     Serial.println(F("Navigator failed to register Splash screen."));
@@ -461,6 +470,9 @@ void setup() {
   }
   if (!navigator->registerScreen(ScreenId::AudioSettings, *audioSettingsScreen)) {
     Serial.println(F("Navigator failed to register Audio Settings screen."));
+  }
+  if (!navigator->registerScreen(ScreenId::AppsSettings, *appsSettingsScreen)) {
+    Serial.println(F("Navigator failed to register Apps settings screen."));
   }
   if (!navigator->registerScreen(ScreenId::Led, *ledScreen)) {
     Serial.println(F("Navigator failed to register LED screen."));

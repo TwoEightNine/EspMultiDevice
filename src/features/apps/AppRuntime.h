@@ -13,6 +13,7 @@ class SdCardController;
 class SpeakerController;
 class AppNetWorker;
 class AudioSettings;
+class AppSettings;
 class MicController;
 struct lua_State;
 struct lua_Debug;
@@ -62,7 +63,9 @@ public:
 
   // A host-screen navigation an SDK 4 app asked for. The worker never
   // navigates; the host screen takes the request once the app is paused.
-  enum class NavigationKind : uint8_t { None, OpenFile, Prompt };
+  // SDK 7 `LaunchApp` replaces the running app with `appId`; the host stops
+  // this app instead of resuming it.
+  enum class NavigationKind : uint8_t { None, OpenFile, Prompt, LaunchApp };
   static constexpr size_t MaxPromptBytes = 1024;  // SDK 6; earlier SDKs keep 255.
   struct Navigation {
     NavigationKind kind;
@@ -70,6 +73,7 @@ public:
     char path[256];                      // OpenFile: validated absolute SD path.
     char title[41];                      // Prompt: keyboard title.
     char initial[MaxPromptBytes + 1];    // Prompt: initial text.
+    char appId[33];                      // LaunchApp: checked target app ID.
   };
 
   // The host image layer an SDK 5 app asked for. The worker only records what
@@ -96,7 +100,7 @@ public:
   };
 
   AppRuntime(SdCardController &card, SpeakerController &speaker, AudioSettings &audioSettings,
-             MicController &mic, MediaCache &mediaCache);
+             MicController &mic, MediaCache &mediaCache, AppSettings &appSettings);
   bool start(const String &id, const Status &initialStatus);
   void requestStop();
   bool stopped() const;
@@ -162,6 +166,7 @@ private:
   AudioSettings &_audioSettings;
   MicController &_mic;
   MediaCache &_mediaCache;
+  AppSettings &_appSettings;
   String _id;
   String _displayName;
   TaskHandle_t _task = nullptr;
@@ -358,6 +363,10 @@ private:
   static int luaBuildResponse(lua_State *state);
   static int luaDownloadsStat(lua_State *state);
   static int luaDownloadsOpen(lua_State *state);
+  // SDK 7 (AppRuntimeSdk7.cpp).
+  void registerSdk7();
+  static int luaAppsStatus(lua_State *state);
+  static int luaAppsOpen(lua_State *state);
   // Reads Lua argument `index` as an app path; on failure pushes the
   // `false|nil, error` pair and returns false.
   bool checkFsPath(lua_State *state, int index, bool allowRoot, bool mutation,

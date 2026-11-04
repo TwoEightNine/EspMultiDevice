@@ -88,6 +88,19 @@ def dvach_logo():
     save(image, "examples/apps/dvach/logo.png")
 
 
+def launcher_logo():
+    image = canvas()
+    draw = ImageDraw.Draw(image)
+    white = (255, 255, 255, 255)
+    # A 2x2 grid of tiles with an arrow leaving the top-right one.
+    for x, y in ((40, 40), (40, 136), (136, 136)):
+        draw.rounded_rectangle((x, y, x + 80, y + 80), radius=18, fill=white)
+    draw.rounded_rectangle((136, 40, 216, 120), radius=18, outline=white, width=14)
+    draw.line((160, 96, 214, 42), fill=white, width=16)
+    draw.polygon(((228, 28), (228, 92), (164, 28)), fill=white)
+    save(image, "examples/apps/launcher/logo.png")
+
+
 LOGOS = {
     "counter": counter_logo,
     "workout": workout_logo,
@@ -95,6 +108,7 @@ LOGOS = {
     "files": files_logo,
     "images": images_logo,
     "dvach": dvach_logo,
+    "launcher": launcher_logo,
 }
 
 

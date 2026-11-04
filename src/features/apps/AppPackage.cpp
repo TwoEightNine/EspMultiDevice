@@ -116,7 +116,15 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
   char *json = nullptr;
   size_t length = 0;
   if (!readFile(card, packagePath(id, "manifest.json"), MaxManifestBytes,
-                json, length, result.error)) return result;
+                json, length, result.error)) {
+    // Only a missing manifest means no package; card errors are reported as
+    // such by callers, and a manifest that exists but cannot be read is a
+    // broken package.
+    result.installed = result.error != "File missing" && result.error != "SD busy" &&
+                       result.error != "SD card unavailable";
+    return result;
+  }
+  result.installed = true;
   cJSON *root = cJSON_ParseWithLength(json, length);
   heap_caps_free(json);
   if (!root || !cJSON_IsObject(root)) {
@@ -131,11 +139,15 @@ AppPackage AppPackage::load(SdCardController &card, const String &id) {
     } else if (!cJSON_IsString(manifestName) || !manifestName->valuestring ||
                !manifestName->valuestring[0] || strlen(manifestName->valuestring) > 40) {
       result.error = "Invalid app name";
-    } else if (!cJSON_IsNumber(sdk) ||
-               (sdk->valuedouble != 1 && sdk->valuedouble != 2 && sdk->valuedouble != 3 &&
-                sdk->valuedouble != 4 && sdk->valuedouble != 5 && sdk->valuedouble != 6)) {
+    } else if (!cJSON_IsNumber(sdk) || sdk->valuedouble < 1 || sdk->valuedouble > MaxSdk ||
+               sdk->valuedouble != static_cast<double>(static_cast<int>(sdk->valuedouble))) {
       result.error = "Unsupported SDK version";
+    } else if (cJSON_GetObjectItemCaseSensitive(root, "show_in_home") &&
+               !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(root, "show_in_home"))) {
+      result.error = "Invalid show_in_home";
     } else {
+      const cJSON *showInHome = cJSON_GetObjectItemCaseSensitive(root, "show_in_home");
+      result.showInHome = !showInHome || cJSON_IsTrue(showInHome);
       result.sdk = static_cast<uint8_t>(sdk->valuedouble);
       result.name = manifestName->valuestring;
       if (cJSON_IsNumber(iconBackground) &&

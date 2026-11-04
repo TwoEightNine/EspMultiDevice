@@ -24,7 +24,7 @@ ESP Media is a personal hobby project in active development, currently at firmwa
 - Wi-Fi management with a bounded Cloudflare internet speed test, a verified SD read/write speed test, UTC+4 SNTP time, a lightweight HTTP/HTTPS browser, and an interval-workout timer with audio cues.
 - Optional, self-hosted: a stack-scoped Xiaozhi voice assistant with a persistent multi-turn WSS session that stays connected under screens it opens and closes only from its app-bar X, verified HTTPS/WSS, half-duplex Opus audio, authenticated device status/settings commands, normal-SD media search/open commands, file-location and paged directory-listing answers, and Browser search handoffs.
 - Runtime SD-card removal/reinsertion handling, touch mesh calibration, battery reporting, an About screen with the firmware version, and a shared non-blocking screen/navigation model.
-- SD-loaded Lua apps appear directly in Home's alphabetized, swipe-paged grid, with versioned drawing, tone, microphone/WAV, app-file, permission-gated SD file management, host-rendered image viewing, permission-gated HTTP(S) requests with streaming JSON parsing, and device-status APIs. Installing an app requires no firmware upload.
+- SD-loaded Lua apps appear directly in Home's alphabetized, swipe-paged grid unless their manifest hides them or they are disabled in Settings → Apps, with versioned drawing, tone, microphone/WAV, app-file, permission-gated SD file management, host-rendered image viewing, permission-gated HTTP(S) requests with streaming JSON parsing, opening other apps by ID, and device-status APIs. Installing an app requires no firmware upload.
 
 ## Hardware
 
@@ -66,7 +66,7 @@ The supported profile is **ESP32S3 Dev Module**, 16 MiB flash, 8 MiB OPI PSRAM, 
 5. Format the SD card as FAT32 with an MBR partition map. See [docs/hardware.md](docs/hardware.md#sd-card-formatting).
 6. Optional: to use the voice Assistant, set up its self-hosted backend and configure the firmware as described in [docs/assistant-setup.md](docs/assistant-setup.md). Skip this step otherwise.
 
-To try an SD app, copy `examples/apps/counter`, `examples/apps/workout`, `examples/apps/recorder`, `examples/apps/files`, `examples/apps/images`, or `examples/apps/dvach` (a 2ch imageboard reader) to `/Apps/<name>` on the card. Its tile appears directly on Home. See [docs/external-apps.md](docs/external-apps.md) for the package and SDK contract.
+To try an SD app, copy `examples/apps/counter`, `examples/apps/workout`, `examples/apps/recorder`, `examples/apps/files`, `examples/apps/images`, `examples/apps/dvach` (a 2ch imageboard reader), or `examples/apps/launcher` together with `examples/apps/launcher_helper` to `/Apps/<name>` on the card. Its tile appears directly on Home. See [docs/external-apps.md](docs/external-apps.md) for the package and SDK contract.
 
 The Mac Remote YouTube button opens Spotlight, types `https://www.youtube.com/`, selects the top result with Down Arrow, and submits it to the default browser. This requires the standard Command-Space Spotlight shortcut and a keyboard input source that types ASCII URL characters from US-keyboard positions. The remaining actions use standard HID media keys or macOS keyboard shortcuts and need no setup.
 

@@ -18,7 +18,7 @@ public:
 private:
   static const int16_t RowTop = UiKit::AppBarHeight + 16;
   static const int16_t RowHeight = UiKit::ListCellHeight;
-  static const uint8_t OptionCount = 7;
+  static const uint8_t OptionCount = 8;
 
   bool _lastTouchDown;
 

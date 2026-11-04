@@ -27,6 +27,7 @@ extern "C" {
 #include "../../services/audio/AudioSettings.h"
 #include "../../services/audio/MicController.h"
 #include "../../services/audio/WavFormat.h"
+#include "../../services/apps/AppSettings.h"
 #include "AppNetWorker.h"
 #include "AppPackage.h"
 #include "AppText.h"
@@ -60,9 +61,9 @@ int pushFailure(lua_State *state, bool nilFirst, const char *error) {
 
 AppRuntime::AppRuntime(SdCardController &card, SpeakerController &speaker,
                        AudioSettings &audioSettings, MicController &mic,
-                       MediaCache &mediaCache)
+                       MediaCache &mediaCache, AppSettings &appSettings)
   : _card(card), _speaker(speaker), _audioSettings(audioSettings), _mic(mic),
-    _mediaCache(mediaCache) {}
+    _mediaCache(mediaCache), _appSettings(appSettings) {}
 
 bool AppRuntime::start(const String &id, const Status &initialStatus) {
   if (_task || !AppPackage::validId(id)) return false;
@@ -1854,6 +1855,7 @@ void AppRuntime::registerApi() {
     }
   }
   if (_sdkVersion >= 6) registerSdk6();
+  if (_sdkVersion >= 7) registerSdk7();
   lua_setglobal(_lua, "esp");
 }
 
@@ -1962,6 +1964,8 @@ void AppRuntime::run() {
                 static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()));
   AppPackage package = AppPackage::load(_card, _id);
   if (!package.valid) { setError(package.error); return; }
+  // Every launch path (Home, another app, a stale navigation) ends here.
+  if (!_appSettings.isEnabled(_id)) { setError("App disabled"); return; }
   _displayName = package.name;
   _sdkVersion = package.sdk;
   _filesPermission = package.sdk >= 4 && package.filesPermission;

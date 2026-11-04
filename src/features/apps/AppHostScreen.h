@@ -11,6 +11,7 @@ class AudioSettings;
 class MicController;
 class MediaCache;
 class ImageView;
+class AppSettings;
 
 class AppHostScreen : public Screen {
 public:
@@ -18,7 +19,8 @@ public:
                 DisplayController &display, SdCardController &card,
                 WiFiController &wifi, BatteryHistoryService &batteryHistory,
                 SpeakerController &speaker, AudioSettings &audioSettings,
-                MicController &mic, MediaCache &mediaCache, ImageView &imageView);
+                MicController &mic, MediaCache &mediaCache, ImageView &imageView,
+                AppSettings &appSettings);
   void onEnter(const ScreenData &data) override;
   void onExit() override;
   bool releaseResources() override;
@@ -44,6 +46,8 @@ private:
   bool _running = false;
   bool _canvasMode = false;
   String _appId;
+  // Restart button, or an SDK 7 `esp.apps.open` that replaces `_appId`: wait
+  // for the worker to end, then start `_appId` in a fresh Lua state.
   bool _restartPending = false;
   // SDK 4: a viewer or keyboard this screen pushed for the paused app.
   AppRuntime::Navigation _navigation{};

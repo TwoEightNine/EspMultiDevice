@@ -297,6 +297,19 @@ void drawToggle(TFT_eSPI &tft,
                 uint16_t activeColor = TFT_BLUE,
                 uint16_t backgroundColor = TFT_BLACK);
 
+// A standard 40px list cell whose trailing area holds a 56×28 `drawToggle`.
+// An optional compact grey `note` sits between the label and the toggle.
+// The owner makes the whole 40px row tappable.
+constexpr int16_t ListToggleWidth = 56;
+constexpr int16_t ListToggleHeight = 28;
+void drawToggleListCell(TFT_eSPI &tft,
+                        int16_t width,
+                        int16_t y,
+                        const String &label,
+                        bool enabled,
+                        const String &note = String(),
+                        uint16_t activeColor = TFT_BLUE);
+
 // Shared fill-only color selection button. A white marker denotes the active
 // value, so swatches retain their actual color without an outlined treatment.
 void drawColorSwatch(TFT_eSPI &tft,

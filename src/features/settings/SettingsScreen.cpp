@@ -47,6 +47,8 @@ void SettingsScreen::handleTouch(const TouchPoint &point) {
     } else if (option == 5) {
       _navigator.push(ScreenId::TouchCalibration);
     } else if (option == 6) {
+      _navigator.push(ScreenId::AppsSettings);
+    } else if (option == 7) {
       _navigator.push(ScreenId::About);
     }
     return;
@@ -73,7 +75,7 @@ void SettingsScreen::drawTopBar() {
 
 void SettingsScreen::drawOptions() {
   const char *labels[OptionCount] = {
-    "Wi-Fi", "Speed test", "Audio", "LED", "Battery", "Touch screen", "About"
+    "Wi-Fi", "Speed test", "Audio", "LED", "Battery", "Touch screen", "Apps", "About"
   };
 
   for (uint8_t i = 0; i < OptionCount; i++) {

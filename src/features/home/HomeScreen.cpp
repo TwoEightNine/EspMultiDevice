@@ -42,13 +42,14 @@ HomeScreen::HomeScreen(Navigator &navigator,
                        SdCardController &sdCard,
                        WiFiController &wifi,
                        TimeController &time,
-                       BatteryHistoryService &batteryHistory)
+                       BatteryHistoryService &batteryHistory,
+                       AppSettings &appSettings)
   : Screen(navigator, touch, display),
     _sdCard(sdCard),
     _wifi(wifi),
     _time(time),
     _batteryHistory(batteryHistory),
-    _catalogLoader(sdCard),
+    _catalogLoader(sdCard, appSettings, AppCatalogLoader::Mode::Home),
     _pageStrip(&display.tft()),
     _pageFrame(&display.tft()),
     _catalogRevision(0),
@@ -540,7 +541,7 @@ void HomeScreen::updateCatalogTiles() {
 
   AppCatalogLoader::clearCatalog(_catalog);
   _catalog = _pendingCatalog;
-  _pendingCatalog = AppCatalogLoader::Catalog{};
+  AppCatalogLoader::forgetCatalog(_pendingCatalog);
   rebuildApps();
 
   bool changed[MaxHomeApps] = {};

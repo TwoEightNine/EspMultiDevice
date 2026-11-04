@@ -824,6 +824,31 @@ void drawToggle(TFT_eSPI &tft,
   tft.fillSmoothCircle(knobX, y + height / 2, knobRadius, TFT_WHITE, fill);
 }
 
+void drawToggleListCell(TFT_eSPI &tft,
+                        int16_t width,
+                        int16_t y,
+                        const String &label,
+                        bool enabled,
+                        const String &note,
+                        uint16_t activeColor) {
+  tft.fillRect(0, y, width, ListCellHeight, TFT_BLACK);
+  const int16_t toggleX = width - ContentPadding - ListToggleWidth;
+  int16_t labelEnd = toggleX - 8;
+  if (note.length() > 0) {
+    const int16_t noteWidth = UiText::measure(note, UiText::Size::Compact);
+    UiText::draw(tft, note, labelEnd, y + ListCellHeight / 2,
+                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MR_DATUM);
+    labelEnd -= noteWidth + 8;
+  }
+  UiText::draw(tft, UiKit::ellipsize(label, labelEnd - ContentPadding, UiText::Size::Content),
+               ContentPadding, y + ListCellHeight / 2, TFT_WHITE, TFT_BLACK,
+               UiText::Size::Content, ML_DATUM);
+  drawToggle(tft, toggleX, y + (ListCellHeight - ListToggleHeight) / 2,
+             ListToggleWidth, ListToggleHeight, enabled, activeColor, TFT_BLACK);
+  tft.drawFastHLine(ContentPadding, y + ListCellHeight - 1,
+                    width - ContentPadding * 2, DividerColor);
+}
+
 void drawColorSwatch(TFT_eSPI &tft,
                      int16_t x,
                      int16_t y,

@@ -9,6 +9,8 @@
 #include "../../services/storage/BatteryHistoryService.h"
 #include "../../services/storage/SdCardController.h"
 
+class AppSettings;
+
 class HomeScreen : public Screen {
 public:
   HomeScreen(Navigator &navigator,
@@ -17,7 +19,8 @@ public:
              SdCardController &sdCard,
              WiFiController &wifi,
              TimeController &time,
-             BatteryHistoryService &batteryHistory);
+             BatteryHistoryService &batteryHistory,
+             AppSettings &appSettings);
 
   void onEnter() override;
   void onResume() override;

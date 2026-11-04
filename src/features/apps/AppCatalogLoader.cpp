@@ -8,6 +8,7 @@
 
 #include "AppPackage.h"
 #include "../../core/SpiBusLock.h"
+#include "../../services/apps/AppSettings.h"
 #include "../../services/storage/SdCardController.h"
 
 namespace {
@@ -44,11 +45,13 @@ uint8_t pixelAlpha(const PNGDRAW &draw, int x) {
 
 AppCatalogLoader *AppCatalogLoader::_decoderOwner = nullptr;
 
-AppCatalogLoader::AppCatalogLoader(SdCardController &card) : _card(card) {}
+AppCatalogLoader::AppCatalogLoader(SdCardController &card, AppSettings &settings, Mode mode)
+  : _card(card), _settings(settings), _mode(mode) {}
 
 AppCatalogLoader::~AppCatalogLoader() {
   stop();
   clearCatalog(_published);
+  clearCatalog(_scanning);
   if (_png) {
     _png->~PNG();
     free(_png);
@@ -111,7 +114,7 @@ bool AppCatalogLoader::takeCatalog(Catalog &catalog, uint32_t &revision) {
   }
   clearCatalog(catalog);
   catalog = _published;
-  _published = Catalog{};
+  forgetCatalog(_published);
   revision = _publishedRevision;
   xSemaphoreGive(_mutex);
   return true;
@@ -124,7 +127,15 @@ void AppCatalogLoader::clearCatalog(Catalog &catalog) {
     catalog.entries[index].iconColors = nullptr;
     catalog.entries[index].iconAlpha = nullptr;
   }
-  catalog = Catalog{};
+  catalog.count = 0;
+}
+
+void AppCatalogLoader::forgetCatalog(Catalog &catalog) {
+  for (uint8_t index = 0; index < catalog.count; ++index) {
+    catalog.entries[index].iconColors = nullptr;
+    catalog.entries[index].iconAlpha = nullptr;
+  }
+  catalog.count = 0;
 }
 
 void AppCatalogLoader::taskMain(void *context) {
@@ -136,7 +147,7 @@ void AppCatalogLoader::run() {
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (_stopRequested) break;
     const uint32_t generation = _requestedGeneration;
-    Catalog catalog;
+    Catalog &catalog = _scanning;  // Empty: every pass below ends by emptying it.
     const uint32_t startedMs = millis();
     scan(generation, catalog);
     Serial.printf("[Apps] catalog scan: %u apps in %lu ms%s\n", catalog.count,
@@ -191,12 +202,18 @@ void AppCatalogLoader::scan(uint32_t generation, Catalog &catalog) {
     if (!AppPackage::validId(id)) continue;
     AppPackage package = AppPackage::load(_card, id);
     if (!package.valid || !generationCurrent(generation)) continue;
+    const bool enabled = _settings.isEnabled(id);
+    // Hidden and disabled apps must not take one of Home's slots.
+    if (_mode == Mode::Home && (!package.showInHome || !enabled)) continue;
 
     Entry &entry = catalog.entries[catalog.count];
     id.toCharArray(entry.id, sizeof(entry.id));
     package.name.toCharArray(entry.name, sizeof(entry.name));
     entry.iconBackground = package.iconBackground;
-    (void)decodeLogo(entry.id, generation, entry.iconColors, entry.iconAlpha);
+    entry.showInHome = package.showInHome;
+    entry.enabled = enabled;
+    if (_mode == Mode::Home)
+      (void)decodeLogo(entry.id, generation, entry.iconColors, entry.iconAlpha);
     ++catalog.count;
     taskYIELD();
   }
@@ -271,7 +288,7 @@ void AppCatalogLoader::publish(uint32_t generation, Catalog &catalog) {
   if (generationCurrent(generation)) {
     clearCatalog(_published);
     _published = catalog;
-    catalog = Catalog{};
+    forgetCatalog(catalog);
     _publishedRevision++;
   }
   xSemaphoreGive(_mutex);

@@ -19,10 +19,10 @@ AppHostScreen::AppHostScreen(Navigator &navigator, TouchController &touch,
                              WiFiController &wifi, BatteryHistoryService &batteryHistory,
                              SpeakerController &speaker, AudioSettings &audioSettings,
                              MicController &mic, MediaCache &mediaCache,
-                             ImageView &imageView)
+                             ImageView &imageView, AppSettings &appSettings)
   : Screen(navigator, touch, display), _card(card), _wifi(wifi),
     _batteryHistory(batteryHistory), _imageView(imageView),
-    _runtime(card, speaker, audioSettings, mic, mediaCache) {}
+    _runtime(card, speaker, audioSettings, mic, mediaCache, appSettings) {}
 
 void AppHostScreen::onEnter(const ScreenData &data) {
   _appId = data.kind == ScreenDataKind::ExternalApp ? data.text : String();
@@ -99,6 +99,15 @@ void AppHostScreen::onResult(const ScreenResult &result) {
 }
 
 void AppHostScreen::openNavigation() {
+  if (_navigation.kind == AppRuntime::NavigationKind::LaunchApp) {
+    // SDK 7: the paused app ends and the target replaces it in this same
+    // stack entry, so closing the target returns below the caller. The
+    // runtime re-checks the package and the enabled setting when it starts.
+    _appId = _navigation.appId;
+    _runtime.requestStop();
+    _restartPending = true;
+    return;
+  }
   const String path = _navigation.path;
   const FileFormats::Format format = FileFormats::fromPath(path);
   ScreenId target = ScreenId::TextInput;
