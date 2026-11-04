@@ -53,7 +53,7 @@ channel, and local IP, solely for this compatibility test.
 
 The self-hosted hardware result recorded on 2026-09-15 passed both automatic
 boots with target `local-self-hosted`. The first and second boots loaded the
-same `14:c1:9f:50:b4:a8` device ID and NVS UUID, received non-placeholder
+same MAC-derived device ID and NVS UUID, received non-placeholder
 credentials, accepted WSS/server hello with MCP disabled, and refreshed the
 credential after reboot. The 48 KiB probe task retained 21,076 bytes of stack;
 after each closed WSS session the largest free internal block was 90,100 bytes.

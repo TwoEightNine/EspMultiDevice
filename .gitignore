@@ -1,7 +1,25 @@
+# Editors and OS metadata
 .DS_Store
 .idea
+.vscode/
+*.swp
+
+# Build output (the ESP32 core also writes build.options.json to the sketch's build/)
+/build/
+*.bin
+*.elf
+*.map
+
+# Python
+__pycache__/
+*.pyc
+
+# Private local configuration
 tests/assistant_dependency_probe/ProbeConfig.h
 tests/assistant_dependency_probe/generated/
 tests/xiaozhi_compatibility_probe/LocalBackendConfig.h
 src/services/assistant/LocalAssistantBackendConfig.h
 tools/xiaozhi_local/.runtime/
+
+# Large video fixtures are regenerated locally by tools/generate_legacy_video_fixtures.sh
+tests/video/fixtures/

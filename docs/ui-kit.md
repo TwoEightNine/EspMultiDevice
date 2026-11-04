@@ -77,7 +77,7 @@ bounded 64-pixel chunks, so assets such as the splash logo do not require a
 width-sized stack or heap allocation. The TwoEightNine brand logo is drawn only through
 `UiKit::drawLogo()` (280×93, `UiKit::LogoWidth`/`LogoHeight`), which Splash
 and About share; do not include the generated `logo.h` in a screen, because
-each including translation unit would link its own copy of the arrays. As with icons, pass the actual solid
+each including translation unit would link its own copy of the arrays. The logo is not covered by the project's GPL: [`src/ui/LICENSE.logo`](../src/ui/LICENSE.logo) allows only unmodified use, so never alter or recolour its arrays. As with icons, pass the actual solid
 background colour and clear or redraw that background before drawing.
 
 For a monochrome icon that needs runtime tinting, use its 8-bit alpha array

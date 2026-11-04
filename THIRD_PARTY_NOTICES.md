@@ -2,7 +2,9 @@
 
 ESP Media is licensed under GPL-3.0-or-later with an additional permission for
 the Helix AAC decoder; see [LICENSE](LICENSE) and the
-[README license notice](README.md#license). The components below keep their
+[README license notice](README.md#license). The TwoEightNine logo is the
+author's brand and is not GPL-licensed; see `src/ui/LICENSE.logo`. The
+components below keep their
 own licenses. Their full license texts and copyright notices are in the listed
 files, which must accompany any source or binary distribution.
 

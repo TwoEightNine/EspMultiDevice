@@ -101,7 +101,7 @@ automatic two-boot hardware run:
 
 | Runtime gate | Public hosted result | Mac self-hosted result |
 | --- | --- | --- |
-| Stable MAC-derived Device-Id and NVS UUID across reboot | First boot passed; credential failure blocked the planned reboot | **Passed:** `14:c1:9f:50:b4:a8` and the same NVS UUID on both boots |
+| Stable MAC-derived Device-Id and NVS UUID across reboot | First boot passed; credential failure blocked the planned reboot | **Passed:** the same MAC-derived Device-Id and NVS UUID on both boots |
 | Normal Xiaozhi account binding | Passed 2026-09-15: activation polls advanced from HTTP 202 to 200 | Not required by the simple self-hosted backend |
 | Non-placeholder bootstrap WSS credentials | **Failed:** recognized placeholder/test token after successful binding | **Passed:** signed token on both boots |
 | WSS upgrade and valid server hello | Blocked by the credential failure | **Passed** on both boots |
