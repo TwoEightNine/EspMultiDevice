@@ -91,37 +91,41 @@ void drawTopAppBar(TFT_eSPI &tft,
                    AppBarAction action = AppBarAction::None,
                    AppBarStyle style = DefaultAppBarStyle);
 
-// Anti-aliased 24px navigation/control icons. Pass the colour immediately
-// behind an icon so edge pixels blend correctly without display readback.
+// Anti-aliased 24px navigation/control icons. Close and Zoom are generated
+// 40px Material Symbols alpha masks; Back is drawn with smooth primitives.
+// Pass the colour immediately behind an icon so edge pixels blend correctly
+// without display readback.
 void drawCloseIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                    uint16_t color, uint16_t backgroundColor);
 void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
 void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool zoomed, uint16_t color, uint16_t backgroundColor);
-// Fullscreen and fullscreen-exit are 24px controls. Their owner provides a
-// complete 48px hit target and the icon's solid immediate background.
+// Fullscreen and fullscreen-exit are 40px Material Symbols alpha masks. Their
+// owner provides a complete 48px hit target and the solid immediate background.
 void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         bool exitFullscreen, uint16_t color, uint16_t backgroundColor);
-// Compact playback control used by streaming media screens. `paused` draws
-// the pause bars. `scale` enlarges the 14px glyph for a larger control, such
-// as the Audio Player's 64px play button (scale 2).
+// Material Symbols play_arrow / pause. `paused` draws the pause bars. The
+// compact form is the 24px asset (a 14px glyph); `large` selects the 48px
+// asset for a bigger control, such as the Audio Player's 64px play button.
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       bool paused, uint16_t color, uint16_t backgroundColor,
-                      float scale = 1.0f);
-// 24px media transport glyphs. The owner supplies the complete 48x48px cell
-// as the hit target and the solid immediate background.
+                      bool large = false);
+// Media transport glyphs: 40px Material Symbols alpha masks. The owner
+// supplies the complete 48x48px cell as the hit target and the solid
+// immediate background.
 void drawSkipIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool forward, uint16_t color, uint16_t backgroundColor);
-// Speaker with two waves, or with an x when `muted`.
+// volume_up, or volume_off when `muted`.
 void drawVolumeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                     bool muted, uint16_t color, uint16_t backgroundColor);
-// Loop arrows; `one` adds a "1" badge on the top-right corner.
+// repeat, or repeat_one when `one`.
 void drawRepeatIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                     bool one, uint16_t color, uint16_t backgroundColor);
-// Scalable eighth note for media placeholders; `size` is its height in px.
+// Media placeholder note: a 120px Material Symbols music_note mask whose
+// visible glyph is about 60x90px.
 void drawMusicNoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                       int16_t size, uint16_t color, uint16_t backgroundColor);
+                       uint16_t color, uint16_t backgroundColor);
 
 // Horizontal slider for seek and volume: a 4px pill track, a fill from the
 // left edge, and an optional 14px white thumb at the fill's end. The helper
@@ -141,9 +145,9 @@ void updateSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
                    float previousFraction, float fraction, bool thumb,
                    uint16_t fillColor, uint16_t trackColor,
                    uint16_t backgroundColor);
-// Compact microphone status glyph for persistent status strips. The owner
-// supplies the complete hit target (if interactive) and the exact solid
-// background immediately behind the antialiased primitives.
+// 40px Material Symbols mic, or mic_off unless both `listening` and
+// `available`. The owner supplies the complete hit target (if interactive),
+// the foreground (greyed when unavailable), and the solid immediate background.
 void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                               bool listening, bool available,
                               uint16_t color, uint16_t backgroundColor);
@@ -267,8 +271,8 @@ void drawLogo(TFT_eSPI &tft, int16_t x, int16_t y, uint16_t backgroundColor);
 
 // Draws a flash-resident alpha mask with a caller-selected foreground colour.
 // Fully transparent pixels are left untouched. `alpha` contains width * height
-// 8-bit opacity entries. Icons wider than MaxRgba565IconWidth are rejected so
-// drawing remains allocation-free.
+// 8-bit opacity entries. Rows wider than MaxRgba565IconWidth are drawn in
+// chunks so drawing remains allocation-free.
 void drawAlphaIcon(TFT_eSPI &tft,
                    int16_t x,
                    int16_t y,

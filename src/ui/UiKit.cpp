@@ -41,7 +41,7 @@ void drawRemoteActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
     case RemoteActionIcon::YouTube:
       tft.fillSmoothRoundRect(centerX - 18, centerY - 12, 36, 24, 7,
                               color, backgroundColor);
-      drawPlaybackIcon(tft, centerX + 1, centerY, false,
+      drawPlaybackIcon(tft, centerX, centerY, false,
                        backgroundColor, color);
       return;
     case RemoteActionIcon::Screenshot:
@@ -132,18 +132,12 @@ constexpr uint16_t BatteryGreen = 0x2c89;
 constexpr uint16_t BatteryYellow = 0xa54a;
 constexpr uint16_t BatteryRed = 0xa1e5;
 
-// TFT_eSPI has no antialiased filled triangle. Stroking the edges gives
-// smooth outer edges and rounded corners of radius stroke / 2; filling the
-// triangle afterwards overwrites the strokes' inner fringe, which was blended
-// against the background rather than the fill.
-void fillSmoothTriangle(TFT_eSPI &tft, float x0, float y0, float x1, float y1,
-                        float x2, float y2, float stroke, uint16_t color,
-                        uint16_t backgroundColor) {
-  tft.drawWideLine(x0, y0, x1, y1, stroke, color, backgroundColor);
-  tft.drawWideLine(x1, y1, x2, y2, stroke, color, backgroundColor);
-  tft.drawWideLine(x2, y2, x0, y0, stroke, color, backgroundColor);
-  tft.fillTriangle(lroundf(x0), lroundf(y0), lroundf(x1), lroundf(y1),
-                   lroundf(x2), lroundf(y2), color);
+// Centres a generated alpha-mask icon on (centerX, centerY).
+void drawCenteredAlphaIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                           uint16_t width, uint16_t height, const uint8_t *alpha,
+                           uint16_t color, uint16_t backgroundColor) {
+  drawAlphaIcon(tft, centerX - width / 2, centerY - height / 2,
+                width, height, alpha, color, backgroundColor);
 }
 
 uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
@@ -277,117 +271,58 @@ void drawBackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 
 void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool zoomed, uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.5f;
-  constexpr int16_t lensOffset = 3;
-  constexpr int16_t lensRadius = 7;
-  tft.drawSmoothCircle(centerX - lensOffset, centerY - lensOffset, lensRadius,
-                       color, backgroundColor);
-  tft.drawWideLine(centerX + 2, centerY + 2, centerX + 9, centerY + 9,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - lensOffset - 3, centerY - lensOffset,
-                   centerX - lensOffset + 3, centerY - lensOffset,
-                   strokeWidth, color, backgroundColor);
-  if (!zoomed) {
-    tft.drawWideLine(centerX - lensOffset, centerY - lensOffset - 3,
-                     centerX - lensOffset, centerY - lensOffset + 3,
-                     strokeWidth, color, backgroundColor);
+  if (zoomed) {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_zoom_out_width, ic_zoom_out_height,
+                          ic_zoom_out_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_zoom_in_width, ic_zoom_in_height,
+                          ic_zoom_in_alpha, color, backgroundColor);
   }
 }
 
 void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         bool exitFullscreen, uint16_t color, uint16_t backgroundColor) {
-  constexpr float strokeWidth = 2.5f;
-  constexpr int16_t outer = 9;
-  constexpr int16_t inner = 3;
-  if (!exitFullscreen) {
-    tft.drawWideLine(centerX - outer, centerY - inner, centerX - outer, centerY - outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX - outer, centerY - outer, centerX - inner, centerY - outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX + inner, centerY - outer, centerX + outer, centerY - outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX + outer, centerY - outer, centerX + outer, centerY - inner,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX - outer, centerY + inner, centerX - outer, centerY + outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX - outer, centerY + outer, centerX - inner, centerY + outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX + inner, centerY + outer, centerX + outer, centerY + outer,
-                     strokeWidth, color, backgroundColor);
-    tft.drawWideLine(centerX + outer, centerY + outer, centerX + outer, centerY + inner,
-                     strokeWidth, color, backgroundColor);
-    return;
+  if (exitFullscreen) {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_fullscreen_exit_width,
+                          ic_fullscreen_exit_height, ic_fullscreen_exit_alpha,
+                          color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_fullscreen_width, ic_fullscreen_height,
+                          ic_fullscreen_alpha, color, backgroundColor);
   }
-  tft.drawWideLine(centerX - outer, centerY - inner, centerX - inner, centerY - inner,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - inner, centerY - inner, centerX - inner, centerY - outer,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + inner, centerY - outer, centerX + inner, centerY - inner,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + inner, centerY - inner, centerX + outer, centerY - inner,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - outer, centerY + inner, centerX - inner, centerY + inner,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX - inner, centerY + inner, centerX - inner, centerY + outer,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + inner, centerY + outer, centerX + inner, centerY + inner,
-                   strokeWidth, color, backgroundColor);
-  tft.drawWideLine(centerX + inner, centerY + inner, centerX + outer, centerY + inner,
-                   strokeWidth, color, backgroundColor);
 }
 
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       bool paused, uint16_t color, uint16_t backgroundColor,
-                      float scale) {
-  if (scale > 1.0f) {
-    const float s = scale;
+                      bool large) {
+  if (large) {
     if (paused) {
-      tft.fillSmoothRoundRect(centerX - lroundf(6 * s), centerY - lroundf(7 * s),
-                              lroundf(4 * s), lroundf(14 * s), lroundf(2 * s),
-                              color, backgroundColor);
-      tft.fillSmoothRoundRect(centerX + lroundf(2 * s), centerY - lroundf(7 * s),
-                              lroundf(4 * s), lroundf(14 * s), lroundf(2 * s),
-                              color, backgroundColor);
-      return;
+      drawCenteredAlphaIcon(tft, centerX, centerY, ic_pause_48_width, ic_pause_48_height,
+                            ic_pause_48_alpha, color, backgroundColor);
+    } else {
+      drawCenteredAlphaIcon(tft, centerX, centerY, ic_play_48_width, ic_play_48_height,
+                            ic_play_48_alpha, color, backgroundColor);
     }
-    // The strokes give rounded antialiased corners; at this size they no
-    // longer meet in the middle, so the solid interior is filled after them.
-    fillSmoothTriangle(tft, centerX - 4 * s, centerY - 7 * s, centerX - 4 * s, centerY + 7 * s,
-                       centerX + 7 * s, centerY, 3.0f * s, color, backgroundColor);
     return;
   }
   if (paused) {
-    tft.fillSmoothRoundRect(centerX - 6, centerY - 7, 4, 14, 2, color, backgroundColor);
-    tft.fillSmoothRoundRect(centerX + 2, centerY - 7, 4, 14, 2, color, backgroundColor);
-    return;
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_pause_24_width, ic_pause_24_height,
+                          ic_pause_24_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_play_24_width, ic_play_24_height,
+                          ic_play_24_alpha, color, backgroundColor);
   }
-  // Three antialiased strokes make a compact filled play chevron without a
-  // pixelated triangle edge.
-  tft.drawWideLine(centerX - 4, centerY - 7, centerX - 4, centerY + 7, 3.0f, color, backgroundColor);
-  tft.drawWideLine(centerX - 3, centerY - 6, centerX + 7, centerY, 3.0f, color, backgroundColor);
-  tft.drawWideLine(centerX - 3, centerY + 6, centerX + 7, centerY, 3.0f, color, backgroundColor);
 }
 
 void drawMicrophoneStatusIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                               bool listening, bool available,
                               uint16_t color, uint16_t backgroundColor) {
-  const uint16_t bodyColor = available ? color : TFT_DARKGREY;
-  tft.fillSmoothRoundRect(centerX - 4, centerY - 8, 8, 13, 4,
-                          bodyColor, backgroundColor);
-  tft.drawWideLine(centerX - 7, centerY + 1, centerX - 7, centerY + 3,
-                   2.0f, bodyColor, backgroundColor);
-  tft.drawWideLine(centerX + 7, centerY + 1, centerX + 7, centerY + 3,
-                   2.0f, bodyColor, backgroundColor);
-  tft.drawSmoothArc(centerX, centerY + 1, 8, 6, 0, 180,
-                    bodyColor, backgroundColor, true);
-  tft.drawWideLine(centerX, centerY + 8, centerX, centerY + 11,
-                   2.0f, bodyColor, backgroundColor);
-  tft.drawWideLine(centerX - 4, centerY + 11, centerX + 4, centerY + 11,
-                   2.0f, bodyColor, backgroundColor);
-  if (!available || !listening) {
-    const uint16_t slashColor = available ? color : TFT_LIGHTGREY;
-    tft.drawWideLine(centerX - 9, centerY - 9, centerX + 9, centerY + 10,
-                     2.5f, slashColor, backgroundColor);
+  if (available && listening) {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_mic_width, ic_mic_height,
+                          ic_mic_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_mic_off_width, ic_mic_off_height,
+                          ic_mic_off_alpha, color, backgroundColor);
   }
 }
 
@@ -424,8 +359,8 @@ void drawVoiceActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                          uint16_t backgroundColor) {
   switch (icon) {
     case VoiceActionIcon::Stop:
-      tft.fillSmoothRoundRect(centerX - 9, centerY - 9, 18, 18, 3,
-                              color, backgroundColor);
+      drawCenteredAlphaIcon(tft, centerX, centerY, ic_stop_width, ic_stop_height,
+                            ic_stop_alpha, color, backgroundColor);
       return;
     case VoiceActionIcon::Cancel:
       drawCloseIcon(tft, centerX, centerY, color, backgroundColor);
@@ -506,78 +441,42 @@ void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 
 void drawSkipIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   bool forward, uint16_t color, uint16_t backgroundColor) {
-  const float d = forward ? 1.0f : -1.0f;
-  fillSmoothTriangle(tft, centerX - 8 * d, centerY - 8, centerX - 8 * d, centerY + 8,
-                     centerX + 5 * d, centerY, 2.0f, color, backgroundColor);
-  tft.fillSmoothRoundRect(forward ? centerX + 6 : centerX - 9, centerY - 9, 3, 18, 1,
+  if (forward) {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_skip_next_width, ic_skip_next_height,
+                          ic_skip_next_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_skip_previous_width,
+                          ic_skip_previous_height, ic_skip_previous_alpha,
                           color, backgroundColor);
+  }
 }
 
 void drawVolumeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                     bool muted, uint16_t color, uint16_t backgroundColor) {
-  // The cone is a trapezoid from the body's right edge to the mouth.
-  const int16_t ax = centerX - 6, bx = centerX + 1;
-  tft.drawWideLine(ax, centerY - 4, bx, centerY - 9, 2.0f, color, backgroundColor);
-  tft.drawWideLine(bx, centerY - 9, bx, centerY + 9, 2.0f, color, backgroundColor);
-  tft.drawWideLine(bx, centerY + 9, ax, centerY + 4, 2.0f, color, backgroundColor);
-  tft.fillTriangle(ax, centerY - 4, bx, centerY - 9, bx, centerY + 9, color);
-  tft.fillTriangle(ax, centerY - 4, bx, centerY + 9, ax, centerY + 4, color);
-  // Drawn last so its solid interior covers the cone strokes' rounded caps.
-  tft.fillSmoothRoundRect(centerX - 11, centerY - 4, 6, 8, 1, color, backgroundColor);
   if (muted) {
-    tft.drawWideLine(centerX + 4, centerY - 4, centerX + 11, centerY + 4,
-                     2.0f, color, backgroundColor);
-    tft.drawWideLine(centerX + 11, centerY - 4, centerX + 4, centerY + 4,
-                     2.0f, color, backgroundColor);
-    return;
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_volume_off_width, ic_volume_off_height,
+                          ic_volume_off_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_volume_up_width, ic_volume_up_height,
+                          ic_volume_up_alpha, color, backgroundColor);
   }
-  // Angles run clockwise from 6 o'clock, so 225–315 is the right-hand side.
-  tft.drawSmoothArc(centerX + 1, centerY, 6, 5, 225, 315, color, backgroundColor, true);
-  tft.drawSmoothArc(centerX + 1, centerY, 10, 9, 220, 320, color, backgroundColor, true);
 }
 
 void drawRepeatIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                     bool one, uint16_t color, uint16_t backgroundColor) {
-  // A 2px rounded loop with a right-pointing head on its top edge and a
-  // left-pointing head on its bottom edge.
-  tft.drawSmoothRoundRect(centerX - 10, centerY - 7, 5, 4, 20, 14, color, backgroundColor);
-  tft.drawWideLine(centerX - 1, centerY - 10, centerX + 2, centerY - 6.5f,
-                   2.0f, color, backgroundColor);
-  tft.drawWideLine(centerX + 2, centerY - 6.5f, centerX - 1, centerY - 3,
-                   2.0f, color, backgroundColor);
-  tft.drawWideLine(centerX, centerY + 2, centerX - 3, centerY + 5.5f,
-                   2.0f, color, backgroundColor);
-  tft.drawWideLine(centerX - 3, centerY + 5.5f, centerX, centerY + 9,
-                   2.0f, color, backgroundColor);
-  if (!one) return;
-  // Cut the loop's corner, then draw a solid badge with a knocked-out "1".
-  tft.fillSmoothCircle(centerX + 9, centerY - 7, 7, backgroundColor, backgroundColor);
-  tft.fillSmoothCircle(centerX + 9, centerY - 7, 5, color, backgroundColor);
-  tft.drawWideLine(centerX + 9, centerY - 9.5f, centerX + 9, centerY - 4.5f,
-                   1.6f, backgroundColor, color);
-  tft.drawWideLine(centerX + 9, centerY - 9.5f, centerX + 7.5f, centerY - 8.5f,
-                   1.4f, backgroundColor, color);
+  if (one) {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_repeat_one_width, ic_repeat_one_height,
+                          ic_repeat_one_alpha, color, backgroundColor);
+  } else {
+    drawCenteredAlphaIcon(tft, centerX, centerY, ic_repeat_width, ic_repeat_height,
+                          ic_repeat_alpha, color, backgroundColor);
+  }
 }
 
 void drawMusicNoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                       int16_t size, uint16_t color, uint16_t backgroundColor) {
-  if (size < 12) return;
-  const float s = size;
-  const float headRadius = s * 0.16f;
-  const float headX = centerX - s * 0.12f;
-  const float headY = centerY + s * 0.32f;
-  const int16_t stemWidth = (int16_t)lroundf(s * 0.08f) < 2 ? 2 : (int16_t)lroundf(s * 0.08f);
-  const int16_t stemRight = (int16_t)lroundf(headX + headRadius);
-  const int16_t stemTop = (int16_t)lroundf(centerY - s * 0.5f);
-  const float flagX = stemRight - stemWidth / 2.0f;
-  // Flag first: the square stem and the round head then cover its caps.
-  tft.drawWideLine(flagX, stemTop + stemWidth / 2.0f, flagX + s * 0.24f, centerY - s * 0.24f,
-                   stemWidth, color, backgroundColor);
-  tft.drawWideLine(flagX + s * 0.24f, centerY - s * 0.24f, flagX + s * 0.17f, centerY - s * 0.02f,
-                   stemWidth, color, backgroundColor);
-  tft.fillRect(stemRight - stemWidth, stemTop, stemWidth, (int16_t)lroundf(headY) - stemTop, color);
-  tft.fillSmoothCircle((int32_t)lroundf(headX), (int32_t)lroundf(headY),
-                       (int32_t)lroundf(headRadius), color, backgroundColor);
+                       uint16_t color, uint16_t backgroundColor) {
+  drawCenteredAlphaIcon(tft, centerX, centerY, ic_music_note_width, ic_music_note_height,
+                        ic_music_note_alpha, color, backgroundColor);
 }
 
 void drawSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
@@ -837,33 +736,41 @@ void drawAlphaIcon(TFT_eSPI &tft,
                    const uint8_t *alpha,
                    uint16_t color,
                    uint16_t backgroundColor) {
-  if (!alpha || width == 0 || height == 0 || width > MaxRgba565IconWidth) return;
+  if (!alpha || width == 0 || height == 0) return;
 
   uint16_t row[MaxRgba565IconWidth];
   tft.startWrite();
   for (uint16_t rowIndex = 0; rowIndex < height; rowIndex++) {
     const size_t offset = static_cast<size_t>(rowIndex) * width;
-    uint16_t runStart = 0;
-    bool inRun = false;
-    for (uint16_t column = 0; column < width; column++) {
-      const uint8_t opacity = pgm_read_byte(alpha + offset + column);
-      if (opacity == 0) {
-        if (inRun) {
-          tft.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
-                        column - runStart, 1, row + runStart);
-          inRun = false;
+    for (uint16_t chunkStart = 0; chunkStart < width;) {
+      const uint16_t remaining = width - chunkStart;
+      const uint16_t chunkWidth = remaining < MaxRgba565IconWidth
+                                    ? remaining : MaxRgba565IconWidth;
+      uint16_t runStart = 0;
+      bool inRun = false;
+      for (uint16_t column = 0; column < chunkWidth; column++) {
+        const uint8_t opacity = pgm_read_byte(alpha + offset + chunkStart + column);
+        if (opacity == 0) {
+          if (inRun) {
+            tft.pushImage(x + chunkStart + runStart,
+                          y + static_cast<int16_t>(rowIndex),
+                          column - runStart, 1, row + runStart);
+            inRun = false;
+          }
+          continue;
         }
-        continue;
+        if (!inRun) {
+          runStart = column;
+          inRun = true;
+        }
+        row[column] = blendRgba565(color, backgroundColor, opacity);
       }
-      if (!inRun) {
-        runStart = column;
-        inRun = true;
+      if (inRun) {
+        tft.pushImage(x + chunkStart + runStart,
+                      y + static_cast<int16_t>(rowIndex),
+                      chunkWidth - runStart, 1, row + runStart);
       }
-      row[column] = blendRgba565(color, backgroundColor, opacity);
-    }
-    if (inRun) {
-      tft.pushImage(x + runStart, y + static_cast<int16_t>(rowIndex),
-                    width - runStart, 1, row + runStart);
+      chunkStart += chunkWidth;
     }
   }
   tft.endWrite();

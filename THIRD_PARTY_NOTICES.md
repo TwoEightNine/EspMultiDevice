@@ -34,6 +34,12 @@ Exact archives, commits, and checksums are recorded in each component's
 | GNU FreeFont FreeSans 20120503 | `src/ui/fonts/BrowserFreeSans*.h` | GPL-3.0-or-later with the FreeFont font exception | `LICENSE.FreeFont` |
 | Noto Sans CJK SC | `src/ui/fonts/AssistantNotoSansSC18.h` | OFL-1.1 | `src/ui/fonts/LICENSE.NotoSansCJKSC` |
 
+## Icons compiled into the firmware
+
+| Icons | Generated header | License | Notice file |
+| --- | --- | --- | --- |
+| [Material Symbols](https://github.com/google/material-design-icons) Outlined: zoom, fullscreen, media transport, volume, repeat, music note, microphone, and stop | `src/ui/icons.h` | Apache-2.0 | `src/ui/LICENSE.MaterialSymbols` |
+
 ## Build dependencies linked into the firmware
 
 These are not stored in this repository. They are installed through the

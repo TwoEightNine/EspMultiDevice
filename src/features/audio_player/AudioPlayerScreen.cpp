@@ -11,7 +11,6 @@ namespace {
 constexpr int16_t CoverSize = AudioCoverWorker::Size;
 constexpr int16_t CoverTop = 64;
 constexpr int16_t CoverRadius = AudioCoverWorker::CornerRadius;
-constexpr int16_t CoverGlyphSize = 88;
 constexpr uint16_t CoverColor = AudioCoverWorker::TileColor;
 constexpr uint16_t CoverGlyphColor = 0x52AA;  // #555555
 
@@ -739,7 +738,7 @@ void AudioPlayerScreen::drawCover() {
     return;
   }
   tft.fillSmoothRoundRect(x, CoverTop, CoverSize, CoverSize, CoverRadius, CoverColor, TFT_BLACK);
-  UiKit::drawMusicNoteIcon(tft, _display.width() / 2, CoverTop + CoverSize / 2, CoverGlyphSize,
+  UiKit::drawMusicNoteIcon(tft, _display.width() / 2, CoverTop + CoverSize / 2,
                            CoverGlyphColor, CoverColor);
 }
 
@@ -878,9 +877,8 @@ void AudioPlayerScreen::drawPlayButton() {
   const uint16_t fill = enabled ? TFT_WHITE : PlayDisabledColor;
   tft.fillSmoothCircle(centerX, TransportY, PlayRadius, fill, TFT_BLACK);
   const bool playing = _state == State::Playing;
-  // The triangle's mass sits left of its bounding box; nudge it for balance.
-  UiKit::drawPlaybackIcon(tft, playing ? centerX : centerX - 1, TransportY, playing,
-                          enabled ? TFT_BLACK : InactiveColor, fill, 2.0f);
+  UiKit::drawPlaybackIcon(tft, centerX, TransportY, playing,
+                          enabled ? TFT_BLACK : InactiveColor, fill, true);
   // Previous depends on the same playable() state.
   drawPreviousCell();
 }
@@ -927,7 +925,8 @@ void AudioPlayerScreen::drawVolumeSlider(int16_t previousLevel) {
                          (float)previousLevel / AudioSettings::MaxVolume, fraction, true,
                          TFT_CYAN, PanelTrackColor, PanelColor);
   }
-  tft.fillRect(VolumeIconX - 14, VolumeRowY - 14, 28, 28, PanelColor);
+  // Clear the icon's whole 40px canvas: mask icons leave transparent pixels.
+  tft.fillRect(VolumeIconX - 20, VolumeRowY - 20, 40, 40, PanelColor);
   UiKit::drawVolumeIcon(tft, VolumeIconX, VolumeRowY, level == 0, TFT_WHITE, PanelColor);
   tft.fillRect(VolumeValueX - 18, VolumeRowY - 12, 36, 24, PanelColor);
   UiText::draw(tft, String(level), VolumeValueX, VolumeRowY, TFT_WHITE, PanelColor,
