@@ -113,6 +113,20 @@ glyph and does not invalidate an otherwise runnable package.
 
 The recorder writes 16 kHz mono PCM WAV from the INMP441. The Audio Player streams mono or stereo integer PCM WAV and local MP3. Global volume is persisted through `AudioSettings` and ranges from 0 to 10 (default 5).
 
+The player shows the track's title and an "artist · album · year" line when the file carries them, and otherwise the file name without its extension. The tags are read before playback starts, by the Arduino-free `AudioTags` parser (`src/media/`):
+
+- **Sources:** an MP3 queues an ID3v2 tag at the file start and then ID3v1 in the last 128 bytes. A WAV queues its first `id3 `/`ID3 ` chunk and then its first `LIST`/`INFO` chunk (`INAM`, `IART`, `IPRD`, `ICRD`). For each field, an earlier source wins over a later one.
+- **ID3v2.2–2.4 frames:** title `TIT2`/`TT2`; artist `TPE1`/`TP1`, falling back to `TPE2`/`TP2`; album `TALB`/`TAL`; year from `TDRC`/`TYER`/`TYE`, falling back to `TDOR`/`TORY`/`TOR`. The year is the first four digits, accepted from 1000 to 2999.
+- **Header features:** extended headers, grouping bytes, and v2.4 data-length indicators are skipped. v2.2/v2.3 tag-level and v2.4 frame-level unsynchronisation are both handled. Compressed and encrypted frames are skipped.
+- **Text:** decoded to trimmed UTF-8, at most 127 bytes per field, cut on a character boundary; control characters become spaces.
+  - UTF-16 (BOM or big-endian), UTF-8, and Latin-1 are recognised.
+  - Latin-1-declared text (ID3 encoding 0, ID3v1, INFO) that is valid multi-byte UTF-8 is read as UTF-8.
+  - Text whose high bytes are all Windows-1251 Cyrillic letters, in a run of at least three, is read as Windows-1251. Isolated accents such as "Beyoncé" stay Latin-1.
+- **Picture:** the parser records the position and length of the front cover (`APIC`/`PIC` type 3), or else the first picture, without reading its bytes. A picture inside an unsynchronised tag or frame is not offered. Nothing displays it yet; the redesign plan's cover phase will classify it through `FileFormats` before decoding.
+- **Bounds:** every frame and chunk size is checked against its tag, chunk, and file, and the first inconsistent size ends that source only. Each source visits at most 256 frames and reads at most 256 bytes of any text frame. Other frame bodies are skipped by offset, so a large embedded picture costs no reads.
+- **Scheduling:** parsing runs on the UI task, eight frames or chunks per `tick()`, while the player shows "Reading track...". It uses the screen's source file, so an MP3 rewinds its decoder to the first audio frame afterwards. Tags are re-read on each open; there is no tag cache.
+- **Log:** serial logs one `Audio tags:` line per tagged file.
+
 MP3 playback uses a sidecar cache at `<source-directory>/.cache/<file>.empa`. It stores validated compressed-audio bounds, format, and decoded sample count so later playback can skip a full MP3 scan while still decoding the original stream. It is valid only when source size and last-modified time match.
 
 ## Video

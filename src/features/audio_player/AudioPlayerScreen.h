@@ -10,6 +10,7 @@
 #include "../../services/storage/SdCardController.h"
 #include "../../services/storage/SecretStorage.h"
 #include "../../services/audio/SpeakerController.h"
+#include "../../media/AudioTags.h"
 #include "../../media/MediaCache.h"
 
 class AudioPlayerScreen : public Screen {
@@ -49,6 +50,7 @@ private:
   static const uint8_t Mp3AnalysisFramesPerTick = 16;
   static const uint16_t Mp3CacheHeaderBytes = 36;
   static const uint16_t OutputFrames = 256;
+  static const uint8_t TagFramesPerTick = 8;
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
@@ -79,6 +81,13 @@ private:
   uint8_t _sourceBuffer[SourceBufferBytes];
   int16_t _outputBuffer[OutputFrames];
 
+  AudioTags::Parser _tags;
+  bool _tagsParsing;
+  uint32_t _wavInfoOffset;
+  uint32_t _wavInfoSize;
+  uint32_t _wavId3Offset;
+  uint32_t _wavId3Size;
+
   bool _mp3Analyzing;
   uint32_t _mp3DataOffset;
   uint32_t _mp3AudioEnd;
@@ -96,6 +105,11 @@ private:
   SourceFormat formatForPath(const String &path) const;
   bool parseWav();
   bool parseFormatChunk(uint32_t offset, uint32_t size);
+  void beginTags();
+  void stepTags();
+  void finishTags();
+  static bool readTagBytes(void *context, uint32_t offset, uint8_t *buffer, size_t length);
+  bool loading() const { return _tagsParsing || _mp3Analyzing; }
   bool beginMp3Analysis();
   bool loadMp3Cache();
   void writeMp3Cache();
@@ -123,6 +137,7 @@ private:
 
   void draw(bool force = true);
   void drawTopBar();
+  void drawTrackText();
   void drawDynamic(bool force);
   void drawPlayButton();
   void drawVolumeButton();
@@ -131,6 +146,8 @@ private:
   void drawStatus();
   void drawError();
   String displayName(const String &path) const;
+  String trackTitle() const;
+  String trackDetails() const;
   String truncateLabel(const String &label, int16_t maxWidth);
   String timeText(uint32_t frames) const;
   bool controlContains(int16_t x, int16_t y) const;

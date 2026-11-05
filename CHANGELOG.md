@@ -22,6 +22,9 @@ version follows the rules in
   apps leave Home and cannot be started.
 - SD app SDK 7 adds `esp.apps.status(id)` and `esp.apps.open(id)` to check
   and open other apps, with a launcher example.
+- The Audio Player shows the track title, artist, album, and year from
+  ID3v1/ID3v2 tags and WAV `INFO`/`id3 ` chunks, and falls back to the file
+  name without its extension.
 
 ### Changed
 
