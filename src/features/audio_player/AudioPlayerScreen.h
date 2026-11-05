@@ -7,6 +7,7 @@
 #include "../../services/audio/SpeakerController.h"
 #include "../../services/storage/SdCardController.h"
 #include "AudioCoverWorker.h"
+#include "AudioQueue.h"
 #include "AudioSource.h"
 
 // "Now playing" screen: cover tile, track text, seek bar, and a transport row
@@ -39,8 +40,8 @@ private:
     Error
   };
 
-  // Kept for the screen visit only. Until the folder queue exists, All
-  // repeats the single track just like One.
+  // Kept for the screen visit only. All wraps around the folder queue (or
+  // repeats the track when there is no queue); One repeats the track.
   enum class Repeat : uint8_t {
     Off,
     All,
@@ -56,7 +57,9 @@ private:
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
+  SecretStorage &_secretStorage;
   AudioSource _source;
+  AudioQueue _queue;
   AudioCoverWorker _cover;
   // The decoded tile, owned by the UI task once taken from the worker.
   uint16_t *_coverPixels;
@@ -69,6 +72,15 @@ private:
   bool _secretAccess;
   bool _sdMounted;
   bool _pendingOpen;
+  // Start playing once the track has loaded.
+  bool _autoplay;
+  // The track was reached by previous/next or auto-advance, so a failure to
+  // open it is skipped in _direction after a pause.
+  bool _queueMove;
+  int8_t _direction;
+  uint8_t _failures;
+  bool _skipPending;
+  uint32_t _skipAtMs;
   bool _lastTouchDown;
   State _state;
   Repeat _repeat;
@@ -92,6 +104,7 @@ private:
 
   bool openSource();
   void onSourceLoaded();
+  void onScanFinished();
   bool loading() const { return _pendingOpen || _source.loading(); }
   bool tagsPending() const { return _pendingOpen || _source.tagsParsing(); }
   bool playable() const;
@@ -99,6 +112,12 @@ private:
   void pausePlayback();
   void finishPlayback();
   void restartTrack();
+  void previousTrack();
+  void nextTrack();
+  int16_t neighbour(int8_t direction) const;
+  bool repeatsTrack() const;
+  void changeTrack(uint16_t index, bool autoplay);
+  void onTrackFailed();
   void cycleRepeat();
   void fail(const String &message);
   void failFromSource();

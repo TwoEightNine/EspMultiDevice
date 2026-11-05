@@ -32,8 +32,12 @@ version follows the rules in
 
 - The Audio Player has a "Now playing" layout: an artwork tile, title, artist,
   and album line, a seek bar with elapsed and remaining time (draggable for
-  WAV and MP3), repeat and restart controls, a volume slider in place of the 0–10
+  WAV and MP3), previous/next through the track's folder with auto-advance
+  and repeat, skipping tracks that fail to open, a volume slider in place of the 0–10
   grid, and a Track info sheet.
+- An MP3 starts playing as soon as its tags are read, even on its first
+  open. The frame scan for the exact duration and the seek table runs in the
+  background.
 - The MP3 cache (`.empa`) is now version 2 with a seek table. Version-1 files
   are rebuilt automatically the next time the track is opened.
 - The Browser now validates HTTPS certificates against the Mozilla root bundle
@@ -44,6 +48,11 @@ version follows the rules in
   TFT_eSPI's global `User_Setup.h` no longer needs editing.
 - The build scripts find `arduino-cli` and the ESP32 board package
   automatically and run on Linux and in Git Bash on Windows.
+
+### Fixed
+
+- The Audio Player opens tracks in the hidden-files folder; it used to read
+  the encrypted name and report "Unsupported audio file".
 
 ### Removed
 

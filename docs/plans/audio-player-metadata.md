@@ -1,6 +1,6 @@
 # Plan: Audio Player track metadata and redesign
 
-Status: phases 1–4 implemented; phase 5 not started. The contracts of record are the Audio section of [media.md](../media.md) and the Audio Player exception in [ui-kit.md](../ui-kit.md). `tests/audio_tags` passes on the host and the firmware builds; nothing has been run on a device yet. Differences from the proposal below:
+Status: all five phases implemented. The contracts of record are the Audio section of [media.md](../media.md) and the Audio Player exception in [ui-kit.md](../ui-kit.md). `tests/audio_tags` passes on the host and the firmware builds; nothing has been run on a device yet. Differences from the proposal below:
 
 - `AudioTags::Info` has no `coverKind`. Signatures belong to `FileFormats`, which needs Arduino, so phase 3 classifies the picture bytes there before decoding.
 - Playback starts from `tick()` after the tags are read, for WAV too, rather than straight from `onEnter()`. Since phase 2 the file itself is also opened from the first `tick()`, after the screen is drawn.
@@ -14,6 +14,10 @@ Status: phases 1–4 implemented; phase 5 not started. The contracts of record a
 - Phase 4's table is the Arduino-free `Mp3SeekTable` (`src/media/`), host-tested in `tests/mp3_seek_table`. The `.empa` v2 header is 44 bytes: besides `tocInterval` and `tocCount` it stores the samples per MP3 frame (bytes 34–35, formerly padding), so a cache hit can map positions to frames and validate the entry count.
 - The lookup restarts at the last entry strictly before the target frame, so there is always one frame to discard for the bit reservoir. The discard frames run inside `stream()`, which reports Busy until the target frame plays. While paused, they wait for the next play.
 - A track without seek-table memory (PSRAM exhausted) still plays and restarts, and its `.empa` is not written, so it is scanned again on the next open.
+- Phase 5: `NaturalOrder` (`src/core/NaturalOrder.h`) was already shared by Files and SD apps, so no `NaturalSort` extraction was needed. The queue lives in `AudioQueue`, scanning four entries per tick rather than one, with a 64 KiB PSRAM name pool besides the 512-entry cap.
+- Hidden-folder tracks never opened before this phase: the player picked the format from the stored, encrypted name. It now decrypts the name the way Text Viewer does, and the queue lists hidden folders the same way, so ⏮/⏭ work there while hidden storage is unlocked.
+- After the plan: the MP3 frame scan moved off the playback path. It runs beside playback through a second descriptor, with an estimated duration until it finishes (details in media.md).
+- Changing track while paused stays paused; a failed track is skipped in the direction of the last move. A track opened from Files that fails is not skipped.
 
 Goal: the Audio Player shows the track's cover, title, artist, album, and year when the file carries them, and falls back to the file name when it does not. The screen moves to a conventional "now playing" layout: big artwork, a seek bar you can tap or drag, previous/next with auto-advance through the folder, and a volume slider in place of the full-screen 0–10 grid.
 

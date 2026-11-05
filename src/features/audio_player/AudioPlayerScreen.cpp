@@ -65,6 +65,12 @@ constexpr int16_t InfoRowsTop = 92;  // Relative to InfoTop.
 constexpr uint8_t InfoRowCount = 5;
 constexpr int16_t InfoHeight = InfoRowsTop + InfoRowHeight * InfoRowCount + 34;
 
+// Previous restarts the track after this much playback.
+constexpr uint32_t PreviousRestartSeconds = 3;
+// A queue track that fails to open shows its error this long, then is skipped.
+constexpr uint32_t SkipDelayMs = 2000;
+constexpr uint8_t MaxConsecutiveFailures = 3;
+
 constexpr uint32_t PlayingRedrawMs = 200;
 constexpr uint32_t LoadingRedrawMs = 100;
 
@@ -121,13 +127,21 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
     _sdCard(sdCard),
     _speaker(speaker),
     _audioSettings(audioSettings),
+    _secretStorage(secretStorage),
     _source(secretStorage, mediaCache),
+    _queue(secretStorage),
     _cover(secretStorage),
     _coverPixels(nullptr),
     _coverGeneration(0),
     _secretAccess(false),
     _sdMounted(false),
     _pendingOpen(false),
+    _autoplay(true),
+    _queueMove(false),
+    _direction(1),
+    _failures(0),
+    _skipPending(false),
+    _skipAtMs(0),
     _lastTouchDown(false),
     _state(State::Ready),
     _repeat(Repeat::Off),
@@ -162,10 +176,21 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
   _finishAtMs = 0;
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _path = data.kind == ScreenDataKind::AudioPath ? data.text : "";
-  int16_t slash = _path.lastIndexOf('/');
-  _fileName = slash < 0 ? _path : _path.substring(slash + 1);
+  // Hidden-folder names are stored encrypted; show (and detect the format
+  // from) the decrypted name.
+  _fileName = AudioQueue::plainName(_secretStorage, _path, _secretAccess);
+  if (_fileName.length() == 0) {
+    int16_t slash = _path.lastIndexOf('/');
+    _fileName = slash < 0 ? _path : _path.substring(slash + 1);
+  }
   _sdMounted = _sdCard.isMounted();
   _pendingOpen = false;
+  _autoplay = true;
+  _queueMove = false;
+  _direction = 1;
+  _failures = 0;
+  _skipPending = false;
+  _queue.reset();
   _loadingStartMs = millis();
 
   if (data.kind != ScreenDataKind::AudioPath || _path.length() == 0) {
@@ -175,6 +200,7 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
   } else {
     // Show the player first; the file is opened from the next tick().
     _pendingOpen = true;
+    _queue.begin(_path, _secretAccess);
   }
   draw();
 }
@@ -184,7 +210,9 @@ void AudioPlayerScreen::onExit() {
   stopSpeaker();
   _cover.cancel();
   _source.closeFile();
+  _queue.reset();
   _pendingOpen = false;
+  _skipPending = false;
 }
 
 bool AudioPlayerScreen::releaseResources() {
@@ -241,7 +269,9 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
       startPlayback();
     }
   } else if (cellContains(PreviousX, x, y)) {
-    restartTrack();
+    previousTrack();
+  } else if (cellContains(NextX, x, y)) {
+    nextTrack();
   } else if (cellContains(RepeatX, x, y)) {
     cycleRepeat();
   } else if (cellContains(VolumeX, x, y)) {
@@ -259,10 +289,20 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
   if (_volumeOpen && _drag != Drag::Volume && elapsedSince(nowMs, _volumeTouchMs) >= VolumeTimeoutMs) {
     closeVolume();
   }
+  if (_queue.scanning() && _queue.step()) {
+    // Previous and next become available.
+    drawPreviousCell();
+    drawNextCell();
+  }
+  if (_skipPending && (int32_t)(nowMs - _skipAtMs) >= 0) {
+    _skipPending = false;
+    const int16_t index = neighbour(_direction);
+    if (index >= 0) changeTrack((uint16_t)index, true);
+  }
 
   if (_pendingOpen) {
     _pendingOpen = false;
-    openSource();
+    if (!openSource()) onTrackFailed();
     refresh();
     return;
   }
@@ -271,6 +311,7 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
     _source.loadStep();
     if (_source.failed()) {
       failFromSource();
+      onTrackFailed();
       refresh();
       return;
     }
@@ -285,6 +326,16 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
     }
     return;
   }
+  // An MP3's frame scan continues beside playback, paused or not.
+  if (_source.scanning()) {
+    _source.loadStep();
+    if (_source.failed()) {
+      failFromSource();
+      refresh();
+      return;
+    }
+    if (!_source.scanning()) onScanFinished();
+  }
 
   if (_state != State::Playing) return;
   if (_source.ended()) {
@@ -297,7 +348,7 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
     return;
   }
   if (_source.ended()) {
-    if (_repeat != Repeat::Off && _source.seek(0)) {
+    if (repeatsTrack() && _source.seek(0)) {
       // Repeat without stopping the speaker, so there is no gap.
       drawSeekRow(false);
     } else {
@@ -317,7 +368,7 @@ bool AudioPlayerScreen::openSource() {
   _state = State::Ready;
   _finishAtMs = 0;
   _loadingStartMs = millis();
-  if (!_source.open(_path, _secretAccess)) {
+  if (!_source.open(_path, _secretAccess, _fileName)) {
     failFromSource();
     return false;
   }
@@ -325,13 +376,20 @@ bool AudioPlayerScreen::openSource() {
 }
 
 void AudioPlayerScreen::onSourceLoaded() {
+  _failures = 0;
   drawTrackText();
-  if (!startPlayback()) {
+  if (_autoplay && !startPlayback()) {
     refresh();
     return;
   }
   drawSeekRow(true);
   drawTransport();
+  if (_infoOpen) drawTrackInfo();
+}
+
+void AudioPlayerScreen::onScanFinished() {
+  // The exact duration replaces the estimate, and the seek thumb appears.
+  drawSeekRow(true);
   if (_infoOpen) drawTrackInfo();
 }
 
@@ -353,6 +411,7 @@ bool AudioPlayerScreen::startPlayback() {
     return false;
   }
   _state = State::Playing;
+  _failures = 0;
   drawPlayButton();
   return true;
 }
@@ -364,10 +423,16 @@ void AudioPlayerScreen::pausePlayback() {
 }
 
 void AudioPlayerScreen::finishPlayback() {
-  // Reached only by seeking to the end; streaming handles repeat itself.
-  if (_repeat != Repeat::Off && _source.seek(0)) {
+  // Streaming repeats a track itself; this covers a seek to the very end.
+  if (repeatsTrack() && _source.seek(0)) {
     _finishAtMs = 0;
     drawSeekRow(false);
+    return;
+  }
+  const int16_t next = neighbour(1);
+  if (next >= 0) {
+    _direction = 1;
+    changeTrack((uint16_t)next, true);
     return;
   }
   stopSpeaker();
@@ -385,11 +450,87 @@ void AudioPlayerScreen::restartTrack() {
   drawSeekRow(false);
 }
 
+void AudioPlayerScreen::previousTrack() {
+  // Conventional behaviour: restart unless the track has only just begun.
+  const bool started = playable() && _source.sampleRate() > 0 &&
+                       _source.framePosition() / _source.sampleRate() >= PreviousRestartSeconds;
+  const int16_t previous = neighbour(-1);
+  if (started || previous < 0) {
+    restartTrack();
+    return;
+  }
+  _direction = -1;
+  changeTrack((uint16_t)previous, _state == State::Playing || (_state != State::Paused && _autoplay));
+}
+
+void AudioPlayerScreen::nextTrack() {
+  const int16_t next = neighbour(1);
+  if (next < 0) return;
+  _direction = 1;
+  changeTrack((uint16_t)next, _state == State::Playing || (_state != State::Paused && _autoplay));
+}
+
+int16_t AudioPlayerScreen::neighbour(int8_t direction) const {
+  if (!_queue.ready() || _queue.count() < 2) return -1;
+  const bool wrap = _repeat == Repeat::All;
+  int32_t index = _queue.current() + direction;
+  if (index < 0) return wrap ? _queue.count() - 1 : -1;
+  if (index >= _queue.count()) return wrap ? 0 : -1;
+  return (int16_t)index;
+}
+
+bool AudioPlayerScreen::repeatsTrack() const {
+  if (_repeat == Repeat::One) return true;
+  // Repeat All over a queue of one (or none yet) is the same track again.
+  return _repeat == Repeat::All && (!_queue.ready() || _queue.count() < 2);
+}
+
+void AudioPlayerScreen::changeTrack(uint16_t index, bool autoplay) {
+  if (index >= _queue.count()) return;
+  _skipPending = false;
+  if (_drag == Drag::Volume) endDrag();
+  _drag = Drag::None;
+  stopSpeaker();
+  _source.reset();
+  dropCover();
+  _queue.setCurrent(index);
+  _path = _queue.storagePath(index);
+  _fileName = _queue.displayName(index);
+  _error = "";
+  _state = State::Ready;
+  _finishAtMs = 0;
+  _autoplay = autoplay;
+  _queueMove = true;
+  _loadingStartMs = millis();
+  if (_sdMounted) {
+    _pendingOpen = true;
+  } else {
+    fail(F("SD card unavailable"));
+  }
+  drawCover();
+  refresh();
+  if (_infoOpen) drawTrackInfo();
+}
+
+void AudioPlayerScreen::onTrackFailed() {
+  if (!_queueMove || !_sdMounted) return;
+  if (++_failures >= MaxConsecutiveFailures) {
+    Serial.println(F("Audio queue: stopped after repeated failures"));
+    return;
+  }
+  if (neighbour(_direction) < 0) return;
+  _skipPending = true;
+  _skipAtMs = millis() + SkipDelayMs;
+}
+
 void AudioPlayerScreen::cycleRepeat() {
   _repeat = _repeat == Repeat::Off ? Repeat::All
           : _repeat == Repeat::All ? Repeat::One
                                    : Repeat::Off;
   drawRepeatCell();
+  // Repeat All lets previous and next wrap around the queue.
+  drawPreviousCell();
+  drawNextCell();
 }
 
 void AudioPlayerScreen::fail(const String &message) {
@@ -414,13 +555,19 @@ void AudioPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
     _sdMounted = false;
     _cover.cancel();
+    _queue.reset();
+    _skipPending = false;
     fail(event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable"));
     refresh();
     return;
   }
   if (event == SdCardEvent::Mounted) {
     _sdMounted = true;
-    if (_path.length() > 0) _pendingOpen = true;
+    if (_path.length() > 0) {
+      _pendingOpen = true;
+      // The folder may have changed while the card was out.
+      _queue.begin(_path, _secretAccess);
+    }
     refresh();
   }
 }
@@ -488,7 +635,7 @@ void AudioPlayerScreen::endDrag() {
   const Drag drag = _drag;
   _drag = Drag::None;
   if (drag == Drag::Seek) {
-    const uint32_t frame = (uint32_t)lroundf(_dragFraction * _source.frameCount());
+    const uint32_t frame = (uint32_t)lroundf(_dragFraction * _source.durationFrames());
     if (_source.seek(frame)) {
       if (_state == State::Finished && !_source.ended()) {
         _state = State::Paused;
@@ -524,7 +671,7 @@ uint8_t AudioPlayerScreen::currentVolume() const {
 }
 
 uint32_t AudioPlayerScreen::displayedFrame() const {
-  if (_drag == Drag::Seek) return (uint32_t)lroundf(_dragFraction * _source.frameCount());
+  if (_drag == Drag::Seek) return (uint32_t)lroundf(_dragFraction * _source.durationFrames());
   return _source.framePosition();
 }
 
@@ -652,7 +799,7 @@ void AudioPlayerScreen::drawSeekRow(bool force) {
     return;
   }
 
-  const uint32_t frames = _source.frameCount();
+  const uint32_t frames = _source.durationFrames();
   const float fraction = frames > 0 ? clampUnit((float)displayedFrame() / frames) : 0.0f;
   const bool thumb = _source.canSeek() && _state != State::Error;
   const uint16_t fill = _state == State::Error ? TrackColor : TFT_CYAN;
@@ -675,8 +822,8 @@ void AudioPlayerScreen::drawTimes(bool force) {
   int32_t elapsed = -1;
   int32_t remaining = -1;
   const uint32_t rate = _source.sampleRate();
-  if (!loading() && rate > 0 && _source.frameCount() > 0) {
-    const uint32_t total = _source.frameCount() / rate;
+  if (!loading() && rate > 0 && _source.durationFrames() > 0) {
+    const uint32_t total = _source.durationFrames() / rate;
     elapsed = (int32_t)(displayedFrame() / rate);
     remaining = total > (uint32_t)elapsed ? (int32_t)(total - elapsed) : 0;
   }
@@ -718,8 +865,9 @@ void AudioPlayerScreen::drawPreviousCell() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(PreviousX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
+  // Previous restarts a playable track or moves back in the queue.
   UiKit::drawSkipIcon(tft, PreviousX, TransportY, false,
-                      playable() ? TFT_WHITE : InactiveColor, TFT_BLACK);
+                      playable() || neighbour(-1) >= 0 ? TFT_WHITE : InactiveColor, TFT_BLACK);
 }
 
 void AudioPlayerScreen::drawPlayButton() {
@@ -733,7 +881,7 @@ void AudioPlayerScreen::drawPlayButton() {
   // The triangle's mass sits left of its bounding box; nudge it for balance.
   UiKit::drawPlaybackIcon(tft, playing ? centerX : centerX - 1, TransportY, playing,
                           enabled ? TFT_BLACK : InactiveColor, fill, 2.0f);
-  // Prev's enabled state follows the same conditions.
+  // Previous depends on the same playable() state.
   drawPreviousCell();
 }
 
@@ -741,8 +889,9 @@ void AudioPlayerScreen::drawNextCell() {
   if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
   tft.fillRect(NextX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
-  // Inactive until the player has a folder queue.
-  UiKit::drawSkipIcon(tft, NextX, TransportY, true, InactiveColor, TFT_BLACK);
+  // Inactive while the folder is scanned and at the end without Repeat All.
+  UiKit::drawSkipIcon(tft, NextX, TransportY, true,
+                      neighbour(1) >= 0 ? TFT_WHITE : InactiveColor, TFT_BLACK);
 }
 
 void AudioPlayerScreen::drawVolumeCell() {
@@ -838,7 +987,11 @@ void AudioPlayerScreen::drawTrackInfo() {
     if (format == AudioSource::Format::Mp3) bitrateText += F(" avg");
   }
   String durationText = _source.loading() ? String(F("Scanning...")) : String(F("\xE2\x80\x94"));
-  if (known && _source.frameCount() > 0) durationText = timeText(_source.frameCount() / rate);
+  if (known && _source.durationFrames() > 0) {
+    // "About" until the MP3 scan has counted every frame.
+    durationText = _source.durationKnown() ? String() : String(F("~"));
+    durationText += timeText(_source.durationFrames() / rate);
+  }
 
   const __FlashStringHelper *labels[InfoRowCount] = {
     F("Format"), F("Sample rate"), F("Channels"), F("Bitrate"), F("Duration")

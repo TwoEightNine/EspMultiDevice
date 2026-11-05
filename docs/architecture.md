@@ -128,10 +128,15 @@ reopened after removal because the main loop deliberately locks
 
 `AudioPlayerScreen` owns the player layout, touch, and the playback state
 machine (ready, playing, paused, finished, error, plus the visit-scoped repeat
-mode). Its `AudioSource` member owns the open WAV/MP3 file: header parsing, tag
+mode), including in-place track changes. Its `AudioQueue` member scans the
+track's folder a few entries per tick under `SpiBusLock` into a sorted PSRAM
+name list; callers keep pushing a single audio path. Its `AudioSource` member owns the open WAV/MP3 file: header parsing, tag
 reading, the MP3 frame scan and `.empa` cache, positioning, and mono PCM writes
 to the speaker. The source never draws or navigates, and every call is one
-bounded step on the UI task. Every source SD transaction takes `SpiBusLock`:
+bounded step on the UI task. An MP3's frame scan keeps running through
+`loadStep()` while the track plays, through its own `directReader()`
+descriptor, so playback starts once the tags are read. Every source SD
+transaction takes `SpiBusLock`:
 per-tick work waits at most 10 ms and otherwise skips the tick (`stream()`
 reports Busy, which the speaker's ~200 ms DMA queue absorbs), and the
 `.empa` write runs after the lock is released because `MediaCache` locks

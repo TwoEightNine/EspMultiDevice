@@ -86,6 +86,9 @@ AudioSource::AudioSource(SecretStorage &secretStorage, MediaCache &mediaCache)
     _sourceFileSize(0),
     _sourceWriteTime(0),
     _frameCount(0),
+    _frameCountKnown(false),
+    _streamEnded(false),
+    _estimatedFrames(0),
     _framePosition(0),
     _sampleRate(0),
     _channels(0),
@@ -97,6 +100,10 @@ AudioSource::AudioSource(SecretStorage &secretStorage, MediaCache &mediaCache)
     _wavId3Offset(0),
     _wavId3Size(0),
     _mp3Analyzing(false),
+    _scanShared(false),
+    _scanBuffer(nullptr),
+    _scanWindowStart(0),
+    _scanWindowLength(0),
     _mp3DataOffset(0),
     _mp3AudioEnd(0),
     _mp3AnalysisPosition(0),
@@ -127,12 +134,15 @@ void AudioSource::unlockBus() {
 }
 
 void AudioSource::closeFile() {
-  if (_file) {
+  if (_file || _scanFile) {
     const bool took = !_busLocked && lockBus(BusOpenWaitMs);
-    // Close even if the bus stayed busy, so the handle cannot leak; closing a
-    // read-only file does not write to the card.
-    _file.close();
+    // Close even if the bus stayed busy, so the handles cannot leak; closing
+    // a read-only file does not write to the card.
+    releaseScanReader();
+    if (_file) _file.close();
     if (took) unlockBus();
+  } else {
+    releaseScanReader();
   }
   _mp3CachePending = false;
   _tagsParsing = false;
@@ -151,6 +161,9 @@ void AudioSource::reset() {
   _sourceFileSize = 0;
   _sourceWriteTime = 0;
   _frameCount = 0;
+  _frameCountKnown = false;
+  _streamEnded = false;
+  _estimatedFrames = 0;
   _framePosition = 0;
   _sampleRate = 0;
   _channels = 0;
@@ -198,11 +211,11 @@ void AudioSource::releaseSeekTable() {
   _tocStorage = nullptr;
 }
 
-bool AudioSource::open(const String &path, bool secretAccess) {
+bool AudioSource::open(const String &path, bool secretAccess, const String &plainName) {
   reset();
   _path = path;
   _secretAccess = secretAccess;
-  switch (FileFormats::fromPath(path)) {
+  switch (FileFormats::fromPath(plainName)) {
     case FileFormats::Format::Wav: _format = Format::Wav; break;
     case FileFormats::Format::Mp3: _format = Format::Mp3; break;
     default: return fail(F("Unsupported audio file"));
@@ -234,8 +247,10 @@ void AudioSource::loadStep() {
     _mp3Analyzing = false;
     return;
   }
-  if (!loading() || !lockBus(BusWaitMs)) return;
-  _streamReady = false;
+  if (!_tagsParsing && !_mp3Analyzing) return;
+  if (!lockBus(BusWaitMs)) return;
+  // Tag reads, and a scan without its own reader, move the stream's file.
+  if (_tagsParsing || _scanShared) _streamReady = false;
   if (_tagsParsing) {
     if (_tags.step(TagFramesPerStep)) {
       _tagsParsing = false;
@@ -256,11 +271,17 @@ void AudioSource::loadStep() {
   }
 }
 
+uint32_t AudioSource::durationFrames() const {
+  if (_frameCountKnown || _format != Format::Mp3) return _frameCount;
+  return _estimatedFrames > _frameCount ? _estimatedFrames : _frameCount;
+}
+
 uint32_t AudioSource::bitrateKbps() const {
   if (_format == Format::Wav) return (uint32_t)(((uint64_t)_sampleRate * _blockAlign * 8) / 1000);
-  if (_format != Format::Mp3 || _frameCount == 0 || _sampleRate == 0 || loading()) return 0;
+  const uint32_t frames = durationFrames();
+  if (_format != Format::Mp3 || frames == 0 || _sampleRate == 0) return 0;
   const uint64_t bits = (uint64_t)(_mp3AudioEnd - _mp3DataOffset) * 8;
-  return (uint32_t)((bits * _sampleRate / _frameCount + 500) / 1000);
+  return (uint32_t)((bits * _sampleRate / frames + 500) / 1000);
 }
 
 bool AudioSource::canSeek() const {
@@ -277,6 +298,7 @@ bool AudioSource::seek(uint32_t frame) {
   _mp3PcmPosition = 0;
   _mp3SkipFrames = 0;
   _mp3SkipSamples = 0;
+  _streamEnded = false;
   _streamReady = false;
   return true;
 }
@@ -374,6 +396,7 @@ bool AudioSource::parseWav() {
   }
   _frameCount = _dataBytes / _blockAlign;
   if (_frameCount == 0) return fail(F("WAV has no audio frames"));
+  _frameCountKnown = true;
   return true;
 }
 
@@ -437,17 +460,16 @@ bool AudioSource::beginMp3Analysis() {
   if (loadMp3Cache()) return true;
 
   if (!lockBus(BusOpenWaitMs)) return fail(F("SD card busy"));
-  const bool bounded = readMp3Bounds();
+  // The bounds and the first frame are all playback needs; the scan that
+  // follows only refines the duration and builds the seek table.
+  const bool bounded = readMp3Bounds() && beginScanReader();
   unlockBus();
   if (!bounded) return false;
 
   _frameCount = 0;
+  _frameCountKnown = false;
   _framePosition = 0;
-  _sampleRate = 0;
-  _channels = 0;
-  _bitsPerSample = 16;
   _mp3AnalysisPosition = _mp3DataOffset;
-  _mp3FrameSamples = 0;
   _mp3ScanFrames = 0;
   _tocReady = false;
   if (_toc.attached()) _toc.clear();
@@ -455,6 +477,8 @@ bool AudioSource::beginMp3Analysis() {
   return true;
 }
 
+// Called with the bus held: the audio bounds, the first frame's format, and
+// a duration estimate.
 bool AudioSource::readMp3Bounds() {
   const uint32_t fileSize = _sourceFileSize;
   _mp3DataOffset = 0;
@@ -479,7 +503,71 @@ bool AudioSource::readMp3Bounds() {
   if (_mp3DataOffset >= _mp3AudioEnd || _mp3AudioEnd - _mp3DataOffset < 4) {
     return fail(F("MP3 has no audio frames"));
   }
+
+  uint8_t probe[Mp3FirstFrameProbeBytes] = {};
+  const uint32_t available = _mp3AudioEnd - _mp3DataOffset;
+  const size_t probeBytes = available < sizeof(probe) ? available : sizeof(probe);
+  uint32_t frameBytes = 0;
+  uint16_t frameSamples = 0;
+  uint32_t sampleRate = 0;
+  uint16_t channels = 0;
+  if (!seekTo(_mp3DataOffset) || !readExact(probe, probeBytes) ||
+      !decodeMp3Header(probe, _mp3DataOffset, frameBytes, frameSamples, sampleRate, channels)) {
+    return fail(F("Invalid MP3 frame"));
+  }
+  _sampleRate = sampleRate;
+  _channels = channels;
+  _bitsPerSample = 16;
+  _mp3FrameSamples = frameSamples;
+
+  // An Info/Xing tag follows the side information (whose size depends on the
+  // version and channel count, plus a CRC when present); VBRI sits at 36.
+  const bool mpeg1 = frameSamples == 1152;
+  const size_t sideInfo = (mpeg1 ? (channels == 1 ? 17 : 32) : (channels == 1 ? 9 : 17)) +
+                          ((probe[1] & 0x01) ? 0 : 2);
+  const size_t xing = 4 + sideInfo;
+  uint32_t taggedFrames = 0;
+  if (probeBytes >= xing + 12 &&
+      (memcmp(probe + xing, "Xing", 4) == 0 || memcmp(probe + xing, "Info", 4) == 0) &&
+      (readBe32(probe + xing + 4) & 0x01)) {
+    taggedFrames = readBe32(probe + xing + 8);
+  } else if (probeBytes >= 36 + 18 && memcmp(probe + 36, "VBRI", 4) == 0) {
+    taggedFrames = readBe32(probe + 36 + 14);
+  }
+  const uint64_t estimate = taggedFrames > 0
+    ? (uint64_t)taggedFrames * frameSamples
+    : (uint64_t)(available / frameBytes) * frameSamples;
+  _estimatedFrames = estimate > UINT32_MAX ? UINT32_MAX : (uint32_t)estimate;
   return true;
+}
+
+// Called with the bus held. A second descriptor lets the scan run beside
+// playback; without one it shares the stream's file and runs first.
+bool AudioSource::beginScanReader() {
+  releaseScanReader();
+  _scanFile = _file.directReader();
+  _scanShared = !_scanFile;
+  _scanBuffer = static_cast<uint8_t *>(
+    heap_caps_malloc(ScanWindowBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!_scanBuffer) _scanBuffer = static_cast<uint8_t *>(malloc(ScanWindowBytes));
+  _scanWindowStart = 0;
+  _scanWindowLength = 0;
+  if (!_scanBuffer) {
+    releaseScanReader();
+    return fail(F("No memory for the MP3 scan"));
+  }
+  if (_scanShared) Serial.println(F("MP3 scan: no free descriptor; scanning before playback"));
+  return true;
+}
+
+void AudioSource::releaseScanReader() {
+  if (_scanFile) _scanFile.close();
+  _scanFile = StorageFile();
+  _scanShared = false;
+  heap_caps_free(_scanBuffer);
+  _scanBuffer = nullptr;
+  _scanWindowStart = 0;
+  _scanWindowLength = 0;
 }
 
 // `.empa` v2: a 44-byte little-endian header bound to the source's size and
@@ -552,6 +640,7 @@ bool AudioSource::loadMp3Cache() {
   }
 
   _frameCount = frameCount;
+  _frameCountKnown = true;
   _framePosition = 0;
   _sampleRate = sampleRate;
   _channels = channels;
@@ -612,60 +701,94 @@ void AudioSource::writeMp3Cache() {
                 (unsigned long)_toc.interval(), paths.finalPath.c_str());
 }
 
+// Called with the bus held: one window read, then the frame headers in it.
 void AudioSource::analyzeMp3Step() {
   if (!_mp3Analyzing || failed()) return;
 
+  bool refilled = false;
   for (uint8_t i = 0; i < Mp3AnalysisFramesPerStep; i++) {
     if (_mp3AnalysisPosition == _mp3AudioEnd) {
-      _mp3Analyzing = false;
-      if (_frameCount == 0) {
-        fail(F("MP3 has no audio frames"));
-      } else {
-        _tocReady = _toc.attached() && _toc.complete() && _toc.count() > 0;
-        _mp3CachePending = true;
-      }
+      finishScan();
       return;
+    }
+    const uint32_t position = _mp3AnalysisPosition;
+    if (position < _scanWindowStart || position - _scanWindowStart + 4 > _scanWindowLength) {
+      // At most one read per step, so a tick stays short beside playback.
+      if (refilled) return;
+      const uint32_t remaining = _mp3AudioEnd - position;
+      const uint32_t length = remaining < ScanWindowBytes ? remaining : ScanWindowBytes;
+      StorageFile &reader = _scanShared ? _file : _scanFile;
+      if (reader.readAt(position, _scanBuffer, length) != (int)length) {
+        stopScan(F("MP3 read failed"));
+        return;
+      }
+      _scanWindowStart = position;
+      _scanWindowLength = length;
+      refilled = true;
     }
 
     uint32_t frameBytes = 0;
     uint16_t frameSamples = 0;
     uint32_t sampleRate = 0;
     uint16_t channels = 0;
-    if (!parseMp3FrameHeader(_mp3AnalysisPosition, frameBytes, frameSamples, sampleRate, channels)) {
-      fail(F("Invalid MP3 frame"));
+    if (!decodeMp3Header(_scanBuffer + (position - _scanWindowStart), position, frameBytes,
+                         frameSamples, sampleRate, channels)) {
+      stopScan(F("Invalid MP3 frame"));
       return;
     }
-    if (_mp3FrameSamples == 0) _mp3FrameSamples = frameSamples;
-    _toc.addFrame(_mp3ScanFrames++, _mp3AnalysisPosition);
-    if (_sampleRate == 0) {
-      _sampleRate = sampleRate;
-      _channels = channels;
-    } else if (_sampleRate != sampleRate || _channels != channels) {
-      fail(F("MP3 stream format changed"));
+    if (_sampleRate != sampleRate || _channels != channels) {
+      stopScan(F("MP3 stream format changed"));
       return;
     }
     if (_frameCount > UINT32_MAX - frameSamples) {
-      fail(F("MP3 is too long"));
+      stopScan(F("MP3 is too long"));
       return;
     }
+    _toc.addFrame(_mp3ScanFrames++, position);
     _frameCount += frameSamples;
     _mp3AnalysisPosition += frameBytes;
   }
 }
 
-bool AudioSource::parseMp3FrameHeader(uint32_t position,
-                                      uint32_t &frameBytes,
-                                      uint16_t &frameSamples,
-                                      uint32_t &sampleRate,
-                                      uint16_t &channels) {
+void AudioSource::finishScan() {
+  _mp3Analyzing = false;
+  releaseScanReader();
+  if (_frameCount == 0) {
+    fail(F("MP3 has no audio frames"));
+    return;
+  }
+  _frameCountKnown = true;
+  _tocReady = _toc.attached() && _toc.complete() && _toc.count() > 0;
+  _mp3CachePending = true;
+}
+
+void AudioSource::stopScan(const __FlashStringHelper *reason) {
+  const bool shared = _scanShared;
+  _mp3Analyzing = false;
+  releaseScanReader();
+  _tocReady = false;
+  if (shared) {
+    // Scanning before playback: the file cannot be played, as before.
+    fail(reason);
+    return;
+  }
+  // Playback continues to the end of the stream, without seeking or a cache.
+  Serial.print(F("MP3 scan stopped: "));
+  Serial.print(reason);
+  Serial.printf(" at %lu\n", (unsigned long)_mp3AnalysisPosition);
+}
+
+bool AudioSource::decodeMp3Header(const uint8_t *bytes,
+                                  uint32_t position,
+                                  uint32_t &frameBytes,
+                                  uint16_t &frameSamples,
+                                  uint32_t &sampleRate,
+                                  uint16_t &channels) const {
   frameBytes = 0;
   frameSamples = 0;
   sampleRate = 0;
   channels = 0;
-  if (position > _mp3AudioEnd || _mp3AudioEnd - position < 4 || !seekTo(position)) return false;
-
-  uint8_t bytes[4];
-  if (!readExact(bytes, sizeof(bytes))) return false;
+  if (position > _mp3AudioEnd || _mp3AudioEnd - position < 4) return false;
   uint32_t header = readBe32(bytes);
   uint8_t version = (header >> 19) & 0x03;
   uint8_t layer = (header >> 17) & 0x03;
@@ -691,6 +814,23 @@ bool AudioSource::parseMp3FrameHeader(uint32_t position,
   frameBytes = (uint32_t)size;
   channels = channelMode == 3 ? 1 : 2;
   return true;
+}
+
+bool AudioSource::parseMp3FrameHeader(uint32_t position,
+                                      uint32_t &frameBytes,
+                                      uint16_t &frameSamples,
+                                      uint32_t &sampleRate,
+                                      uint16_t &channels) {
+  uint8_t bytes[4];
+  if (position > _mp3AudioEnd || _mp3AudioEnd - position < 4 || !seekTo(position) ||
+      !readExact(bytes, sizeof(bytes))) {
+    frameBytes = 0;
+    frameSamples = 0;
+    sampleRate = 0;
+    channels = 0;
+    return false;
+  }
+  return decodeMp3Header(bytes, position, frameBytes, frameSamples, sampleRate, channels);
 }
 
 bool AudioSource::resetMp3Decoder(uint32_t offset) {
@@ -773,6 +913,7 @@ bool AudioSource::prepareStream() {
 AudioSource::StreamResult AudioSource::streamWav(SpeakerController &speaker) {
   uint32_t remaining = _frameCount - _framePosition;
   uint16_t frames = remaining > OutputFrames ? OutputFrames : (uint16_t)remaining;
+  if (frames > SourceBufferBytes / _blockAlign) frames = SourceBufferBytes / _blockAlign;
   uint32_t bytes = (uint32_t)frames * _blockAlign;
   if (bytes > SourceBufferBytes || _file.read(_sourceBuffer, bytes) != bytes) {
     fail(F("WAV read failed"));
@@ -839,6 +980,12 @@ AudioSource::StreamResult AudioSource::streamMp3(SpeakerController &speaker) {
   if (_mp3PcmPosition >= _mp3PcmFrames) {
     if (!decodeMp3Frame()) {
       if (failed()) return StreamResult::Failed;
+      if (!_frameCountKnown) {
+        // The scan has not finished (or stopped): the stream's end is the
+        // track's end.
+        _streamEnded = true;
+        return StreamResult::Ended;
+      }
       // The stream ran out before the frame count the scan recorded.
       fail(F("MP3 ended early"));
       return StreamResult::Failed;
@@ -854,7 +1001,9 @@ AudioSource::StreamResult AudioSource::streamMp3(SpeakerController &speaker) {
   if (_mp3PcmPosition >= _mp3PcmFrames) return StreamResult::Streaming;
   uint16_t remaining = _mp3PcmFrames - _mp3PcmPosition;
   uint16_t frames = remaining > OutputFrames ? OutputFrames : remaining;
-  if (frames > _frameCount - _framePosition) frames = (uint16_t)(_frameCount - _framePosition);
+  if (_frameCountKnown && frames > _frameCount - _framePosition) {
+    frames = (uint16_t)(_frameCount - _framePosition);
+  }
   for (uint16_t frame = 0; frame < frames; frame++) {
     const mp3d_sample_t *source = _mp3PcmBuffer +
       (uint32_t)(_mp3PcmPosition + frame) * _channels;
