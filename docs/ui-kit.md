@@ -33,7 +33,20 @@ An icon-only list action has a 40×40 hit cell, a 16×16 kit glyph, and 12px pad
 
 Use `UiKit`’s generated 40px footer controls and 16px list/keyboard icons. The keyboard assets include off, one-shot Shift, and Caps Lock states. Every icon function takes its foreground and the immediate background color. Pass the true background color so TFT_eSPI antialiasing blends without display readback.
 
-Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars. Use `UiKit::drawFullscreenIcon()` for a fullscreen/fullscreen-exit affordance; its owner must provide a complete 48×48px hit target, such as the Video Player's bottom-left control cell.
+Use `UiKit::drawPlaybackIcon()` for compact play/pause state rather than drawing a screen-local triangle or pause bars. Its optional `scale` enlarges the 14px glyph for a bigger control. Use `UiKit::drawFullscreenIcon()` for a fullscreen/fullscreen-exit affordance; its owner must provide a complete 48×48px hit target, such as the Video Player's bottom-left control cell.
+
+Media transport controls use the 24px `drawSkipIcon()` (previous/next), `drawVolumeIcon()` (waves, or an × when muted), and `drawRepeatIcon()` (with a "1" badge for repeat-one) inside screen-owned 48×48px cells, with the whole cell as the target. `drawMusicNoteIcon()` is a scalable placeholder glyph for missing artwork. All four are built from smooth primitives; where a filled triangle is needed, the kit strokes its edges with `drawWideLine` and then fills the interior, because TFT_eSPI has no antialiased filled triangle.
+
+Use `UiKit::drawSeekBar()` for seek and level sliders: a 4px pill track, a fill from the left edge, and an optional 14px white thumb. It paints `SeekBarBandHalf` px above and below its centre line and `SeekBarThumbRadius + 1` px past each end. `updateSeekBar()` repaints only the span between the old and new positions (through a temporary TFT viewport, so never call it inside another viewport). Hit-test a band at least 40px tall around the bar. Screens that drag a slider read the held point from `TouchController` in `tick()`, because the main loop forwards only touch edges, and commit on release.
+
+The Audio Player is a documented layout exception. Below the standard app bar ("Now playing", Close, and a More action that opens a Track info sheet) it has:
+
+- a 208×208 artwork tile (y 64–271), a `#222` smooth rounded rectangle with a grey music note until cover art exists;
+- the title (Title face, white), the artist (Content, light grey), and "album · year" (Compact, grey), centred at y 288, 314, and 336. The artist line falls back to a grey "Unknown artist", shows a grey "Reading track..." while tags load, and shows errors in red;
+- the seek bar from x 16 to 303 at y 360, with a full-width hit band from y 344 to 383 and Compact elapsed/remaining times at y 386. While the track loads, the bar's place shows an indeterminate `drawProgressBar`. Without seek support it shows the fill without a thumb;
+- a transport row centred at y 436: 48×48px repeat, previous, next, and volume cells at x centres 40, 100, 220, and 280, and a 64px play button at the centre. The play button is a fill-only white smooth circle with a black glyph (`drawPlaybackIcon` at scale 2), dark grey (`#333`) with a grey glyph when disabled, and its whole 64×64px square is the target. Active repeat is cyan; an unavailable control keeps the black background and a grey icon.
+
+The volume cell opens a `#222` rounded panel over the album line, seek bar, and times (y 336–395). It holds the speaker glyph, a 0–10 `drawSeekBar` slider, and the value. Dragging sets the speaker level live and persists through `AudioSettings` once on release. Tapping the volume cell or outside the panel, or 3 s without input, closes it.
 
 Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws an antialiased microphone, stop square, cancel glyph, or slashed unavailable microphone; the owner supplies the solid control fill as `backgroundColor` and owns the complete hit target. Assistant's documented exception is a 60×60 fill-only circle over its avatar, with blue ready/cancel, green listening, and gray unavailable/disabled fills. Holding it for 800 ms may use a bounded 160 ms cyan fill pulse as feedback; it has no persistent microphone-status strip.
 

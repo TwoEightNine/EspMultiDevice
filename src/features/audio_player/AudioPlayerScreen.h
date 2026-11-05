@@ -1,18 +1,17 @@
 #pragma once
 
 #include <Arduino.h>
-#include <FS.h>
-
-#include "../../../third_party/minimp3/minimp3.h"
 
 #include "../../core/Screen.h"
 #include "../../services/audio/AudioSettings.h"
-#include "../../services/storage/SdCardController.h"
-#include "../../services/storage/SecretStorage.h"
 #include "../../services/audio/SpeakerController.h"
-#include "../../media/AudioTags.h"
-#include "../../media/MediaCache.h"
+#include "../../services/storage/SdCardController.h"
+#include "AudioSource.h"
 
+// "Now playing" screen: cover tile, track text, seek bar, and a transport row
+// with repeat, previous, play/pause, next, and a volume popover. Decoding and
+// file access live in AudioSource; this class owns layout, touch, and the
+// playback state machine.
 class AudioPlayerScreen : public Screen {
 public:
   AudioPlayerScreen(Navigator &navigator,
@@ -38,119 +37,103 @@ private:
     Error
   };
 
-  enum class SourceFormat : uint8_t {
-    None,
-    Wav,
-    Mp3
+  // Kept for the screen visit only. Until the folder queue exists, All
+  // repeats the single track just like One.
+  enum class Repeat : uint8_t {
+    Off,
+    All,
+    One
   };
 
-  static const uint16_t SourceBufferBytes = 4096;
-  static const uint16_t Mp3InputBufferBytes = 4096;
-  static const uint16_t Mp3MaxPcmFrames = MINIMP3_MAX_SAMPLES_PER_FRAME;
-  static const uint8_t Mp3AnalysisFramesPerTick = 16;
-  static const uint16_t Mp3CacheHeaderBytes = 36;
-  static const uint16_t OutputFrames = 256;
-  static const uint8_t TagFramesPerTick = 8;
+  enum class Drag : uint8_t {
+    None,
+    Seek,
+    Volume
+  };
+
   SdCardController &_sdCard;
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
-  SecretStorage &_secretStorage;
-  MediaCache &_mediaCache;
-  StorageFile _file;
-  bool _secretAccess;
+  AudioSource _source;
+
   String _path;
   String _fileName;
   String _error;
-  State _state;
-  SourceFormat _format;
+  bool _secretAccess;
   bool _sdMounted;
+  bool _pendingOpen;
   bool _lastTouchDown;
-  bool _volumePickerVisible;
+  State _state;
+  Repeat _repeat;
+  Drag _drag;
+  float _dragFraction;
+  uint8_t _dragVolume;
+  bool _volumeOpen;
+  bool _infoOpen;
+  uint32_t _volumeTouchMs;
+  uint32_t _loadingStartMs;
   uint32_t _lastDrawMs;
   uint32_t _finishAtMs;
-  uint32_t _dataOffset;
-  uint32_t _dataBytes;
-  uint32_t _sourceFileSize;
-  uint32_t _sourceWriteTime;
-  uint32_t _frameCount;
-  uint32_t _framePosition;
-  uint32_t _sampleRate;
-  uint16_t _channels;
-  uint16_t _bitsPerSample;
-  uint16_t _blockAlign;
-  uint8_t _sourceBuffer[SourceBufferBytes];
-  int16_t _outputBuffer[OutputFrames];
 
-  AudioTags::Parser _tags;
-  bool _tagsParsing;
-  uint32_t _wavInfoOffset;
-  uint32_t _wavInfoSize;
-  uint32_t _wavId3Offset;
-  uint32_t _wavId3Size;
+  // What the seek row currently shows, for incremental repaints.
+  bool _seekDrawn;
+  bool _drawnThumb;
+  uint16_t _drawnFill;
+  float _drawnFraction;
+  int32_t _drawnElapsed;
+  int32_t _drawnRemaining;
 
-  bool _mp3Analyzing;
-  uint32_t _mp3DataOffset;
-  uint32_t _mp3AudioEnd;
-  uint32_t _mp3AnalysisPosition;
-  uint8_t _mp3InputBuffer[Mp3InputBufferBytes];
-  uint16_t _mp3InputOffset;
-  uint16_t _mp3InputBytes;
-  mp3dec_t _mp3Decoder;
-  mp3d_sample_t _mp3PcmBuffer[Mp3MaxPcmFrames];
-  uint16_t _mp3PcmFrames;
-  uint16_t _mp3PcmPosition;
-
-  void reset();
-  bool loadSource(const String &path);
-  SourceFormat formatForPath(const String &path) const;
-  bool parseWav();
-  bool parseFormatChunk(uint32_t offset, uint32_t size);
-  void beginTags();
-  void stepTags();
-  void finishTags();
-  static bool readTagBytes(void *context, uint32_t offset, uint8_t *buffer, size_t length);
-  bool loading() const { return _tagsParsing || _mp3Analyzing; }
-  bool beginMp3Analysis();
-  bool loadMp3Cache();
-  void writeMp3Cache();
-  void analyzeMp3Step();
-  bool parseMp3FrameHeader(uint32_t position,
-                           uint32_t &frameBytes,
-                           uint16_t &frameSamples,
-                           uint32_t &sampleRate,
-                           uint16_t &channels);
-  bool resetMp3Decoder();
-  bool refillMp3Input();
-  bool decodeMp3Frame();
-  bool fail(const __FlashStringHelper *message);
-  bool readExact(uint8_t *buffer, size_t length);
-  bool seekTo(uint32_t position);
+  bool openSource();
+  void onSourceLoaded();
+  bool loading() const { return _pendingOpen || _source.loading(); }
+  bool tagsPending() const { return _pendingOpen || _source.tagsParsing(); }
+  bool playable() const;
   bool startPlayback();
   void pausePlayback();
   void finishPlayback();
+  void restartTrack();
+  void cycleRepeat();
+  void fail(const String &message);
+  void failFromSource();
   void stopSpeaker();
-  void streamChunk();
-  void streamWavChunk();
-  void streamMp3Chunk();
-  int32_t decodeSample(const uint8_t *sample) const;
   void handleSdCardEvent(SdCardEvent event);
 
-  void draw(bool force = true);
-  void drawTopBar();
+  void beginDrag(Drag drag, int16_t x);
+  void updateDrag(int16_t x);
+  void endDrag();
+  float seekFractionAt(int16_t x) const;
+  uint8_t volumeLevelAt(int16_t x) const;
+  uint8_t currentVolume() const;
+  uint32_t displayedFrame() const;
+
+  void openVolume();
+  void closeVolume();
+  void openInfo();
+  void closeInfo();
+
+  void draw();
+  void refresh();
+  void drawCover();
   void drawTrackText();
-  void drawDynamic(bool force);
+  void drawSeekRow(bool force);
+  void drawTimes(bool force);
+  void drawTransport();
+  void drawRepeatCell();
+  void drawPreviousCell();
   void drawPlayButton();
-  void drawVolumeButton();
-  void drawVolumePicker();
-  void drawProgress();
-  void drawStatus();
-  void drawError();
-  String displayName(const String &path) const;
+  void drawNextCell();
+  void drawVolumeCell();
+  void drawVolumePanel();
+  void drawVolumeSlider(int16_t previousLevel);
+  void drawTrackInfo();
+
   String trackTitle() const;
-  String trackDetails() const;
-  String truncateLabel(const String &label, int16_t maxWidth);
-  String timeText(uint32_t frames) const;
-  bool controlContains(int16_t x, int16_t y) const;
-  bool volumeButtonContains(int16_t x, int16_t y) const;
-  int8_t volumePickerLevelAt(int16_t x, int16_t y) const;
+  String albumLine() const;
+  String timeText(uint32_t seconds) const;
+
+  bool cellContains(int16_t centerX, int16_t x, int16_t y) const;
+  bool playContains(int16_t x, int16_t y) const;
+  bool seekContains(int16_t x, int16_t y) const;
+  bool volumePanelContains(int16_t x, int16_t y) const;
+  bool volumeSliderContains(int16_t x, int16_t y) const;
 };

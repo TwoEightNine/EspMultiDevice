@@ -1,76 +1,112 @@
-#define MINIMP3_ONLY_MP3
-#define MINIMP3_IMPLEMENTATION
-#include "../../../third_party/minimp3/minimp3.h"
-
 #include "AudioPlayerScreen.h"
 
-#include "../../media/FileFormats.h"
 #include "../../app/Navigator.h"
 #include "../../ui/UiKit.h"
 
-#include <SD.h>
-#include <string.h>
+#include <math.h>
 
 namespace {
-uint16_t readLe16(const uint8_t *buffer) {
-  return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8);
+// Layout of the 320 x 480 portrait screen; see docs/ui-kit.md.
+constexpr int16_t CoverSize = 208;
+constexpr int16_t CoverTop = 64;
+constexpr int16_t CoverRadius = 12;
+constexpr int16_t CoverGlyphSize = 88;
+constexpr uint16_t CoverColor = 0x2104;       // #222222
+constexpr uint16_t CoverGlyphColor = 0x52AA;  // #555555
+
+constexpr int16_t TextTop = 274;
+constexpr int16_t TextBottom = 347;
+constexpr int16_t TitleY = 288;   // Text rows are vertical centres.
+constexpr int16_t ArtistY = 314;
+constexpr int16_t AlbumY = 336;
+constexpr int16_t TextMargin = 16;
+
+constexpr int16_t SeekX = 16;
+constexpr int16_t SeekY = 360;
+constexpr int16_t SeekHitTop = 344;
+constexpr int16_t SeekHitBottom = 384;
+constexpr uint16_t TrackColor = 0x4208;  // #444444
+constexpr int16_t TimeY = 386;
+constexpr int16_t TimeTop = 377;
+constexpr int16_t TimeHeight = 19;
+constexpr int16_t TimeWidth = 96;
+
+constexpr int16_t TransportY = 436;
+constexpr int16_t CellHalf = 24;
+constexpr int16_t PlayRadius = 32;
+constexpr int16_t RepeatX = 40;
+constexpr int16_t PreviousX = 100;
+constexpr int16_t NextX = 220;
+constexpr int16_t VolumeX = 280;
+constexpr uint16_t PlayDisabledColor = 0x31A6;  // #333333
+constexpr uint16_t InactiveColor = TFT_DARKGREY;
+
+constexpr int16_t VolumePanelX = 16;
+constexpr int16_t VolumePanelY = 336;
+constexpr int16_t VolumePanelHeight = 60;
+constexpr int16_t VolumePanelRadius = 12;
+constexpr int16_t VolumeClearTop = 326;  // Below the artist line.
+constexpr uint16_t PanelColor = 0x2104;
+constexpr uint16_t PanelTrackColor = 0x52AA;
+constexpr int16_t VolumeRowY = VolumePanelY + VolumePanelHeight / 2;
+constexpr int16_t VolumeIconX = 44;
+constexpr int16_t VolumeSliderX = 76;
+constexpr int16_t VolumeSliderWidth = 172;
+constexpr int16_t VolumeSliderHitLeft = 60;
+constexpr int16_t VolumeSliderHitRight = 268;
+constexpr int16_t VolumeValueX = 278;
+constexpr uint32_t VolumeTimeoutMs = 3000;
+
+constexpr int16_t InfoX = 16;
+constexpr int16_t InfoTop = 96;
+constexpr int16_t InfoRowHeight = 30;
+constexpr int16_t InfoRowsTop = 92;  // Relative to InfoTop.
+constexpr uint8_t InfoRowCount = 5;
+constexpr int16_t InfoHeight = InfoRowsTop + InfoRowHeight * InfoRowCount + 34;
+
+constexpr uint32_t PlayingRedrawMs = 200;
+constexpr uint32_t LoadingRedrawMs = 100;
+
+// Timestamps taken with millis() during a tick can be newer than its nowMs.
+uint32_t elapsedSince(uint32_t nowMs, uint32_t thenMs) {
+  return (int32_t)(nowMs - thenMs) > 0 ? nowMs - thenMs : 0;
 }
 
-uint32_t readLe32(const uint8_t *buffer) {
-  return (uint32_t)buffer[0]
-    | ((uint32_t)buffer[1] << 8)
-    | ((uint32_t)buffer[2] << 16)
-    | ((uint32_t)buffer[3] << 24);
+float clampUnit(float value) {
+  if (!(value > 0.0f)) return 0.0f;
+  return value > 1.0f ? 1.0f : value;
 }
 
-void writeLe16(uint8_t *buffer, uint16_t value) {
-  buffer[0] = (uint8_t)value;
-  buffer[1] = (uint8_t)(value >> 8);
+String joinDot(const String &left, const String &right) {
+  if (left.length() == 0) return right;
+  if (right.length() == 0) return left;
+  return left + F(" \xC2\xB7 ") + right;
 }
 
-void writeLe32(uint8_t *buffer, uint32_t value) {
-  buffer[0] = (uint8_t)value;
-  buffer[1] = (uint8_t)(value >> 8);
-  buffer[2] = (uint8_t)(value >> 16);
-  buffer[3] = (uint8_t)(value >> 24);
+// Splits text into a first line that fits `width` (broken at the last space
+// when there is one) and the remainder.
+void splitLine(const String &text, int16_t width, UiText::Size size, String &first, String &rest) {
+  if (UiText::measure(text, size) <= width) {
+    first = text;
+    rest = String();
+    return;
+  }
+  int fit = 0;
+  int lastSpace = -1;
+  for (int i = 1; i <= (int)text.length(); i++) {
+    if (i < (int)text.length() && ((uint8_t)text[i] & 0xC0) == 0x80) continue;
+    if (UiText::measure(text.substring(0, i), size) > width) break;
+    fit = i;
+    if (text[i - 1] == ' ') lastSpace = i;
+  }
+  if (lastSpace > 0) fit = lastSpace;
+  if (fit == 0) fit = 1;
+  first = text.substring(0, fit);
+  rest = text.substring(fit);
+  first.trim();
+  rest.trim();
 }
-
-int32_t clamp16(int64_t value) {
-  if (value < -32768) return -32768;
-  if (value > 32767) return 32767;
-  return (int32_t)value;
-}
-
-bool isPcmSubFormat(const uint8_t *guid) {
-  static const uint8_t pcmGuid[16] = {
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-    0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
-  };
-  return memcmp(guid, pcmGuid, sizeof(pcmGuid)) == 0;
-}
-
-uint32_t readBe32(const uint8_t *buffer) {
-  return ((uint32_t)buffer[0] << 24)
-    | ((uint32_t)buffer[1] << 16)
-    | ((uint32_t)buffer[2] << 8)
-    | (uint32_t)buffer[3];
-}
-
-uint32_t readSynchsafe32(const uint8_t *buffer) {
-  return ((uint32_t)(buffer[0] & 0x7f) << 21)
-    | ((uint32_t)(buffer[1] & 0x7f) << 14)
-    | ((uint32_t)(buffer[2] & 0x7f) << 7)
-    | (uint32_t)(buffer[3] & 0x7f);
-}
-
-const uint16_t Mpeg1Layer3Bitrates[] = {
-  0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320
-};
-
-const uint16_t Mpeg2Layer3Bitrates[] = {
-  0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160
-};
-}
+}  // namespace
 
 AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
                                      TouchController &touch,
@@ -84,672 +120,214 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
     _sdCard(sdCard),
     _speaker(speaker),
     _audioSettings(audioSettings),
-    _secretStorage(secretStorage),
-    _mediaCache(mediaCache),
+    _source(secretStorage, mediaCache),
     _secretAccess(false),
-    _state(State::Ready),
-    _format(SourceFormat::None),
     _sdMounted(false),
+    _pendingOpen(false),
     _lastTouchDown(false),
-    _volumePickerVisible(false),
+    _state(State::Ready),
+    _repeat(Repeat::Off),
+    _drag(Drag::None),
+    _dragFraction(0.0f),
+    _dragVolume(0),
+    _volumeOpen(false),
+    _infoOpen(false),
+    _volumeTouchMs(0),
+    _loadingStartMs(0),
     _lastDrawMs(0),
     _finishAtMs(0),
-    _dataOffset(0),
-    _dataBytes(0),
-    _sourceFileSize(0),
-    _sourceWriteTime(0),
-    _frameCount(0),
-    _framePosition(0),
-    _sampleRate(0),
-    _channels(0),
-    _bitsPerSample(0),
-    _blockAlign(0),
-    _tagsParsing(false),
-    _wavInfoOffset(0),
-    _wavInfoSize(0),
-    _wavId3Offset(0),
-    _wavId3Size(0),
-    _mp3Analyzing(false),
-    _mp3DataOffset(0),
-    _mp3AudioEnd(0),
-    _mp3AnalysisPosition(0),
-    _mp3InputOffset(0),
-    _mp3InputBytes(0),
-    _mp3PcmFrames(0),
-    _mp3PcmPosition(0) {
-  mp3dec_init(&_mp3Decoder);
+    _seekDrawn(false),
+    _drawnThumb(false),
+    _drawnFill(0),
+    _drawnFraction(0.0f),
+    _drawnElapsed(-1),
+    _drawnRemaining(-1) {
 }
 
 void AudioPlayerScreen::onEnter(const ScreenData &data) {
-  reset();
+  stopSpeaker();
+  _source.reset();
   _lastTouchDown = false;
-  _volumePickerVisible = false;
+  _volumeOpen = false;
+  _infoOpen = false;
+  _drag = Drag::None;
+  _repeat = Repeat::Off;
+  _state = State::Ready;
+  _error = "";
+  _finishAtMs = 0;
   _secretAccess = data.fileAccess == FileAccessMode::Secret;
   _path = data.kind == ScreenDataKind::AudioPath ? data.text : "";
-  _fileName = displayName(_path);
+  int16_t slash = _path.lastIndexOf('/');
+  _fileName = slash < 0 ? _path : _path.substring(slash + 1);
   _sdMounted = _sdCard.isMounted();
-
-  // Present the player (including its loading affordance) before opening and
-  // parsing the source file.  MP3 analysis itself remains incremental in
-  // tick(), but WAV/header work can still take a visible moment on slow SD.
-  _mp3Analyzing = true;
-  draw();
-  yield();
-  _mp3Analyzing = false;
+  _pendingOpen = false;
+  _loadingStartMs = millis();
 
   if (data.kind != ScreenDataKind::AudioPath || _path.length() == 0) {
     fail(F("No audio selected"));
   } else if (!_sdMounted) {
     fail(F("SD card unavailable"));
   } else {
-    // Playback starts from tick() once the tags (and any MP3 scan) are read.
-    loadSource(_path);
+    // Show the player first; the file is opened from the next tick().
+    _pendingOpen = true;
   }
   draw();
 }
 
 void AudioPlayerScreen::onExit() {
+  if (_drag != Drag::None) endDrag();
   stopSpeaker();
-  if (_file) _file.close();
+  _source.closeFile();
+  _pendingOpen = false;
 }
 
 void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
   if (!point.touched) {
     _lastTouchDown = false;
+    if (_drag != Drag::None) endDrag();
     return;
   }
   if (_lastTouchDown) return;
   _lastTouchDown = true;
+  const int16_t x = point.x;
+  const int16_t y = point.y;
 
-  if (UiKit::navigationIconContains(point.x, point.y)) {
+  if (UiKit::navigationIconContains(x, y)) {
     _navigator.pop();
     return;
   }
-  if (_volumePickerVisible) {
-    int8_t level = volumePickerLevelAt(point.x, point.y);
-    if (level >= AudioSettings::MinVolume) {
-      _audioSettings.setVolume((uint8_t)level);
-      _volumePickerVisible = false;
-      draw();
+  if (_infoOpen) {
+    closeInfo();
+    return;
+  }
+  if (UiKit::appBarActionContains(x, y, _display.width())) {
+    openInfo();
+    return;
+  }
+  if (_volumeOpen) {
+    if (cellContains(VolumeX, x, y)) {
+      closeVolume();
+    } else if (volumeSliderContains(x, y)) {
+      beginDrag(Drag::Volume, x);
+    } else if (volumePanelContains(x, y)) {
+      _volumeTouchMs = millis();
+    } else {
+      closeVolume();
     }
     return;
   }
-  if (volumeButtonContains(point.x, point.y)) {
-    _volumePickerVisible = true;
-    drawVolumePicker();
+  if (seekContains(x, y)) {
+    if (_source.canSeek() && _state != State::Error) beginDrag(Drag::Seek, x);
     return;
   }
-  if (controlContains(point.x, point.y)) {
+  if (playContains(x, y)) {
     if (_state == State::Playing) {
       pausePlayback();
-    } else if (_state == State::Ready || _state == State::Paused || _state == State::Finished) {
+    } else {
       startPlayback();
     }
+  } else if (cellContains(PreviousX, x, y)) {
+    restartTrack();
+  } else if (cellContains(RepeatX, x, y)) {
+    cycleRepeat();
+  } else if (cellContains(VolumeX, x, y)) {
+    openVolume();
   }
 }
 
 void AudioPlayerScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
-  if (_tagsParsing) {
-    stepTags();
+  if (_drag != Drag::None) {
+    const TouchPoint held = _touch.point();
+    if (held.touched) updateDrag(held.x);
+  }
+  if (_volumeOpen && _drag != Drag::Volume && elapsedSince(nowMs, _volumeTouchMs) >= VolumeTimeoutMs) {
+    closeVolume();
+  }
+
+  if (_pendingOpen) {
+    _pendingOpen = false;
+    openSource();
+    refresh();
     return;
   }
-  if (_mp3Analyzing) {
-    analyzeMp3Step();
+  if (_source.loading()) {
+    const bool hadTags = _source.tagsParsing();
+    _source.loadStep();
+    if (_source.failed()) {
+      failFromSource();
+      refresh();
+      return;
+    }
+    if (hadTags && !_source.tagsParsing()) drawTrackText();
+    if (!_source.loading()) {
+      onSourceLoaded();
+    } else if (elapsedSince(nowMs, _lastDrawMs) >= LoadingRedrawMs) {
+      drawSeekRow(false);
+    }
     return;
   }
-  if (_state == State::Playing) {
-    if (_framePosition >= _frameCount) {
-      if ((int32_t)(nowMs - _finishAtMs) >= 0) finishPlayback();
+
+  if (_state != State::Playing) return;
+  if (_source.ended()) {
+    if ((int32_t)(nowMs - _finishAtMs) >= 0) finishPlayback();
+    return;
+  }
+  if (_source.stream(_speaker) == AudioSource::StreamResult::Failed) {
+    failFromSource();
+    refresh();
+    return;
+  }
+  if (_source.ended()) {
+    if (_repeat != Repeat::Off && _source.seek(0)) {
+      // Repeat without stopping the speaker, so there is no gap.
+      drawSeekRow(false);
     } else {
-      streamChunk();
+      // Let the speaker's DMA queue drain before uninstalling the I2S driver.
+      _finishAtMs = millis() + 100;
     }
   }
-  if (_state == State::Playing && !_volumePickerVisible && nowMs - _lastDrawMs >= 200) {
-    drawDynamic(false);
-  }
+  if (elapsedSince(nowMs, _lastDrawMs) >= PlayingRedrawMs) drawSeekRow(false);
 }
 
-void AudioPlayerScreen::reset() {
-  stopSpeaker();
-  if (_file) _file.close();
-  _path = "";
-  _fileName = "";
+bool AudioPlayerScreen::openSource() {
   _error = "";
   _state = State::Ready;
-  _format = SourceFormat::None;
-  _lastDrawMs = 0;
   _finishAtMs = 0;
-  _dataOffset = 0;
-  _dataBytes = 0;
-  _sourceFileSize = 0;
-  _sourceWriteTime = 0;
-  _frameCount = 0;
-  _framePosition = 0;
-  _sampleRate = 0;
-  _channels = 0;
-  _bitsPerSample = 0;
-  _blockAlign = 0;
-  _tags.begin(0, nullptr, nullptr);
-  _tagsParsing = false;
-  _wavInfoOffset = 0;
-  _wavInfoSize = 0;
-  _wavId3Offset = 0;
-  _wavId3Size = 0;
-  _mp3Analyzing = false;
-  _mp3DataOffset = 0;
-  _mp3AudioEnd = 0;
-  _mp3AnalysisPosition = 0;
-  _mp3InputOffset = 0;
-  _mp3InputBytes = 0;
-  _mp3PcmFrames = 0;
-  _mp3PcmPosition = 0;
-  mp3dec_init(&_mp3Decoder);
-}
-
-bool AudioPlayerScreen::loadSource(const String &path) {
-  if (_file) _file.close();
-  _error = "";
-  _state = State::Ready;
-  _framePosition = 0;
-  _finishAtMs = 0;
-  _tags.begin(0, nullptr, nullptr);
-  _tagsParsing = false;
-  _format = formatForPath(path);
-  _file = _secretStorage.open(path, FILE_READ, _secretAccess);
-  if (!_file) return fail(F("Unable to open audio file"));
-  SourceFingerprint fingerprint{};
-  if (_mediaCache.captureFingerprint(_file, fingerprint) != MediaCache::Result::Complete) {
-    return fail(F("Unable to inspect audio file"));
-  }
-  _sourceFileSize = fingerprint.size;
-  _sourceWriteTime = fingerprint.modified;
-  if (_format == SourceFormat::Wav && !parseWav()) {
-    if (_file) _file.close();
-    _state = State::Error;
+  _loadingStartMs = millis();
+  if (!_source.open(_path, _secretAccess)) {
+    failFromSource();
     return false;
   }
-  if (_format == SourceFormat::Mp3 && !beginMp3Analysis()) {
-    if (_file) _file.close();
-    _state = State::Error;
-    return false;
-  }
-  if (_format == SourceFormat::None) return fail(F("Unsupported audio file"));
-  beginTags();
   return true;
 }
 
-AudioPlayerScreen::SourceFormat AudioPlayerScreen::formatForPath(const String &path) const {
-  switch (FileFormats::fromPath(path)) {
-    case FileFormats::Format::Wav: return SourceFormat::Wav;
-    case FileFormats::Format::Mp3: return SourceFormat::Mp3;
-    default: break;
-  }
-  return SourceFormat::None;
-}
-
-bool AudioPlayerScreen::parseWav() {
-  uint32_t fileSize = (uint32_t)_file.size();
-  if (fileSize < 12 || !seekTo(0)) return fail(F("Invalid WAV header"));
-
-  uint8_t riff[12];
-  if (!readExact(riff, sizeof(riff)) || memcmp(riff, "RIFF", 4) != 0 ||
-      memcmp(riff + 8, "WAVE", 4) != 0) {
-    return fail(F("Invalid RIFF/WAVE file"));
-  }
-
-  uint32_t riffSize = readLe32(riff + 4);
-  if (riffSize < 4 || riffSize > fileSize - 8) return fail(F("Invalid WAV bounds"));
-  uint32_t riffEnd = 8 + riffSize;
-  bool hasFormat = false;
-  bool hasData = false;
-  _wavInfoOffset = 0;
-  _wavInfoSize = 0;
-  _wavId3Offset = 0;
-  _wavId3Size = 0;
-  uint32_t cursor = 12;
-
-  while (cursor <= riffEnd && riffEnd - cursor >= 8) {
-    if (!seekTo(cursor)) return fail(F("Could not read WAV chunk"));
-    uint8_t chunk[8];
-    if (!readExact(chunk, sizeof(chunk))) return fail(F("Could not read WAV chunk"));
-    uint32_t chunkSize = readLe32(chunk + 4);
-    uint32_t payload = cursor + 8;
-    if (chunkSize > riffEnd - payload) return fail(F("Invalid WAV chunk size"));
-
-    if (memcmp(chunk, "fmt ", 4) == 0) {
-      if (hasFormat || !parseFormatChunk(payload, chunkSize)) return false;
-      hasFormat = true;
-    } else if (memcmp(chunk, "data", 4) == 0) {
-      if (hasData) return fail(F("Multiple WAV data chunks"));
-      _dataOffset = payload;
-      _dataBytes = chunkSize;
-      hasData = true;
-    } else if (memcmp(chunk, "LIST", 4) == 0 && _wavInfoSize == 0) {
-      // AudioTags checks the list type and ignores lists other than INFO.
-      _wavInfoOffset = payload;
-      _wavInfoSize = chunkSize;
-    } else if ((memcmp(chunk, "id3 ", 4) == 0 || memcmp(chunk, "ID3 ", 4) == 0) &&
-               _wavId3Size == 0) {
-      _wavId3Offset = payload;
-      _wavId3Size = chunkSize;
-    }
-
-    uint32_t paddedSize = chunkSize + (chunkSize & 1U);
-    if (paddedSize > riffEnd - payload) return fail(F("Invalid WAV padding"));
-    cursor = payload + paddedSize;
-  }
-
-  if (cursor != riffEnd || !hasFormat || !hasData || _dataBytes == 0) {
-    return fail(F("WAV fmt/data chunk missing"));
-  }
-  if (_blockAlign == 0 || _dataBytes % _blockAlign != 0) {
-    return fail(F("WAV data is not frame-aligned"));
-  }
-  _frameCount = _dataBytes / _blockAlign;
-  if (_frameCount == 0 || !seekTo(_dataOffset)) return fail(F("WAV has no audio frames"));
-  return true;
-}
-
-bool AudioPlayerScreen::parseFormatChunk(uint32_t offset, uint32_t size) {
-  if (size < 16 || size > 64 || !seekTo(offset)) return fail(F("Invalid WAV fmt chunk"));
-  uint8_t fmt[64];
-  memset(fmt, 0, sizeof(fmt));
-  if (!readExact(fmt, size)) return fail(F("Could not read WAV fmt chunk"));
-
-  uint16_t format = readLe16(fmt + 0);
-  _channels = readLe16(fmt + 2);
-  _sampleRate = readLe32(fmt + 4);
-  uint32_t byteRate = readLe32(fmt + 8);
-  _blockAlign = readLe16(fmt + 12);
-  _bitsPerSample = readLe16(fmt + 14);
-  if (_channels < 1 || _channels > 2 || _sampleRate == 0 ||
-      (_bitsPerSample != 8 && _bitsPerSample != 16 &&
-       _bitsPerSample != 24 && _bitsPerSample != 32)) {
-    return fail(F("Unsupported WAV format"));
-  }
-
-  uint16_t bytesPerSample = (_bitsPerSample + 7) / 8;
-  uint32_t expectedAlign = (uint32_t)_channels * bytesPerSample;
-  uint64_t expectedRate = (uint64_t)_sampleRate * expectedAlign;
-  if (_blockAlign != expectedAlign || expectedRate > 0xffffffffULL ||
-      byteRate != (uint32_t)expectedRate) {
-    return fail(F("Invalid WAV sample alignment"));
-  }
-
-  if (format == 1) return true;
-  if (format != 0xfffe || size < 40 || readLe16(fmt + 18) < _bitsPerSample ||
-      !isPcmSubFormat(fmt + 24)) {
-    return fail(F("Unsupported WAV encoding"));
-  }
-  return true;
-}
-
-void AudioPlayerScreen::beginTags() {
-  _tags.begin(_sourceFileSize, readTagBytes, this);
-  if (_format == SourceFormat::Mp3) {
-    _tags.addId3v2(0, _sourceFileSize);
-    _tags.addId3v1();
-  } else if (_format == SourceFormat::Wav) {
-    // An embedded ID3 tag outranks LIST/INFO where both name a field.
-    if (_wavId3Size > 0) _tags.addId3v2(_wavId3Offset, _wavId3Size);
-    if (_wavInfoSize > 0) _tags.addRiffInfo(_wavInfoOffset, _wavInfoSize);
-  }
-  _tagsParsing = true;
-}
-
-bool AudioPlayerScreen::readTagBytes(void *context, uint32_t offset, uint8_t *buffer, size_t length) {
-  AudioPlayerScreen *screen = static_cast<AudioPlayerScreen *>(context);
-  return screen->seekTo(offset) && screen->readExact(buffer, length);
-}
-
-void AudioPlayerScreen::stepTags() {
-  if (_state == State::Error || !_file) {
-    _tagsParsing = false;
+void AudioPlayerScreen::onSourceLoaded() {
+  drawTrackText();
+  if (!startPlayback()) {
+    refresh();
     return;
   }
-  if (_tags.step(TagFramesPerTick)) finishTags();
+  drawSeekRow(true);
+  drawTransport();
+  if (_infoOpen) drawTrackInfo();
 }
 
-void AudioPlayerScreen::finishTags() {
-  _tagsParsing = false;
-  const AudioTags::Info &info = _tags.info();
-  if (info.title[0] || info.artist[0] || info.album[0] || info.year || info.hasCover()) {
-    Serial.printf("Audio tags: title=\"%s\" artist=\"%s\" album=\"%s\" year=%u cover=%lu@%lu\n",
-                  info.title, info.artist, info.album, (unsigned)info.year,
-                  (unsigned long)info.coverLength, (unsigned long)info.coverOffset);
-  }
-  // An open volume picker covers the text band; draw() repaints it on close.
-  if (!_volumePickerVisible) drawTrackText();
-  if (_state == State::Error || _mp3Analyzing) {
-    drawDynamic(true);
-    return;
-  }
-  // Tag reads moved the shared source position; MP3 resumes at its first
-  // frame, while WAV playback seeks to its data itself.
-  if (_format == SourceFormat::Mp3 && !resetMp3Decoder()) {
-    fail(F("MP3 decoder setup failed"));
-    draw();
-    return;
-  }
-  startPlayback();
-  drawDynamic(true);
-}
-
-bool AudioPlayerScreen::beginMp3Analysis() {
-  uint32_t fileSize = _sourceFileSize;
-  if (fileSize < 4 || !seekTo(0)) return fail(F("Invalid MP3 file"));
-
-  if (loadMp3Cache()) return true;
-
-  _mp3DataOffset = 0;
-  _mp3AudioEnd = fileSize;
-  uint8_t tag[10];
-  if (fileSize >= sizeof(tag) && readExact(tag, sizeof(tag)) && memcmp(tag, "ID3", 3) == 0) {
-    uint32_t tagSize = readSynchsafe32(tag + 6);
-    uint32_t footerBytes = (tag[5] & 0x10) ? 10 : 0;
-    if (tagSize > fileSize - sizeof(tag) || footerBytes > fileSize - sizeof(tag) - tagSize) {
-      return fail(F("Invalid MP3 ID3 tag"));
-    }
-    _mp3DataOffset = sizeof(tag) + tagSize + footerBytes;
-  }
-
-  if (fileSize >= 128 && seekTo(fileSize - 128)) {
-    uint8_t id3v1[3];
-    if (readExact(id3v1, sizeof(id3v1)) && memcmp(id3v1, "TAG", 3) == 0) {
-      _mp3AudioEnd -= 128;
-    }
-  }
-  if (_mp3DataOffset >= _mp3AudioEnd || _mp3AudioEnd - _mp3DataOffset < 4) {
-    return fail(F("MP3 has no audio frames"));
-  }
-
-  _frameCount = 0;
-  _framePosition = 0;
-  _sampleRate = 0;
-  _channels = 0;
-  _bitsPerSample = 16;
-  _mp3AnalysisPosition = _mp3DataOffset;
-  _mp3Analyzing = true;
-  return true;
-}
-
-bool AudioPlayerScreen::loadMp3Cache() {
-  CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return false;
-  StorageFile cache;
-  if (_mediaCache.openRead(paths, _secretAccess, cache) != MediaCache::Result::Complete) return false;
-  uint32_t cacheSize = 0;
-  uint8_t header[Mp3CacheHeaderBytes];
-  bool readOk = _mediaCache.fileSize(cache, cacheSize) == MediaCache::Result::Complete &&
-    cacheSize == Mp3CacheHeaderBytes &&
-    _mediaCache.read(cache, header, sizeof(header)) == MediaCache::Result::Complete;
-  _mediaCache.close(cache);
-  if (!readOk || header[0] != 'E' || header[1] != 'M' || header[2] != 'P' || header[3] != 'A' ||
-      header[4] != 1 || header[5] != 0 || readLe16(header + 6) != Mp3CacheHeaderBytes ||
-      !MediaCache::matches({readLe32(header + 8), readLe32(header + 12)},
-                           {_sourceFileSize, _sourceWriteTime})) {
-    return false;
-  }
-
-  uint32_t dataOffset = readLe32(header + 16);
-  uint32_t audioEnd = readLe32(header + 20);
-  uint32_t frameCount = readLe32(header + 24);
-  uint32_t sampleRate = readLe32(header + 28);
-  uint16_t channels = readLe16(header + 32);
-  if (dataOffset >= audioEnd || audioEnd > _sourceFileSize || frameCount == 0 ||
-      sampleRate == 0 || (channels != 1 && channels != 2)) {
-    return false;
-  }
-
-  _mp3DataOffset = dataOffset;
-  _mp3AudioEnd = audioEnd;
-  uint32_t firstFrameBytes = 0;
-  uint16_t firstFrameSamples = 0;
-  uint32_t firstSampleRate = 0;
-  uint16_t firstChannels = 0;
-  if (!parseMp3FrameHeader(dataOffset, firstFrameBytes, firstFrameSamples, firstSampleRate, firstChannels) ||
-      firstSampleRate != sampleRate || firstChannels != channels || firstFrameSamples > frameCount) {
-    return false;
-  }
-
-  _frameCount = frameCount;
-  _framePosition = 0;
-  _sampleRate = sampleRate;
-  _channels = channels;
-  _bitsPerSample = 16;
-  _mp3Analyzing = false;
-  if (!resetMp3Decoder()) return false;
-  Serial.print(F("MP3 cache hit: "));
-  Serial.println(paths.finalPath);
-  return true;
-}
-
-void AudioPlayerScreen::writeMp3Cache() {
-  if (!_file || _frameCount == 0 || _sampleRate == 0 || (_channels != 1 && _channels != 2)) return;
-
-  CachePaths paths;
-  if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return;
-  MediaCache::Writer writer;
-  if (_mediaCache.beginWrite(paths, _secretAccess, writer) != MediaCache::Result::Complete) {
-    Serial.print(F("MP3 cache directory failed: "));
-    Serial.println(paths.directory);
-    return;
-  }
-  uint8_t header[Mp3CacheHeaderBytes] = {};
-  header[0] = 'E'; header[1] = 'M'; header[2] = 'P'; header[3] = 'A';
-  header[4] = 1;
-  writeLe16(header + 6, Mp3CacheHeaderBytes);
-  writeLe32(header + 8, _sourceFileSize);
-  writeLe32(header + 12, _sourceWriteTime);
-  writeLe32(header + 16, _mp3DataOffset);
-  writeLe32(header + 20, _mp3AudioEnd);
-  writeLe32(header + 24, _frameCount);
-  writeLe32(header + 28, _sampleRate);
-  writeLe16(header + 32, _channels);
-  bool written = _mediaCache.write(writer, header, sizeof(header)) == MediaCache::Result::Complete;
-  if (!written || _mediaCache.commit(writer) != MediaCache::Result::Complete) {
-    _mediaCache.abort(writer);
-    Serial.print(F("MP3 cache write failed: "));
-    Serial.println(paths.finalPath);
-    return;
-  }
-  Serial.print(F("MP3 cache ready: "));
-  Serial.println(paths.finalPath);
-}
-
-void AudioPlayerScreen::analyzeMp3Step() {
-  if (!_mp3Analyzing || _state == State::Error) return;
-
-  for (uint8_t i = 0; i < Mp3AnalysisFramesPerTick; i++) {
-    if (_mp3AnalysisPosition == _mp3AudioEnd) {
-      _mp3Analyzing = false;
-      if (_frameCount == 0 || !resetMp3Decoder()) {
-        if (_state != State::Error) fail(F("MP3 decoder setup failed"));
-      } else {
-        writeMp3Cache();
-        startPlayback();
-      }
-      draw();
-      return;
-    }
-
-    uint32_t frameBytes = 0;
-    uint16_t frameSamples = 0;
-    uint32_t sampleRate = 0;
-    uint16_t channels = 0;
-    if (!parseMp3FrameHeader(_mp3AnalysisPosition, frameBytes, frameSamples, sampleRate, channels)) {
-      fail(F("Invalid MP3 frame"));
-      draw();
-      return;
-    }
-    if (_sampleRate == 0) {
-      _sampleRate = sampleRate;
-      _channels = channels;
-    } else if (_sampleRate != sampleRate || _channels != channels) {
-      fail(F("MP3 stream format changed"));
-      draw();
-      return;
-    }
-    if (_frameCount > UINT32_MAX - frameSamples) {
-      fail(F("MP3 is too long"));
-      draw();
-      return;
-    }
-    _frameCount += frameSamples;
-    _mp3AnalysisPosition += frameBytes;
-  }
-}
-
-bool AudioPlayerScreen::parseMp3FrameHeader(uint32_t position,
-                                             uint32_t &frameBytes,
-                                             uint16_t &frameSamples,
-                                             uint32_t &sampleRate,
-                                             uint16_t &channels) {
-  frameBytes = 0;
-  frameSamples = 0;
-  sampleRate = 0;
-  channels = 0;
-  if (position > _mp3AudioEnd || _mp3AudioEnd - position < 4 || !seekTo(position)) return false;
-
-  uint8_t bytes[4];
-  if (!readExact(bytes, sizeof(bytes))) return false;
-  uint32_t header = readBe32(bytes);
-  uint8_t version = (header >> 19) & 0x03;
-  uint8_t layer = (header >> 17) & 0x03;
-  uint8_t bitrateIndex = (header >> 12) & 0x0f;
-  uint8_t sampleRateIndex = (header >> 10) & 0x03;
-  bool padded = ((header >> 9) & 0x01) != 0;
-  uint8_t channelMode = (header >> 6) & 0x03;
-  if ((header >> 21) != 0x07ff || version == 1 || layer != 1 ||
-      bitrateIndex == 0 || bitrateIndex == 15 || sampleRateIndex == 3) {
-    return false;
-  }
-
-  static const uint32_t mpeg1Rates[] = { 44100, 48000, 32000 };
-  static const uint32_t mpeg2Rates[] = { 22050, 24000, 16000 };
-  static const uint32_t mpeg25Rates[] = { 11025, 12000, 8000 };
-  bool mpeg1 = version == 3;
-  sampleRate = mpeg1 ? mpeg1Rates[sampleRateIndex]
-                       : (version == 2 ? mpeg2Rates[sampleRateIndex] : mpeg25Rates[sampleRateIndex]);
-  uint16_t bitrate = mpeg1 ? Mpeg1Layer3Bitrates[bitrateIndex] : Mpeg2Layer3Bitrates[bitrateIndex];
-  frameSamples = mpeg1 ? 1152 : 576;
-  uint64_t size = ((uint64_t)(mpeg1 ? 144 : 72) * bitrate * 1000) / sampleRate + (padded ? 1 : 0);
-  if (size < 4 || size > _mp3AudioEnd - position) return false;
-  frameBytes = (uint32_t)size;
-  channels = channelMode == 3 ? 1 : 2;
-  return true;
-}
-
-bool AudioPlayerScreen::resetMp3Decoder() {
-  if (!_file || !seekTo(_mp3DataOffset)) return false;
-  _mp3InputOffset = 0;
-  _mp3InputBytes = 0;
-  _mp3PcmFrames = 0;
-  _mp3PcmPosition = 0;
-  mp3dec_init(&_mp3Decoder);
-  return true;
-}
-
-bool AudioPlayerScreen::refillMp3Input() {
-  if (!_file) return false;
-  if (_mp3InputOffset > 0 && _mp3InputBytes > 0) {
-    memmove(_mp3InputBuffer, _mp3InputBuffer + _mp3InputOffset, _mp3InputBytes);
-  }
-  _mp3InputOffset = 0;
-
-  while (_mp3InputBytes < Mp3InputBufferBytes && (uint32_t)_file.position() < _mp3AudioEnd) {
-    uint32_t remaining = _mp3AudioEnd - (uint32_t)_file.position();
-    size_t room = Mp3InputBufferBytes - _mp3InputBytes;
-    size_t request = remaining < room ? remaining : room;
-    size_t count = _file.read(_mp3InputBuffer + _mp3InputBytes, request);
-    if (count == 0) return false;
-    _mp3InputBytes += count;
-  }
-  return _mp3InputBytes > 0;
-}
-
-bool AudioPlayerScreen::decodeMp3Frame() {
-  while (true) {
-    if (!refillMp3Input()) {
-      if ((uint32_t)_file.position() >= _mp3AudioEnd && _mp3InputBytes == 0) return false;
-      fail(F("MP3 read failed"));
-      return false;
-    }
-
-    mp3dec_frame_info_t info;
-    memset(&info, 0, sizeof(info));
-    int samples = mp3dec_decode_frame(&_mp3Decoder,
-                                      _mp3InputBuffer + _mp3InputOffset,
-                                      _mp3InputBytes,
-                                      _mp3PcmBuffer,
-                                      &info);
-    if (info.frame_bytes < 0 || (uint32_t)info.frame_bytes > _mp3InputBytes) {
-      fail(F("MP3 decoder failed"));
-      return false;
-    }
-    if (info.frame_bytes > 0) {
-      _mp3InputOffset += info.frame_bytes;
-      _mp3InputBytes -= info.frame_bytes;
-    }
-    if (samples <= 0) {
-      if (info.frame_bytes == 0) {
-        fail(F("Truncated MP3 frame"));
-        return false;
-      }
-      fail(F("MP3 decode failed"));
-      return false;
-    }
-    if (info.layer != 3 || info.channels != _channels || (uint32_t)info.hz != _sampleRate ||
-        samples > Mp3MaxPcmFrames / info.channels) {
-      fail(F("Unsupported MP3 frame"));
-      return false;
-    }
-    _mp3PcmFrames = samples;
-    _mp3PcmPosition = 0;
-    return true;
-  }
-}
-
-bool AudioPlayerScreen::fail(const __FlashStringHelper *message) {
-  stopSpeaker();
-  if (_file) _file.close();
-  _error = message;
-  _state = State::Error;
-  return false;
-}
-
-bool AudioPlayerScreen::readExact(uint8_t *buffer, size_t length) {
-  return _file && _file.read(buffer, length) == length;
-}
-
-bool AudioPlayerScreen::seekTo(uint32_t position) {
-  return _file && _file.seek(position);
+bool AudioPlayerScreen::playable() const {
+  return _source.isOpen() && _state != State::Error && _sdMounted && !loading();
 }
 
 bool AudioPlayerScreen::startPlayback() {
-  if (!_file || _state == State::Error || !_sdMounted || loading()) return false;
-  if (_state == State::Finished) {
-    _framePosition = 0;
-    if (_format == SourceFormat::Mp3 && !resetMp3Decoder()) {
-      fail(F("Could not restart MP3"));
-      draw();
-      return false;
-    }
-  }
-  _finishAtMs = 0;
-  if (_format == SourceFormat::Wav &&
-      !seekTo(_dataOffset + (uint64_t)_framePosition * _blockAlign)) {
-    fail(F("Could not seek WAV data"));
-    draw();
+  if (!playable()) return false;
+  if (_state == State::Finished && !_source.seek(0)) {
+    failFromSource();
+    refresh();
     return false;
   }
-  if (!_speaker.start(_sampleRate)) {
-    _error = _speaker.lastError();
-    _state = State::Error;
-    stopSpeaker();
-    if (_file) _file.close();
-    draw();
+  _finishAtMs = 0;
+  if (!_speaker.start(_source.sampleRate())) {
+    fail(_speaker.lastError());
+    refresh();
     return false;
   }
   _state = State::Playing;
@@ -764,359 +342,508 @@ void AudioPlayerScreen::pausePlayback() {
 }
 
 void AudioPlayerScreen::finishPlayback() {
-  _framePosition = _frameCount;
+  // Reached only by seeking to the end; streaming handles repeat itself.
+  if (_repeat != Repeat::Off && _source.seek(0)) {
+    _finishAtMs = 0;
+    drawSeekRow(false);
+    return;
+  }
   stopSpeaker();
   _state = State::Finished;
-  drawDynamic(true);
+  drawSeekRow(false);
   drawPlayButton();
+}
+
+void AudioPlayerScreen::restartTrack() {
+  if (!playable() || !_source.seek(0)) return;
+  _finishAtMs = 0;
+  if (_state == State::Finished) {
+    startPlayback();
+  }
+  drawSeekRow(false);
+}
+
+void AudioPlayerScreen::cycleRepeat() {
+  _repeat = _repeat == Repeat::Off ? Repeat::All
+          : _repeat == Repeat::All ? Repeat::One
+                                   : Repeat::Off;
+  drawRepeatCell();
+}
+
+void AudioPlayerScreen::fail(const String &message) {
+  stopSpeaker();
+  _source.closeFile();
+  _pendingOpen = false;
+  _drag = Drag::None;
+  _error = message;
+  _state = State::Error;
+}
+
+void AudioPlayerScreen::failFromSource() {
+  fail(_source.error().length() > 0 ? _source.error() : String(F("Audio playback failed")));
 }
 
 void AudioPlayerScreen::stopSpeaker() {
   _speaker.stop();
 }
 
-void AudioPlayerScreen::streamChunk() {
-  if (_format == SourceFormat::Wav) {
-    streamWavChunk();
-  } else if (_format == SourceFormat::Mp3) {
-    streamMp3Chunk();
-  } else {
-    fail(F("Unsupported audio file"));
-    draw();
-  }
-}
-
-void AudioPlayerScreen::streamWavChunk() {
-  if (!_file || _framePosition >= _frameCount) {
-    finishPlayback();
-    return;
-  }
-
-  uint32_t remaining = _frameCount - _framePosition;
-  uint16_t frames = remaining > OutputFrames ? OutputFrames : (uint16_t)remaining;
-  uint32_t bytes = (uint32_t)frames * _blockAlign;
-  if (bytes > SourceBufferBytes || _file.read(_sourceBuffer, bytes) != bytes) {
-    stopSpeaker();
-    fail(F("WAV read failed"));
-    draw();
-    return;
-  }
-
-  uint16_t bytesPerSample = (_bitsPerSample + 7) / 8;
-  for (uint16_t frame = 0; frame < frames; frame++) {
-    const uint8_t *source = _sourceBuffer + (uint32_t)frame * _blockAlign;
-    int64_t left = decodeSample(source);
-    int64_t mono = left;
-    if (_channels == 2) mono = (left + decodeSample(source + bytesPerSample)) / 2;
-    _outputBuffer[frame] = (int16_t)clamp16(mono);
-  }
-
-  size_t written = _speaker.writePcm16(_outputBuffer, frames, 100);
-  if (written > frames) written = frames;
-  _framePosition += (uint32_t)written;
-  if (written < frames && !seekTo(_dataOffset + (uint64_t)_framePosition * _blockAlign)) {
-    stopSpeaker();
-    fail(F("Could not resume WAV stream"));
-    draw();
-    return;
-  }
-  if (written == 0) {
-    stopSpeaker();
-    fail(F("Speaker write failed"));
-    draw();
-  } else if (_framePosition >= _frameCount) {
-    // Let the speaker's DMA queue drain before uninstalling the I2S driver.
-    _finishAtMs = millis() + 100;
-  }
-}
-
-void AudioPlayerScreen::streamMp3Chunk() {
-  if (!_file || _framePosition >= _frameCount) {
-    finishPlayback();
-    return;
-  }
-  if (_mp3PcmPosition >= _mp3PcmFrames && !decodeMp3Frame()) {
-    if (_state != State::Error) {
-      if (_framePosition == _frameCount) {
-        _finishAtMs = millis() + 100;
-      } else {
-        fail(F("MP3 ended early"));
-        draw();
-      }
-    }
-    return;
-  }
-
-  uint16_t remaining = _mp3PcmFrames - _mp3PcmPosition;
-  uint16_t frames = remaining > OutputFrames ? OutputFrames : remaining;
-  for (uint16_t frame = 0; frame < frames; frame++) {
-    const mp3d_sample_t *source = _mp3PcmBuffer +
-      (uint32_t)(_mp3PcmPosition + frame) * _channels;
-    int32_t mono = source[0];
-    if (_channels == 2) mono = ((int32_t)source[0] + (int32_t)source[1]) / 2;
-    _outputBuffer[frame] = (int16_t)clamp16(mono);
-  }
-
-  size_t written = _speaker.writePcm16(_outputBuffer, frames, 100);
-  if (written > frames) written = frames;
-  _mp3PcmPosition += written;
-  _framePosition += written;
-  if (written == 0) {
-    stopSpeaker();
-    fail(F("Speaker write failed"));
-    draw();
-  } else if (_framePosition >= _frameCount) {
-    // Let the speaker's DMA queue drain before uninstalling the I2S driver.
-    _finishAtMs = millis() + 100;
-  }
-}
-
-int32_t AudioPlayerScreen::decodeSample(const uint8_t *sample) const {
-  if (_bitsPerSample == 8) return ((int32_t)sample[0] - 128) << 8;
-  if (_bitsPerSample == 16) {
-    uint16_t raw = readLe16(sample);
-    return (int16_t)raw;
-  }
-  if (_bitsPerSample == 24) {
-    int32_t raw = (int32_t)sample[0] | ((int32_t)sample[1] << 8) | ((int32_t)sample[2] << 16);
-    if (raw & 0x00800000) raw |= (int32_t)0xff000000;
-    return raw >> 8;
-  }
-  int32_t raw = (int32_t)readLe32(sample);
-  return raw >> 16;
-}
-
 void AudioPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::None) return;
   if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
-    stopSpeaker();
-    if (_file) _file.close();
     _sdMounted = false;
     fail(event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable"));
-    draw();
+    refresh();
     return;
   }
   if (event == SdCardEvent::Mounted) {
     _sdMounted = true;
-    if (_path.length() > 0) loadSource(_path);
-    draw();
+    if (_path.length() > 0) _pendingOpen = true;
+    refresh();
   }
 }
 
-void AudioPlayerScreen::draw(bool force) {
-  (void)force;
-  if (!_display.isReady()) return;
-  _display.tft().fillScreen(TFT_BLACK);
-  drawTopBar();
-  drawTrackText();
-  drawPlayButton();
-  drawVolumeButton();
-  drawDynamic(true);
-  if (_volumePickerVisible) drawVolumePicker();
-  if (_state == State::Error) drawError();
+void AudioPlayerScreen::beginDrag(Drag drag, int16_t x) {
+  if (drag == Drag::Seek) {
+    _dragFraction = seekFractionAt(x);
+    _drag = drag;
+    drawSeekRow(false);
+  } else {
+    _dragVolume = _audioSettings.volume();
+    _drag = drag;
+    updateDrag(x);
+  }
 }
 
-void AudioPlayerScreen::drawTopBar() {
-  UiKit::drawTopAppBar(_display.tft(), _display.width(), F("Audio"));
+void AudioPlayerScreen::updateDrag(int16_t x) {
+  if (_drag == Drag::Seek) {
+    const float fraction = seekFractionAt(x);
+    if (fraction == _dragFraction) return;
+    _dragFraction = fraction;
+    drawSeekRow(false);
+  } else if (_drag == Drag::Volume) {
+    _volumeTouchMs = millis();
+    const uint8_t level = volumeLevelAt(x);
+    if (level == _dragVolume) return;
+    const int16_t previous = _dragVolume;
+    _dragVolume = level;
+    // Live while dragging; AudioSettings persists once, on release.
+    _speaker.setVolume(level);
+    drawVolumeSlider(previous);
+    drawVolumeCell();
+  }
+}
+
+void AudioPlayerScreen::endDrag() {
+  const Drag drag = _drag;
+  _drag = Drag::None;
+  if (drag == Drag::Seek) {
+    const uint32_t frame = (uint32_t)lroundf(_dragFraction * _source.frameCount());
+    if (_source.seek(frame)) {
+      if (_state == State::Finished && !_source.ended()) {
+        _state = State::Paused;
+        drawPlayButton();
+      } else if (_state == State::Playing && _source.ended()) {
+        _finishAtMs = millis();
+      }
+    }
+    drawSeekRow(false);
+  } else if (drag == Drag::Volume) {
+    _volumeTouchMs = millis();
+    if (!_audioSettings.setVolume(_dragVolume)) {
+      const int16_t previous = _dragVolume;
+      _speaker.setVolume(_audioSettings.volume());
+      if (_volumeOpen) drawVolumeSlider(previous);
+      drawVolumeCell();
+    }
+  }
+}
+
+float AudioPlayerScreen::seekFractionAt(int16_t x) const {
+  const int16_t width = _display.width() - SeekX * 2;
+  return clampUnit((float)(x - SeekX) / width);
+}
+
+uint8_t AudioPlayerScreen::volumeLevelAt(int16_t x) const {
+  const float fraction = clampUnit((float)(x - VolumeSliderX) / VolumeSliderWidth);
+  return (uint8_t)lroundf(fraction * AudioSettings::MaxVolume);
+}
+
+uint8_t AudioPlayerScreen::currentVolume() const {
+  return _drag == Drag::Volume ? _dragVolume : _audioSettings.volume();
+}
+
+uint32_t AudioPlayerScreen::displayedFrame() const {
+  if (_drag == Drag::Seek) return (uint32_t)lroundf(_dragFraction * _source.frameCount());
+  return _source.framePosition();
+}
+
+void AudioPlayerScreen::openVolume() {
+  _volumeOpen = true;
+  _volumeTouchMs = millis();
+  drawVolumePanel();
+}
+
+void AudioPlayerScreen::closeVolume() {
+  if (_drag == Drag::Volume) endDrag();
+  _volumeOpen = false;
+  if (!_display.isReady() || _infoOpen) return;
+  _display.tft().fillRect(0, VolumeClearTop, _display.width(),
+                          VolumePanelY + VolumePanelHeight - VolumeClearTop, TFT_BLACK);
+  drawTrackText();
+  drawSeekRow(true);
+}
+
+void AudioPlayerScreen::openInfo() {
+  if (_drag != Drag::None) endDrag();
+  if (_volumeOpen && _display.isReady()) {
+    // The sheet does not reach the panel's bottom edge; close() redraws all.
+    _display.tft().fillRect(0, VolumeClearTop, _display.width(),
+                            VolumePanelY + VolumePanelHeight - VolumeClearTop, TFT_BLACK);
+  }
+  _volumeOpen = false;
+  _infoOpen = true;
+  drawTrackInfo();
+}
+
+void AudioPlayerScreen::closeInfo() {
+  _infoOpen = false;
+  draw();
+}
+
+void AudioPlayerScreen::draw() {
+  if (!_display.isReady()) return;
+  TFT_eSPI &tft = _display.tft();
+  tft.fillScreen(TFT_BLACK);
+  UiKit::drawTopAppBar(tft, _display.width(), F("Now playing"),
+                       UiKit::NavigationIcon::Close, UiKit::AppBarAction::More);
+  drawCover();
+  drawTrackText();
+  drawSeekRow(true);
+  drawTransport();
+  if (_volumeOpen) drawVolumePanel();
+  if (_infoOpen) drawTrackInfo();
+}
+
+// Repaints everything that depends on the playback state, without the cover.
+void AudioPlayerScreen::refresh() {
+  drawTrackText();
+  drawSeekRow(true);
+  drawTransport();
+}
+
+void AudioPlayerScreen::drawCover() {
+  if (!_display.isReady() || _infoOpen) return;
+  TFT_eSPI &tft = _display.tft();
+  const int16_t x = (_display.width() - CoverSize) / 2;
+  tft.fillSmoothRoundRect(x, CoverTop, CoverSize, CoverSize, CoverRadius, CoverColor, TFT_BLACK);
+  UiKit::drawMusicNoteIcon(tft, _display.width() / 2, CoverTop + CoverSize / 2, CoverGlyphSize,
+                           CoverGlyphColor, CoverColor);
 }
 
 void AudioPlayerScreen::drawTrackText() {
-  if (!_display.isReady()) return;
+  if (!_display.isReady() || _infoOpen) return;
   TFT_eSPI &tft = _display.tft();
   const int16_t width = _display.width();
-  // Interim layout until the redesigned player: the text band sits between
-  // the app bar and the play button (which starts at y=94).
-  tft.fillRect(0, UiKit::AppBarHeight, width, 94 - UiKit::AppBarHeight, TFT_BLACK);
-  const String details = trackDetails();
-  const int16_t titleY = details.length() > 0 ? 51 : 58;
-  UiText::draw(tft, truncateLabel(trackTitle(), width - 32), width / 2, titleY,
-               TFT_WHITE, TFT_BLACK, UiText::Size::Title, TC_DATUM);
-  if (details.length() > 0) {
-    UiText::draw(tft, UiText::ellipsize(details, width - 32, UiText::Size::Compact), width / 2, 77,
-                 TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, TC_DATUM);
+  const int16_t centerX = width / 2;
+  const int16_t textWidth = width - TextMargin * 2;
+  // The volume panel covers the album line.
+  const int16_t bottom = _volumeOpen ? VolumeClearTop : TextBottom;
+  tft.fillRect(0, TextTop, width, bottom - TextTop, TFT_BLACK);
+
+  UiText::draw(tft, UiText::ellipsize(trackTitle(), textWidth, UiText::Size::Title), centerX, TitleY,
+               TFT_WHITE, TFT_BLACK, UiText::Size::Title, MC_DATUM);
+
+  String line;
+  uint16_t color = TFT_LIGHTGREY;
+  if (_state == State::Error) {
+    line = _error;
+    color = TFT_RED;
+  } else if (tagsPending()) {
+    line = F("Reading track...");
+    color = InactiveColor;
+  } else if (_source.tags().artist[0]) {
+    line = _source.tags().artist;
+  } else {
+    line = F("Unknown artist");
+    color = InactiveColor;
+  }
+  UiText::draw(tft, UiText::ellipsize(line, textWidth, UiText::Size::Content), centerX, ArtistY,
+               color, TFT_BLACK, UiText::Size::Content, MC_DATUM);
+
+  if (_volumeOpen) return;
+  const String album = albumLine();
+  if (album.length() > 0) {
+    UiText::draw(tft, UiText::ellipsize(album, textWidth, UiText::Size::Compact), centerX, AlbumY,
+                 InactiveColor, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
   }
 }
 
-void AudioPlayerScreen::drawDynamic(bool force) {
-  if (!_display.isReady()) return;
-  _lastDrawMs = millis();
-  drawProgress();
-  drawStatus();
-  if (force || _state == State::Error) {
-    // The error text is drawn separately so normal progress refreshes do not erase it.
-    if (_state == State::Error) drawError();
-  }
-}
-
-void AudioPlayerScreen::drawStatus() {
+void AudioPlayerScreen::drawSeekRow(bool force) {
+  if (!_display.isReady() || _infoOpen || _volumeOpen) return;
   TFT_eSPI &tft = _display.tft();
-  tft.fillRect(16, 238, _display.width() - 32, 28, TFT_BLACK);
-  if (!loading() || _state == State::Error) return;
-  UiText::draw(tft, F("Reading track..."), _display.width() / 2, 250,
-               TFT_LIGHTGREY, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
+  const int16_t width = _display.width() - SeekX * 2;
+  _lastDrawMs = millis();
+
+  if (loading()) {
+    if (force || _seekDrawn) {
+      tft.fillRect(0, SeekY - UiKit::SeekBarBandHalf, _display.width(),
+                   UiKit::SeekBarBandHalf * 2 + 1, TFT_BLACK);
+    }
+    UiKit::drawProgressBar(tft, SeekX, SeekY - 4, width, 8, 0, true, TFT_CYAN, TrackColor,
+                           TFT_BLACK, true, millis() - _loadingStartMs);
+    _seekDrawn = false;
+    drawTimes(force);
+    return;
+  }
+
+  const uint32_t frames = _source.frameCount();
+  const float fraction = frames > 0 ? clampUnit((float)displayedFrame() / frames) : 0.0f;
+  const bool thumb = _source.canSeek() && _state != State::Error;
+  const uint16_t fill = _state == State::Error ? TrackColor : TFT_CYAN;
+  if (force || !_seekDrawn || thumb != _drawnThumb || fill != _drawnFill) {
+    UiKit::drawSeekBar(tft, SeekX, SeekY, width, fraction, thumb, fill, TrackColor, TFT_BLACK);
+  } else {
+    UiKit::updateSeekBar(tft, SeekX, SeekY, width, _drawnFraction, fraction, thumb, fill,
+                         TrackColor, TFT_BLACK);
+  }
+  _seekDrawn = true;
+  _drawnThumb = thumb;
+  _drawnFill = fill;
+  _drawnFraction = fraction;
+  drawTimes(force);
+}
+
+void AudioPlayerScreen::drawTimes(bool force) {
+  TFT_eSPI &tft = _display.tft();
+  const int16_t right = _display.width() - SeekX;
+  int32_t elapsed = -1;
+  int32_t remaining = -1;
+  const uint32_t rate = _source.sampleRate();
+  if (!loading() && rate > 0 && _source.frameCount() > 0) {
+    const uint32_t total = _source.frameCount() / rate;
+    elapsed = (int32_t)(displayedFrame() / rate);
+    remaining = total > (uint32_t)elapsed ? (int32_t)(total - elapsed) : 0;
+  }
+  if (force || elapsed != _drawnElapsed) {
+    tft.fillRect(SeekX, TimeTop, TimeWidth, TimeHeight, TFT_BLACK);
+    if (elapsed >= 0) {
+      UiText::draw(tft, timeText(elapsed), SeekX, TimeY, TFT_LIGHTGREY, TFT_BLACK,
+                   UiText::Size::Compact, ML_DATUM);
+    }
+  }
+  if (force || remaining != _drawnRemaining) {
+    tft.fillRect(right - TimeWidth, TimeTop, TimeWidth, TimeHeight, TFT_BLACK);
+    if (remaining >= 0) {
+      UiText::draw(tft, String('-') + timeText(remaining), right, TimeY, TFT_LIGHTGREY,
+                   TFT_BLACK, UiText::Size::Compact, MR_DATUM);
+    }
+  }
+  _drawnElapsed = elapsed;
+  _drawnRemaining = remaining;
+}
+
+void AudioPlayerScreen::drawTransport() {
+  if (!_display.isReady()) return;
+  drawRepeatCell();
+  drawPlayButton();  // Also draws the previous cell.
+  drawNextCell();
+  drawVolumeCell();
+}
+
+void AudioPlayerScreen::drawRepeatCell() {
+  if (!_display.isReady()) return;
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(RepeatX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
+  UiKit::drawRepeatIcon(tft, RepeatX, TransportY, _repeat == Repeat::One,
+                        _repeat == Repeat::Off ? TFT_WHITE : TFT_CYAN, TFT_BLACK);
+}
+
+void AudioPlayerScreen::drawPreviousCell() {
+  if (!_display.isReady()) return;
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(PreviousX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
+  UiKit::drawSkipIcon(tft, PreviousX, TransportY, false,
+                      playable() ? TFT_WHITE : InactiveColor, TFT_BLACK);
 }
 
 void AudioPlayerScreen::drawPlayButton() {
+  if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  const int16_t cx = _display.width() / 2;
-  const int16_t cy = 118;
-  bool enabled = _state != State::Error && _sdMounted && !loading();
-  uint16_t fill = enabled ? TFT_DARKGREY : TFT_BLACK;
-  tft.fillCircle(cx, cy, 24, fill);
-  tft.drawCircle(cx, cy, 24, enabled ? TFT_WHITE : TFT_DARKGREY);
-  if (!enabled) return;
-  tft.setTextColor(TFT_WHITE, fill);
-  if (_state == State::Playing) {
-    tft.fillRect(cx - 9, cy - 10, 6, 20, TFT_WHITE);
-    tft.fillRect(cx + 3, cy - 10, 6, 20, TFT_WHITE);
-  } else {
-    tft.fillTriangle(cx - 7, cy - 11, cx - 7, cy + 11, cx + 11, cy, TFT_WHITE);
-  }
+  const int16_t centerX = _display.width() / 2;
+  const bool enabled = playable();
+  const uint16_t fill = enabled ? TFT_WHITE : PlayDisabledColor;
+  tft.fillSmoothCircle(centerX, TransportY, PlayRadius, fill, TFT_BLACK);
+  const bool playing = _state == State::Playing;
+  // The triangle's mass sits left of its bounding box; nudge it for balance.
+  UiKit::drawPlaybackIcon(tft, playing ? centerX : centerX - 1, TransportY, playing,
+                          enabled ? TFT_BLACK : InactiveColor, fill, 2.0f);
+  // Prev's enabled state follows the same conditions.
+  drawPreviousCell();
 }
 
-void AudioPlayerScreen::drawVolumeButton() {
+void AudioPlayerScreen::drawNextCell() {
+  if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  const int16_t x = 20;
-  const int16_t y = 142;
-  const int16_t width = _display.width() - 40;
-  const int16_t height = 28;
-  tft.fillSmoothRoundRect(x, y, width, height, 5, TFT_DARKGREY, TFT_BLACK);
-  String label = F("Volume: ");
-  label += _audioSettings.volume();
-  label += F(" / 10");
-  UiText::draw(tft, label, _display.width() / 2, y + height / 2, TFT_WHITE, TFT_DARKGREY,
+  tft.fillRect(NextX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
+  // Inactive until the player has a folder queue.
+  UiKit::drawSkipIcon(tft, NextX, TransportY, true, InactiveColor, TFT_BLACK);
+}
+
+void AudioPlayerScreen::drawVolumeCell() {
+  if (!_display.isReady()) return;
+  TFT_eSPI &tft = _display.tft();
+  tft.fillRect(VolumeX - CellHalf, TransportY - CellHalf, CellHalf * 2, CellHalf * 2, TFT_BLACK);
+  UiKit::drawVolumeIcon(tft, VolumeX, TransportY, currentVolume() == 0,
+                        _volumeOpen ? TFT_CYAN : TFT_WHITE, TFT_BLACK);
+}
+
+void AudioPlayerScreen::drawVolumePanel() {
+  if (!_display.isReady() || _infoOpen) return;
+  TFT_eSPI &tft = _display.tft();
+  const int16_t panelWidth = _display.width() - VolumePanelX * 2;
+  tft.fillRect(0, VolumeClearTop, _display.width(),
+               VolumePanelY + VolumePanelHeight - VolumeClearTop, TFT_BLACK);
+  tft.fillSmoothRoundRect(VolumePanelX, VolumePanelY, panelWidth, VolumePanelHeight,
+                          VolumePanelRadius, PanelColor, TFT_BLACK);
+  drawVolumeSlider(-1);
+  drawVolumeCell();
+}
+
+void AudioPlayerScreen::drawVolumeSlider(int16_t previousLevel) {
+  if (!_display.isReady() || !_volumeOpen || _infoOpen) return;
+  TFT_eSPI &tft = _display.tft();
+  const uint8_t level = currentVolume();
+  const float fraction = (float)level / AudioSettings::MaxVolume;
+  if (previousLevel < 0) {
+    UiKit::drawSeekBar(tft, VolumeSliderX, VolumeRowY, VolumeSliderWidth, fraction, true,
+                       TFT_CYAN, PanelTrackColor, PanelColor);
+  } else {
+    UiKit::updateSeekBar(tft, VolumeSliderX, VolumeRowY, VolumeSliderWidth,
+                         (float)previousLevel / AudioSettings::MaxVolume, fraction, true,
+                         TFT_CYAN, PanelTrackColor, PanelColor);
+  }
+  tft.fillRect(VolumeIconX - 14, VolumeRowY - 14, 28, 28, PanelColor);
+  UiKit::drawVolumeIcon(tft, VolumeIconX, VolumeRowY, level == 0, TFT_WHITE, PanelColor);
+  tft.fillRect(VolumeValueX - 18, VolumeRowY - 12, 36, 24, PanelColor);
+  UiText::draw(tft, String(level), VolumeValueX, VolumeRowY, TFT_WHITE, PanelColor,
                UiText::Size::Content, MC_DATUM);
 }
 
-void AudioPlayerScreen::drawVolumePicker() {
+void AudioPlayerScreen::drawTrackInfo() {
+  if (!_display.isReady()) return;
   TFT_eSPI &tft = _display.tft();
-  const uint8_t columns = 6;
-  const int16_t panelX = 16;
-  const int16_t panelY = 54;
-  const int16_t panelWidth = _display.width() - panelX * 2;
-  const int16_t panelHeight = 206;
-  const int16_t gridLeft = panelX + 16;
-  const int16_t gridTop = panelY + 60;
-  const int16_t gap = 8;
-  const int16_t cellHeight = 44;
-  const int16_t availableWidth = panelWidth - 32 - gap * (columns - 1);
-  const int16_t cellWidth = availableWidth / columns;
-  const uint8_t selected = _audioSettings.volume();
+  const int16_t width = _display.width() - InfoX * 2;
+  const int16_t left = InfoX + UiKit::ContentPadding;
+  const int16_t right = InfoX + width - UiKit::ContentPadding;
+  const int16_t textWidth = right - left;
+  UiKit::drawPopupMenuFrame(tft, InfoX, InfoTop, width, InfoHeight, TFT_BLACK);
 
-  tft.fillRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_BLACK);
-  tft.drawRoundRect(panelX, panelY, panelWidth, panelHeight, 8, TFT_WHITE);
-  String title = F("Volume ");
-  title += selected;
-  title += F(" / 10");
-  UiText::draw(tft, title, _display.width() / 2, panelY + 28, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Title, MC_DATUM);
-
-  for (uint8_t level = AudioSettings::MinVolume; level <= AudioSettings::MaxVolume; level++) {
-    uint8_t column = level % columns;
-    uint8_t row = level / columns;
-    int16_t x = gridLeft + column * (cellWidth + gap);
-    int16_t y = gridTop + row * (cellHeight + gap);
-    bool isSelected = level == selected;
-    uint16_t fill = isSelected ? TFT_CYAN : TFT_DARKGREY;
-    tft.fillSmoothRoundRect(x, y, cellWidth, cellHeight, 5, fill, TFT_BLACK);
-    UiText::draw(tft, String(level), x + cellWidth / 2, y + cellHeight / 2,
-                 isSelected ? TFT_BLACK : TFT_WHITE, fill, UiText::Size::Content, MC_DATUM);
+  UiText::draw(tft, F("File"), left, InfoTop + 20, InactiveColor, TFT_BLACK,
+               UiText::Size::Compact, ML_DATUM);
+  String first;
+  String rest;
+  splitLine(_fileName, textWidth, UiText::Size::Content, first, rest);
+  UiText::draw(tft, first, left, InfoTop + 44, TFT_WHITE, TFT_BLACK, UiText::Size::Content,
+               ML_DATUM);
+  if (rest.length() > 0) {
+    UiText::draw(tft, UiText::ellipsize(rest, textWidth, UiText::Size::Content), left,
+                 InfoTop + 68, TFT_WHITE, TFT_BLACK, UiText::Size::Content, ML_DATUM);
   }
-}
 
-void AudioPlayerScreen::drawProgress() {
-  TFT_eSPI &tft = _display.tft();
-  const int16_t x = 20;
-  const int16_t y = 178;
-  const int16_t width = _display.width() - 40;
-  const int16_t height = 8;
-  uint32_t filled = 0;
-  if (_frameCount > 0 && _framePosition > 0) {
-    filled = (uint32_t)(((uint64_t)width * _framePosition) / _frameCount);
-    if (filled > (uint32_t)width) filled = width;
+  const AudioSource::Format format = _source.format();
+  const uint32_t rate = _source.sampleRate();
+  const bool known = rate > 0 && !_source.loading();
+  String formatText = format == AudioSource::Format::Mp3 ? String(F("MP3"))
+                    : format == AudioSource::Format::Wav ? String(F("WAV"))
+                                                         : String(F("Unknown"));
+  if (format == AudioSource::Format::Wav && _source.bitsPerSample() > 0) {
+    formatText += F(", ");
+    formatText += _source.bitsPerSample();
+    formatText += F("-bit PCM");
   }
-  tft.fillRect(x, y, width, height, TFT_DARKGREY);
-  if (filled > 0) tft.fillRect(x, y, filled, height, TFT_CYAN);
-  UiText::draw(tft, timeText(_framePosition), x, 202, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Compact);
-  UiText::draw(tft, timeText(_frameCount), x + width, 202, TFT_WHITE, TFT_BLACK,
-               UiText::Size::Compact, TR_DATUM);
-}
+  String rateText = F("\xE2\x80\x94");
+  if (rate > 0) {
+    char buffer[16];
+    if (rate % 1000 == 0) {
+      snprintf(buffer, sizeof(buffer), "%lu kHz", (unsigned long)(rate / 1000));
+    } else {
+      snprintf(buffer, sizeof(buffer), "%.1f kHz", rate / 1000.0f);
+    }
+    rateText = buffer;
+  }
+  const uint16_t channels = _source.channels();
+  String channelText = channels == 1 ? String(F("Mono"))
+                     : channels == 2 ? String(F("Stereo"))
+                                     : String(F("\xE2\x80\x94"));
+  String bitrateText = F("\xE2\x80\x94");
+  const uint32_t kbps = known ? _source.bitrateKbps() : 0;
+  if (kbps > 0) {
+    bitrateText = String(kbps) + F(" kbps");
+    if (format == AudioSource::Format::Mp3) bitrateText += F(" avg");
+  }
+  String durationText = _source.loading() ? String(F("Scanning...")) : String(F("\xE2\x80\x94"));
+  if (known && _source.frameCount() > 0) durationText = timeText(_source.frameCount() / rate);
 
-void AudioPlayerScreen::drawError() {
-  TFT_eSPI &tft = _display.tft();
-  tft.fillRect(16, 238, _display.width() - 32, 28, TFT_BLACK);
-  UiText::draw(tft, _error, _display.width() / 2, 250, TFT_RED, TFT_BLACK,
-               UiText::Size::Compact, MC_DATUM);
-}
-
-String AudioPlayerScreen::displayName(const String &path) const {
-  int16_t slash = path.lastIndexOf('/');
-  return slash < 0 ? path : path.substring(slash + 1);
+  const __FlashStringHelper *labels[InfoRowCount] = {
+    F("Format"), F("Sample rate"), F("Channels"), F("Bitrate"), F("Duration")
+  };
+  const String values[InfoRowCount] = {formatText, rateText, channelText, bitrateText, durationText};
+  for (uint8_t i = 0; i < InfoRowCount; i++) {
+    const int16_t rowY = InfoTop + InfoRowsTop + InfoRowHeight * i + InfoRowHeight / 2;
+    UiText::draw(tft, labels[i], left, rowY, InactiveColor, TFT_BLACK, UiText::Size::Compact,
+                 ML_DATUM);
+    UiText::draw(tft, UiText::ellipsize(values[i], textWidth - 96, UiText::Size::Content), right,
+                 rowY, TFT_WHITE, TFT_BLACK, UiText::Size::Content, MR_DATUM);
+  }
+  UiText::draw(tft, F("Tap anywhere to close"), _display.width() / 2, InfoTop + InfoHeight - 18,
+               InactiveColor, TFT_BLACK, UiText::Size::Compact, MC_DATUM);
 }
 
 String AudioPlayerScreen::trackTitle() const {
-  if (!_tagsParsing && _tags.info().title[0]) return String(_tags.info().title);
+  if (!tagsPending() && _source.tags().title[0]) return String(_source.tags().title);
   // Untagged: the file name without its extension.
   int16_t dot = _fileName.lastIndexOf('.');
   return dot > 0 ? _fileName.substring(0, dot) : _fileName;
 }
 
-String AudioPlayerScreen::trackDetails() const {
-  if (_tagsParsing) return String();
-  const AudioTags::Info &info = _tags.info();
-  String details;
-  auto append = [&details](const String &part) {
-    if (part.length() == 0) return;
-    if (details.length() > 0) details += F(" \xC2\xB7 ");
-    details += part;
-  };
-  append(String(info.artist));
-  append(String(info.album));
-  if (info.year) append(String(info.year));
-  return details;
+String AudioPlayerScreen::albumLine() const {
+  if (tagsPending()) return String();
+  const AudioTags::Info &info = _source.tags();
+  return joinDot(String(info.album), info.year ? String(info.year) : String());
 }
 
-String AudioPlayerScreen::truncateLabel(const String &label, int16_t maxWidth) {
-  return UiText::ellipsize(label, maxWidth, UiText::Size::Title);
-}
-
-String AudioPlayerScreen::timeText(uint32_t frames) const {
-  uint32_t seconds = _sampleRate == 0 ? 0 : frames / _sampleRate;
+String AudioPlayerScreen::timeText(uint32_t seconds) const {
   char buffer[20];
-  snprintf(buffer, sizeof(buffer), "%lu:%02lu",
-           (unsigned long)(seconds / 60), (unsigned long)(seconds % 60));
+  if (seconds >= 3600) {
+    snprintf(buffer, sizeof(buffer), "%lu:%02lu:%02lu", (unsigned long)(seconds / 3600),
+             (unsigned long)(seconds / 60 % 60), (unsigned long)(seconds % 60));
+  } else {
+    snprintf(buffer, sizeof(buffer), "%lu:%02lu", (unsigned long)(seconds / 60),
+             (unsigned long)(seconds % 60));
+  }
   return String(buffer);
 }
 
-bool AudioPlayerScreen::controlContains(int16_t x, int16_t y) const {
-  int16_t left = _display.width() / 2 - 24;
-  return x >= left && x < left + 48 && y >= 94 && y < 142;
+bool AudioPlayerScreen::cellContains(int16_t centerX, int16_t x, int16_t y) const {
+  return x >= centerX - CellHalf && x < centerX + CellHalf &&
+         y >= TransportY - CellHalf && y < TransportY + CellHalf;
 }
 
-bool AudioPlayerScreen::volumeButtonContains(int16_t x, int16_t y) const {
-  return x >= 20 && x < _display.width() - 20 && y >= 142 && y < 170;
+bool AudioPlayerScreen::playContains(int16_t x, int16_t y) const {
+  const int16_t centerX = _display.width() / 2;
+  return x >= centerX - PlayRadius && x < centerX + PlayRadius &&
+         y >= TransportY - PlayRadius && y < TransportY + PlayRadius;
 }
 
-int8_t AudioPlayerScreen::volumePickerLevelAt(int16_t x, int16_t y) const {
-  const uint8_t columns = 6;
-  const int16_t panelX = 16;
-  const int16_t panelY = 54;
-  const int16_t panelWidth = _display.width() - panelX * 2;
-  const int16_t gridLeft = panelX + 16;
-  const int16_t gridTop = panelY + 60;
-  const int16_t gap = 8;
-  const int16_t cellHeight = 44;
-  const int16_t availableWidth = panelWidth - 32 - gap * (columns - 1);
-  const int16_t cellWidth = availableWidth / columns;
-  for (uint8_t level = AudioSettings::MinVolume; level <= AudioSettings::MaxVolume; level++) {
-    uint8_t column = level % columns;
-    uint8_t row = level / columns;
-    int16_t left = gridLeft + column * (cellWidth + gap);
-    int16_t top = gridTop + row * (cellHeight + gap);
-    if (x >= left && x < left + cellWidth && y >= top && y < top + cellHeight) {
-      return (int8_t)level;
-    }
-  }
-  return -1;
+bool AudioPlayerScreen::seekContains(int16_t x, int16_t y) const {
+  return x >= 0 && x < _display.width() && y >= SeekHitTop && y < SeekHitBottom;
+}
+
+bool AudioPlayerScreen::volumePanelContains(int16_t x, int16_t y) const {
+  return x >= VolumePanelX && x < _display.width() - VolumePanelX &&
+         y >= VolumePanelY && y < VolumePanelY + VolumePanelHeight;
+}
+
+bool AudioPlayerScreen::volumeSliderContains(int16_t x, int16_t y) const {
+  return volumePanelContains(x, y) && x >= VolumeSliderHitLeft && x < VolumeSliderHitRight;
 }

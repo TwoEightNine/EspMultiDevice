@@ -103,9 +103,44 @@ void drawZoomIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 // complete 48px hit target and the icon's solid immediate background.
 void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                         bool exitFullscreen, uint16_t color, uint16_t backgroundColor);
-// Compact playback control used by streaming media screens.
+// Compact playback control used by streaming media screens. `paused` draws
+// the pause bars. `scale` enlarges the 14px glyph for a larger control, such
+// as the Audio Player's 64px play button (scale 2).
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                      bool paused, uint16_t color, uint16_t backgroundColor);
+                      bool paused, uint16_t color, uint16_t backgroundColor,
+                      float scale = 1.0f);
+// 24px media transport glyphs. The owner supplies the complete 48x48px cell
+// as the hit target and the solid immediate background.
+void drawSkipIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  bool forward, uint16_t color, uint16_t backgroundColor);
+// Speaker with two waves, or with an x when `muted`.
+void drawVolumeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    bool muted, uint16_t color, uint16_t backgroundColor);
+// Loop arrows; `one` adds a "1" badge on the top-right corner.
+void drawRepeatIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    bool one, uint16_t color, uint16_t backgroundColor);
+// Scalable eighth note for media placeholders; `size` is its height in px.
+void drawMusicNoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       int16_t size, uint16_t color, uint16_t backgroundColor);
+
+// Horizontal slider for seek and volume: a 4px pill track, a fill from the
+// left edge, and an optional 14px white thumb at the fill's end. The helper
+// paints the band from centerY - SeekBarBandHalf to centerY + SeekBarBandHalf
+// and SeekBarThumbRadius + 1 px beyond each end, so the caller reserves it.
+// It only draws: the owner hit-tests a band at least 40px tall.
+constexpr int16_t SeekBarThumbRadius = 7;
+constexpr int16_t SeekBarBandHalf = SeekBarThumbRadius + 1;
+void drawSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
+                 float fraction, bool thumb, uint16_t fillColor,
+                 uint16_t trackColor, uint16_t backgroundColor);
+// Repaints only the span between the previous and new positions, including
+// both thumbs, for flicker-free updates of a bar drawn by drawSeekBar with the
+// same geometry, thumb flag, and colours. It uses and then resets the TFT
+// viewport, so do not call it inside another viewport.
+void updateSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
+                   float previousFraction, float fraction, bool thumb,
+                   uint16_t fillColor, uint16_t trackColor,
+                   uint16_t backgroundColor);
 // Compact microphone status glyph for persistent status strips. The owner
 // supplies the complete hit target (if interactive) and the exact solid
 // background immediately behind the antialiased primitives.

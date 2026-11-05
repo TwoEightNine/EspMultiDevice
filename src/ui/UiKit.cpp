@@ -132,6 +132,20 @@ constexpr uint16_t BatteryGreen = 0x2c89;
 constexpr uint16_t BatteryYellow = 0xa54a;
 constexpr uint16_t BatteryRed = 0xa1e5;
 
+// TFT_eSPI has no antialiased filled triangle. Stroking the edges gives
+// smooth outer edges and rounded corners of radius stroke / 2; filling the
+// triangle afterwards overwrites the strokes' inner fringe, which was blended
+// against the background rather than the fill.
+void fillSmoothTriangle(TFT_eSPI &tft, float x0, float y0, float x1, float y1,
+                        float x2, float y2, float stroke, uint16_t color,
+                        uint16_t backgroundColor) {
+  tft.drawWideLine(x0, y0, x1, y1, stroke, color, backgroundColor);
+  tft.drawWideLine(x1, y1, x2, y2, stroke, color, backgroundColor);
+  tft.drawWideLine(x2, y2, x0, y0, stroke, color, backgroundColor);
+  tft.fillTriangle(lroundf(x0), lroundf(y0), lroundf(x1), lroundf(y1),
+                   lroundf(x2), lroundf(y2), color);
+}
+
 uint16_t blendRgba565(uint16_t foreground, uint16_t background, uint8_t alpha) {
   if (alpha == 0) return background;
   if (alpha == 255) return foreground;
@@ -323,7 +337,25 @@ void drawFullscreenIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
 }
 
 void drawPlaybackIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                      bool paused, uint16_t color, uint16_t backgroundColor) {
+                      bool paused, uint16_t color, uint16_t backgroundColor,
+                      float scale) {
+  if (scale > 1.0f) {
+    const float s = scale;
+    if (paused) {
+      tft.fillSmoothRoundRect(centerX - lroundf(6 * s), centerY - lroundf(7 * s),
+                              lroundf(4 * s), lroundf(14 * s), lroundf(2 * s),
+                              color, backgroundColor);
+      tft.fillSmoothRoundRect(centerX + lroundf(2 * s), centerY - lroundf(7 * s),
+                              lroundf(4 * s), lroundf(14 * s), lroundf(2 * s),
+                              color, backgroundColor);
+      return;
+    }
+    // The strokes give rounded antialiased corners; at this size they no
+    // longer meet in the middle, so the solid interior is filled after them.
+    fillSmoothTriangle(tft, centerX - 4 * s, centerY - 7 * s, centerX - 4 * s, centerY + 7 * s,
+                       centerX + 7 * s, centerY, 3.0f * s, color, backgroundColor);
+    return;
+  }
   if (paused) {
     tft.fillSmoothRoundRect(centerX - 6, centerY - 7, 4, 14, 2, color, backgroundColor);
     tft.fillSmoothRoundRect(centerX + 2, centerY - 7, 4, 14, 2, color, backgroundColor);
@@ -470,6 +502,140 @@ void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
   tft.fillSmoothCircle(centerX, centerY - 7, 2, color, backgroundColor);
   tft.fillSmoothCircle(centerX, centerY, 2, color, backgroundColor);
   tft.fillSmoothCircle(centerX, centerY + 7, 2, color, backgroundColor);
+}
+
+void drawSkipIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                  bool forward, uint16_t color, uint16_t backgroundColor) {
+  const float d = forward ? 1.0f : -1.0f;
+  fillSmoothTriangle(tft, centerX - 8 * d, centerY - 8, centerX - 8 * d, centerY + 8,
+                     centerX + 5 * d, centerY, 2.0f, color, backgroundColor);
+  tft.fillSmoothRoundRect(forward ? centerX + 6 : centerX - 9, centerY - 9, 3, 18, 1,
+                          color, backgroundColor);
+}
+
+void drawVolumeIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    bool muted, uint16_t color, uint16_t backgroundColor) {
+  // The cone is a trapezoid from the body's right edge to the mouth.
+  const int16_t ax = centerX - 6, bx = centerX + 1;
+  tft.drawWideLine(ax, centerY - 4, bx, centerY - 9, 2.0f, color, backgroundColor);
+  tft.drawWideLine(bx, centerY - 9, bx, centerY + 9, 2.0f, color, backgroundColor);
+  tft.drawWideLine(bx, centerY + 9, ax, centerY + 4, 2.0f, color, backgroundColor);
+  tft.fillTriangle(ax, centerY - 4, bx, centerY - 9, bx, centerY + 9, color);
+  tft.fillTriangle(ax, centerY - 4, bx, centerY + 9, ax, centerY + 4, color);
+  // Drawn last so its solid interior covers the cone strokes' rounded caps.
+  tft.fillSmoothRoundRect(centerX - 11, centerY - 4, 6, 8, 1, color, backgroundColor);
+  if (muted) {
+    tft.drawWideLine(centerX + 4, centerY - 4, centerX + 11, centerY + 4,
+                     2.0f, color, backgroundColor);
+    tft.drawWideLine(centerX + 11, centerY - 4, centerX + 4, centerY + 4,
+                     2.0f, color, backgroundColor);
+    return;
+  }
+  // Angles run clockwise from 6 o'clock, so 225–315 is the right-hand side.
+  tft.drawSmoothArc(centerX + 1, centerY, 6, 5, 225, 315, color, backgroundColor, true);
+  tft.drawSmoothArc(centerX + 1, centerY, 10, 9, 220, 320, color, backgroundColor, true);
+}
+
+void drawRepeatIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                    bool one, uint16_t color, uint16_t backgroundColor) {
+  // A 2px rounded loop with a right-pointing head on its top edge and a
+  // left-pointing head on its bottom edge.
+  tft.drawSmoothRoundRect(centerX - 10, centerY - 7, 5, 4, 20, 14, color, backgroundColor);
+  tft.drawWideLine(centerX - 1, centerY - 10, centerX + 2, centerY - 6.5f,
+                   2.0f, color, backgroundColor);
+  tft.drawWideLine(centerX + 2, centerY - 6.5f, centerX - 1, centerY - 3,
+                   2.0f, color, backgroundColor);
+  tft.drawWideLine(centerX, centerY + 2, centerX - 3, centerY + 5.5f,
+                   2.0f, color, backgroundColor);
+  tft.drawWideLine(centerX - 3, centerY + 5.5f, centerX, centerY + 9,
+                   2.0f, color, backgroundColor);
+  if (!one) return;
+  // Cut the loop's corner, then draw a solid badge with a knocked-out "1".
+  tft.fillSmoothCircle(centerX + 9, centerY - 7, 7, backgroundColor, backgroundColor);
+  tft.fillSmoothCircle(centerX + 9, centerY - 7, 5, color, backgroundColor);
+  tft.drawWideLine(centerX + 9, centerY - 9.5f, centerX + 9, centerY - 4.5f,
+                   1.6f, backgroundColor, color);
+  tft.drawWideLine(centerX + 9, centerY - 9.5f, centerX + 7.5f, centerY - 8.5f,
+                   1.4f, backgroundColor, color);
+}
+
+void drawMusicNoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
+                       int16_t size, uint16_t color, uint16_t backgroundColor) {
+  if (size < 12) return;
+  const float s = size;
+  const float headRadius = s * 0.16f;
+  const float headX = centerX - s * 0.12f;
+  const float headY = centerY + s * 0.32f;
+  const int16_t stemWidth = (int16_t)lroundf(s * 0.08f) < 2 ? 2 : (int16_t)lroundf(s * 0.08f);
+  const int16_t stemRight = (int16_t)lroundf(headX + headRadius);
+  const int16_t stemTop = (int16_t)lroundf(centerY - s * 0.5f);
+  const float flagX = stemRight - stemWidth / 2.0f;
+  // Flag first: the square stem and the round head then cover its caps.
+  tft.drawWideLine(flagX, stemTop + stemWidth / 2.0f, flagX + s * 0.24f, centerY - s * 0.24f,
+                   stemWidth, color, backgroundColor);
+  tft.drawWideLine(flagX + s * 0.24f, centerY - s * 0.24f, flagX + s * 0.17f, centerY - s * 0.02f,
+                   stemWidth, color, backgroundColor);
+  tft.fillRect(stemRight - stemWidth, stemTop, stemWidth, (int16_t)lroundf(headY) - stemTop, color);
+  tft.fillSmoothCircle((int32_t)lroundf(headX), (int32_t)lroundf(headY),
+                       (int32_t)lroundf(headRadius), color, backgroundColor);
+}
+
+void drawSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
+                 float fraction, bool thumb, uint16_t fillColor,
+                 uint16_t trackColor, uint16_t backgroundColor) {
+  if (width < 8) return;
+  if (!(fraction > 0.0f)) fraction = 0.0f;  // Also rejects NaN.
+  if (fraction > 1.0f) fraction = 1.0f;
+  constexpr int16_t r = SeekBarThumbRadius;
+  constexpr int16_t trackHeight = 4;
+  const int16_t top = centerY - trackHeight / 2;
+  tft.fillRect(x - SeekBarBandHalf, centerY - SeekBarBandHalf, width + 2 * SeekBarBandHalf + 1,
+               2 * SeekBarBandHalf + 1, backgroundColor);
+  tft.fillSmoothRoundRect(x, top, width, trackHeight, trackHeight / 2, trackColor,
+                          backgroundColor);
+  const int16_t filled = (int16_t)lroundf(fraction * width);
+  if (filled >= width) {
+    tft.fillSmoothRoundRect(x, top, width, trackHeight, trackHeight / 2, fillColor,
+                            backgroundColor);
+  } else if (filled > 0) {
+    // Round only the bar's own left end; a rounded right end would blend
+    // its corners against the background on top of the track.
+    tft.fillSmoothRoundRect(x, top, trackHeight, trackHeight, trackHeight / 2, fillColor,
+                            backgroundColor);
+    if (filled > trackHeight / 2) {
+      tft.fillRect(x + trackHeight / 2, top, filled - trackHeight / 2, trackHeight, fillColor);
+    }
+  }
+  if (thumb) tft.fillSmoothCircle(x + filled, centerY, r, TFT_WHITE, backgroundColor);
+}
+
+void updateSeekBar(TFT_eSPI &tft, int16_t x, int16_t centerY, int16_t width,
+                   float previousFraction, float fraction, bool thumb,
+                   uint16_t fillColor, uint16_t trackColor,
+                   uint16_t backgroundColor) {
+  if (width < 8) return;
+  auto pixel = [x, width](float value) -> int16_t {
+    if (!(value > 0.0f)) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+    return x + (int16_t)lroundf(value * width);
+  };
+  int16_t from = pixel(previousFraction);
+  int16_t to = pixel(fraction);
+  if (from == to) return;
+  if (from > to) {
+    const int16_t swap = from;
+    from = to;
+    to = swap;
+  }
+  // The thumb and the track's end caps reach SeekBarThumbRadius + 1 px out.
+  constexpr int16_t margin = SeekBarThumbRadius + 2;
+  const int16_t left = from - margin < x - SeekBarBandHalf ? x - SeekBarBandHalf : from - margin;
+  const int16_t right = to + margin > x + width + SeekBarBandHalf ? x + width + SeekBarBandHalf
+                                                                  : to + margin;
+  tft.setViewport(left, centerY - SeekBarBandHalf, right - left + 1, 2 * SeekBarBandHalf + 1,
+                  false);
+  drawSeekBar(tft, x, centerY, width, fraction, thumb, fillColor, trackColor, backgroundColor);
+  tft.resetViewport();
 }
 
 void drawPopupMenuFrame(TFT_eSPI &tft, int16_t x, int16_t y,

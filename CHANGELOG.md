@@ -28,6 +28,10 @@ version follows the rules in
 
 ### Changed
 
+- The Audio Player has a "Now playing" layout: an artwork tile, title, artist,
+  and album line, a seek bar with elapsed and remaining time (draggable for
+  WAV), repeat and restart controls, a volume slider in place of the 0–10
+  grid, and a Track info sheet.
 - The Browser now validates HTTPS certificates against the Mozilla root bundle
   and waits for the clock to sync before loading HTTPS pages.
 - The PIN-protected file area is called *hidden files* in the UI, because it

@@ -1,10 +1,12 @@
 # Plan: Audio Player track metadata and redesign
 
-Status: phase 1 implemented; phases 2–5 not started. The contract of record for tag parsing is the Audio section of [media.md](../media.md). `tests/audio_tags` passes on the host; nothing has been run on a device yet. Differences from the proposal below:
+Status: phases 1 and 2 implemented; phases 3–5 not started. The contracts of record are the Audio section of [media.md](../media.md) and the Audio Player exception in [ui-kit.md](../ui-kit.md). `tests/audio_tags` passes on the host and the firmware builds; nothing has been run on a device yet. Differences from the proposal below:
 
 - `AudioTags::Info` has no `coverKind`. Signatures belong to `FileFormats`, which needs Arduino, so phase 3 classifies the picture bytes there before decoding.
-- Until phase 2 lands, the existing layout shows the title (Title face) and one Compact "artist · album · year" line between the app bar and the play button. Untagged files already show the file name without its extension.
-- Playback now starts from `tick()` after the tags are read, for WAV too, rather than straight from `onEnter()`.
+- Playback starts from `tick()` after the tags are read, for WAV too, rather than straight from `onEnter()`. Since phase 2 the file itself is also opened from the first `tick()`, after the screen is drawn.
+- Phase 2 pulled two small pieces forward. WAV seeking (phase 4's WAV half) works, so the seek-bar drag path is exercised; MP3 shows its fill without a thumb until phase 4. ⏮ restarts the track, and Repeat All/One both restart it at the end without stopping the speaker; phase 5 gives them the folder queue. ⏭ is drawn inactive.
+- The mute glyph is an × beside the speaker rather than a slash.
+- Track info is a `drawPopupMenuFrame` sheet (y 96–371); any tap closes it and redraws the screen.
 
 Goal: the Audio Player shows the track's cover, title, artist, album, and year when the file carries them, and falls back to the file name when it does not. The screen moves to a conventional "now playing" layout: big artwork, a seek bar you can tap or drag, previous/next with auto-advance through the folder, and a volume slider in place of the full-screen 0–10 grid.
 
