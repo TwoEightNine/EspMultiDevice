@@ -1,6 +1,6 @@
 # Plan: Audio Player track metadata and redesign
 
-Status: phases 1–3 implemented; phases 4 and 5 not started. The contracts of record are the Audio section of [media.md](../media.md) and the Audio Player exception in [ui-kit.md](../ui-kit.md). `tests/audio_tags` passes on the host and the firmware builds; nothing has been run on a device yet. Differences from the proposal below:
+Status: phases 1–4 implemented; phase 5 not started. The contracts of record are the Audio section of [media.md](../media.md) and the Audio Player exception in [ui-kit.md](../ui-kit.md). `tests/audio_tags` passes on the host and the firmware builds; nothing has been run on a device yet. Differences from the proposal below:
 
 - `AudioTags::Info` has no `coverKind`. Signatures belong to `FileFormats`, which needs Arduino, so phase 3 classifies the picture bytes there before decoding.
 - Playback starts from `tick()` after the tags are read, for WAV too, rather than straight from `onEnter()`. Since phase 2 the file itself is also opened from the first `tick()`, after the screen is drawn.
@@ -11,6 +11,9 @@ Status: phases 1–3 implemented; phases 4 and 5 not started. The contracts of r
 - The worker composes the whole tile, including the `#222` margins and antialiased rounded corners, so the UI pushes one 208×208 image with `pushImage`. DMA was not needed: the display is on its own parallel bus and the push happens once per track.
 - Pictures smaller than 208×208 are centred at their own size rather than enlarged, because `BitmapScale` never upscales.
 - The worker task starts with the first cover request and is deleted in `releaseResources()`. The underrun check with a large cover at 320 kbps is still a device test.
+- Phase 4's table is the Arduino-free `Mp3SeekTable` (`src/media/`), host-tested in `tests/mp3_seek_table`. The `.empa` v2 header is 44 bytes: besides `tocInterval` and `tocCount` it stores the samples per MP3 frame (bytes 34–35, formerly padding), so a cache hit can map positions to frames and validate the entry count.
+- The lookup restarts at the last entry strictly before the target frame, so there is always one frame to discard for the bit reservoir. The discard frames run inside `stream()`, which reports Busy until the target frame plays. While paused, they wait for the next play.
+- A track without seek-table memory (PSRAM exhausted) still plays and restarts, and its `.empa` is not written, so it is scanned again on the next open.
 
 Goal: the Audio Player shows the track's cover, title, artist, album, and year when the file carries them, and falls back to the file name when it does not. The screen moves to a conventional "now playing" layout: big artwork, a seek bar you can tap or drag, previous/next with auto-advance through the folder, and a volume slider in place of the full-screen 0–10 grid.
 

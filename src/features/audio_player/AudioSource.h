@@ -6,6 +6,7 @@
 
 #include "../../media/AudioTags.h"
 #include "../../media/MediaCache.h"
+#include "../../media/Mp3SeekTable.h"
 #include "../../services/storage/SecretStorage.h"
 
 class SpeakerController;
@@ -66,9 +67,14 @@ public:
   // Average for MP3 (compressed bytes over duration), nominal for WAV; 0 if unknown.
   uint32_t bitrateKbps() const;
 
-  // True when seek() accepts any frame. MP3 can only rewind to the start
-  // until it has a seek table.
+  // True when seek() accepts any frame: always for WAV, and for MP3 once the
+  // scan (or a valid `.empa` v2 cache) has produced a seek table. Without
+  // one an MP3 can only rewind to the start.
   bool canSeek() const;
+  // Sets the position at once; the file work happens in the next stream()
+  // calls. An MP3 restarts at the seek-table entry before the target and
+  // decodes and discards whole frames up to it, a few per call (reported as
+  // Busy).
   bool seek(uint32_t frame);
 
   // Decodes and writes up to one output chunk. Ended means there was nothing
@@ -80,7 +86,9 @@ private:
   static const uint16_t Mp3InputBufferBytes = 4096;
   static const uint16_t Mp3MaxPcmFrames = MINIMP3_MAX_SAMPLES_PER_FRAME;
   static const uint8_t Mp3AnalysisFramesPerStep = 16;
-  static const uint16_t Mp3CacheHeaderBytes = 36;
+  static const uint16_t Mp3CacheHeaderBytes = 44;
+  static const uint8_t Mp3CacheVersion = 2;
+  static const uint8_t Mp3DiscardFramesPerStep = 8;
   static const uint16_t OutputFrames = 256;
   static const uint8_t TagFramesPerStep = 8;
   // Per-tick work waits this long for the bus before skipping the tick.
@@ -136,6 +144,16 @@ private:
   mp3d_sample_t _mp3PcmBuffer[Mp3MaxPcmFrames];
   uint16_t _mp3PcmFrames;
   uint16_t _mp3PcmPosition;
+  // Seek table, in a PSRAM buffer allocated per MP3 open.
+  uint32_t *_tocStorage;
+  Mp3SeekTable _toc;
+  bool _tocReady;
+  uint16_t _mp3FrameSamples;
+  uint32_t _mp3ScanFrames;
+  // Pending work of a seek: whole frames to decode and discard, then samples
+  // to drop from the first frame that is played.
+  uint32_t _mp3SkipFrames;
+  uint16_t _mp3SkipSamples;
 
   bool lockBus(uint32_t waitMs);
   void unlockBus();
@@ -157,7 +175,11 @@ private:
                            uint16_t &frameSamples,
                            uint32_t &sampleRate,
                            uint16_t &channels);
-  bool resetMp3Decoder();
+  bool allocateSeekTable();
+  void releaseSeekTable();
+  bool resetMp3Decoder(uint32_t offset);
+  bool prepareMp3Position();
+  StreamResult discardMp3Frames();
   bool refillMp3Input();
   bool decodeMp3Frame();
   bool prepareStream();

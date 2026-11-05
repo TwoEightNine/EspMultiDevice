@@ -115,7 +115,7 @@ The recorder writes 16 kHz mono PCM WAV from the INMP441. The Audio Player strea
 
 The player is a "Now playing" screen: an artwork tile, the title, artist, and "album · year", a seek bar with elapsed and remaining time, and repeat, previous, play/pause, next, and volume controls (layout in [ui-kit.md](ui-kit.md)). Untagged files show the file name without its extension as the title and "Unknown artist".
 
-- **Seeking:** dragging the seek bar previews the position and seeks on release. Only WAV can seek for now; an MP3 shows its progress without a thumb until it has a seek table.
+- **Seeking:** dragging the seek bar previews the position and seeks on release, for WAV and MP3. A WAV seeks straight to the frame. An MP3 restarts its decoder at the seek-table entry before the target, then decodes and discards whole frames up to it, at most eight per `tick()`. The first of those only refills the bit reservoir, and samples before the target inside its frame are dropped. While the track is still loading, the bar shows the loading indicator instead. An MP3 whose seek table could not be allocated shows its progress without a thumb and can only restart.
 - **Previous** restarts the track. **Next** stays inactive until the player builds a folder queue.
 - **Repeat** cycles off, all, and one, for the current visit only. With no queue yet, all and one both restart the track at its end without stopping the speaker.
 - **Volume:** the speaker icon opens a slider panel. The level changes live while dragging and `AudioSettings` saves it once on release.
@@ -143,7 +143,24 @@ The tags are read before playback starts, by the Arduino-free `AudioTags` parser
 - **Fallback:** a progressive JPEG, an interlaced PNG, a GIF/WebP/BMP picture, a read failure, or a PSRAM shortage leaves the music-note placeholder. The serial log names the reason on an `[Audio cover]` line, and a success logs its time.
 - **Lifetime:** nothing is cached on SD; the cover is decoded again on each open. A new track, SD removal, or leaving the screen cancels a running job, which stops at its next chunk. After an SD remount the shown cover stays.
 
-MP3 playback uses a sidecar cache at `<source-directory>/.cache/<file>.empa`. It stores validated compressed-audio bounds, format, and decoded sample count so later playback can skip a full MP3 scan while still decoding the original stream. It is valid only when source size and last-modified time match.
+MP3 playback uses a sidecar cache at `<source-directory>/.cache/<file>.empa`, written atomically through `MediaCache` after the first full frame scan. It lets later opens skip that scan while still decoding the original stream. Version 2 is little-endian:
+
+| Bytes | Field |
+| --- | --- |
+| 0–3 | `EMPA` |
+| 4, 5 | version 2, then 0 |
+| 6–7 | header size, 44 |
+| 8–15 | source size and last-modified time; the cache is valid only when both match |
+| 16–23 | first audio-frame offset and audio end (an ID3v2 tag before, an ID3v1 tag after) |
+| 24–27 | decoded sample count |
+| 28–31, 32–33 | sample rate, channels (1 or 2) |
+| 34–35 | samples per MP3 frame (1152 or 576) |
+| 36–39, 40–43 | seek-table interval and entry count |
+| 44– | entry count × u32 frame offsets |
+
+- **Seek table:** the scan records the byte offset of every Nth frame (`Mp3SeekTable`, `src/media/`). N starts at 64, about 1.7 s at 44.1 kHz, and doubles whenever the table would pass 4,096 entries, so the table never exceeds 16 KiB. It lives in PSRAM while the track is open.
+- **Validation:** the interval is a power of two from 64 to 2^20, there is exactly one entry per interval, the first entry equals the audio start, and the rest increase strictly and stay below the audio end. The first frame header must also match the stored rate, channels, and samples per frame. A failure, or a version-1 file, is treated as a miss: the player scans again and rewrites the cache.
+- **Host test:** `tests/mp3_seek_table/run.sh`.
 
 ## Video
 

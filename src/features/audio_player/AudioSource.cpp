@@ -9,6 +9,7 @@
 #include "../../services/audio/SpeakerController.h"
 
 #include <SD.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 
 namespace {
@@ -102,7 +103,13 @@ AudioSource::AudioSource(SecretStorage &secretStorage, MediaCache &mediaCache)
     _mp3InputOffset(0),
     _mp3InputBytes(0),
     _mp3PcmFrames(0),
-    _mp3PcmPosition(0) {
+    _mp3PcmPosition(0),
+    _tocStorage(nullptr),
+    _tocReady(false),
+    _mp3FrameSamples(0),
+    _mp3ScanFrames(0),
+    _mp3SkipFrames(0),
+    _mp3SkipSamples(0) {
   mp3dec_init(&_mp3Decoder);
 }
 
@@ -161,7 +168,34 @@ void AudioSource::reset() {
   _mp3InputBytes = 0;
   _mp3PcmFrames = 0;
   _mp3PcmPosition = 0;
+  _mp3FrameSamples = 0;
+  _mp3ScanFrames = 0;
+  _mp3SkipFrames = 0;
+  _mp3SkipSamples = 0;
+  releaseSeekTable();
   mp3dec_init(&_mp3Decoder);
+}
+
+bool AudioSource::allocateSeekTable() {
+  if (!_tocStorage) {
+    _tocStorage = static_cast<uint32_t *>(heap_caps_malloc(
+      sizeof(uint32_t) * Mp3SeekTable::MaxEntries, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  if (!_tocStorage) {
+    // Playback still works; the MP3 just cannot seek.
+    Serial.println(F("MP3 seek table: no PSRAM"));
+    _toc.detach();
+    return false;
+  }
+  _toc.attach(_tocStorage, Mp3SeekTable::MaxEntries);
+  return true;
+}
+
+void AudioSource::releaseSeekTable() {
+  _toc.detach();
+  _tocReady = false;
+  heap_caps_free(_tocStorage);
+  _tocStorage = nullptr;
 }
 
 bool AudioSource::open(const String &path, bool secretAccess) {
@@ -230,16 +264,19 @@ uint32_t AudioSource::bitrateKbps() const {
 }
 
 bool AudioSource::canSeek() const {
-  return _file && !loading() && _format == Format::Wav && _frameCount > 0;
+  return _file && !loading() && _frameCount > 0 &&
+         (_format == Format::Wav || (_format == Format::Mp3 && _tocReady));
 }
 
 bool AudioSource::seek(uint32_t frame) {
   if (!_file || loading()) return false;
   if (frame > _frameCount) frame = _frameCount;
-  if (_format == Format::Mp3 && frame != 0) return false;
+  if (_format == Format::Mp3 && frame != 0 && !_tocReady) return false;
   _framePosition = frame;
   _mp3PcmFrames = 0;
   _mp3PcmPosition = 0;
+  _mp3SkipFrames = 0;
+  _mp3SkipSamples = 0;
   _streamReady = false;
   return true;
 }
@@ -251,6 +288,11 @@ AudioSource::StreamResult AudioSource::stream(SpeakerController &speaker) {
   if (!_streamReady && !prepareStream()) {
     unlockBus();
     return StreamResult::Failed;
+  }
+  if (_format == Format::Mp3 && _mp3SkipFrames > 0) {
+    const StreamResult skipped = discardMp3Frames();
+    unlockBus();
+    return skipped;
   }
   // Both release the bus once their reads are done, before the speaker write.
   const StreamResult result = _format == Format::Wav ? streamWav(speaker) : streamMp3(speaker);
@@ -391,6 +433,7 @@ bool AudioSource::beginMp3Analysis() {
   uint32_t fileSize = _sourceFileSize;
   if (fileSize < 4) return fail(F("Invalid MP3 file"));
 
+  allocateSeekTable();
   if (loadMp3Cache()) return true;
 
   if (!lockBus(BusOpenWaitMs)) return fail(F("SD card busy"));
@@ -404,6 +447,10 @@ bool AudioSource::beginMp3Analysis() {
   _channels = 0;
   _bitsPerSample = 16;
   _mp3AnalysisPosition = _mp3DataOffset;
+  _mp3FrameSamples = 0;
+  _mp3ScanFrames = 0;
+  _tocReady = false;
+  if (_toc.attached()) _toc.clear();
   _mp3Analyzing = true;
   return true;
 }
@@ -435,6 +482,8 @@ bool AudioSource::readMp3Bounds() {
   return true;
 }
 
+// `.empa` v2: a 44-byte little-endian header bound to the source's size and
+// modification time, then `tocCount` u32 seek-table offsets. See docs/media.md.
 bool AudioSource::loadMp3Cache() {
   CachePaths paths;
   if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return false;
@@ -443,37 +492,62 @@ bool AudioSource::loadMp3Cache() {
   uint32_t cacheSize = 0;
   uint8_t header[Mp3CacheHeaderBytes];
   bool readOk = _mediaCache.fileSize(cache, cacheSize) == MediaCache::Result::Complete &&
-    cacheSize == Mp3CacheHeaderBytes &&
+    cacheSize >= Mp3CacheHeaderBytes &&
+    cacheSize <= Mp3CacheHeaderBytes + sizeof(uint32_t) * Mp3SeekTable::MaxEntries &&
     _mediaCache.read(cache, header, sizeof(header)) == MediaCache::Result::Complete;
-  _mediaCache.close(cache);
-  if (!readOk || header[0] != 'E' || header[1] != 'M' || header[2] != 'P' || header[3] != 'A' ||
-      header[4] != 1 || header[5] != 0 || readLe16(header + 6) != Mp3CacheHeaderBytes ||
-      !MediaCache::matches({readLe32(header + 8), readLe32(header + 12)},
-                           {_sourceFileSize, _sourceWriteTime})) {
-    return false;
+  const uint32_t tocInterval = readOk ? readLe32(header + 36) : 0;
+  const uint32_t tocCount = readOk ? readLe32(header + 40) : 0;
+  // Version 1 had no seek table; it is rejected and rebuilt by a rescan.
+  readOk = readOk && header[0] == 'E' && header[1] == 'M' && header[2] == 'P' && header[3] == 'A' &&
+    header[4] == Mp3CacheVersion && header[5] == 0 && readLe16(header + 6) == Mp3CacheHeaderBytes &&
+    MediaCache::matches({readLe32(header + 8), readLe32(header + 12)},
+                        {_sourceFileSize, _sourceWriteTime}) &&
+    tocCount <= Mp3SeekTable::MaxEntries &&
+    cacheSize == Mp3CacheHeaderBytes + sizeof(uint32_t) * tocCount;
+  // Without seek-table memory the cache still saves the scan; the entries are skipped.
+  const bool readToc = readOk && _toc.attached() && tocCount > 0;
+  if (readToc) {
+    readOk = _mediaCache.read(cache, _tocStorage, sizeof(uint32_t) * tocCount) ==
+             MediaCache::Result::Complete;
+    for (uint32_t i = 0; readOk && i < tocCount; i++) {
+      _tocStorage[i] = readLe32(reinterpret_cast<const uint8_t *>(_tocStorage + i));
+    }
   }
+  _mediaCache.close(cache);
+  if (!readOk) return false;
 
   uint32_t dataOffset = readLe32(header + 16);
   uint32_t audioEnd = readLe32(header + 20);
   uint32_t frameCount = readLe32(header + 24);
   uint32_t sampleRate = readLe32(header + 28);
   uint16_t channels = readLe16(header + 32);
+  uint16_t frameSamples = readLe16(header + 34);
   if (dataOffset >= audioEnd || audioEnd > _sourceFileSize || frameCount == 0 ||
-      sampleRate == 0 || (channels != 1 && channels != 2)) {
+      sampleRate == 0 || (channels != 1 && channels != 2) ||
+      (frameSamples != 576 && frameSamples != 1152) || frameCount % frameSamples != 0) {
     return false;
   }
 
-  _mp3DataOffset = dataOffset;
-  _mp3AudioEnd = audioEnd;
   uint32_t firstFrameBytes = 0;
   uint16_t firstFrameSamples = 0;
   uint32_t firstSampleRate = 0;
   uint16_t firstChannels = 0;
+  _mp3DataOffset = dataOffset;
+  _mp3AudioEnd = audioEnd;
   if (!lockBus(BusOpenWaitMs)) return false;
   const bool parsed =
     parseMp3FrameHeader(dataOffset, firstFrameBytes, firstFrameSamples, firstSampleRate, firstChannels);
   unlockBus();
-  if (!parsed || firstSampleRate != sampleRate || firstChannels != channels || firstFrameSamples > frameCount) {
+  if (!parsed || firstSampleRate != sampleRate || firstChannels != channels ||
+      firstFrameSamples != frameSamples) {
+    return false;
+  }
+  _tocReady = false;
+  if (readToc &&
+      !(_tocReady = _toc.adopt(tocInterval, (uint16_t)tocCount, dataOffset, audioEnd,
+                               frameCount / frameSamples))) {
+    Serial.print(F("MP3 cache seek table invalid: "));
+    Serial.println(paths.finalPath);
     return false;
   }
 
@@ -482,6 +556,7 @@ bool AudioSource::loadMp3Cache() {
   _sampleRate = sampleRate;
   _channels = channels;
   _bitsPerSample = 16;
+  _mp3FrameSamples = frameSamples;
   _mp3Analyzing = false;
   Serial.print(F("MP3 cache hit: "));
   Serial.println(paths.finalPath);
@@ -490,6 +565,11 @@ bool AudioSource::loadMp3Cache() {
 
 void AudioSource::writeMp3Cache() {
   if (!_file || _frameCount == 0 || _sampleRate == 0 || (_channels != 1 && _channels != 2)) return;
+  if (!_tocReady) {
+    // A cache without entries would fail validation; scan again next time.
+    Serial.println(F("MP3 cache skipped: no seek table"));
+    return;
+  }
 
   CachePaths paths;
   if (!CachePath::forSource(_path, FileFormats::Format::Empa, paths)) return;
@@ -501,7 +581,7 @@ void AudioSource::writeMp3Cache() {
   }
   uint8_t header[Mp3CacheHeaderBytes] = {};
   header[0] = 'E'; header[1] = 'M'; header[2] = 'P'; header[3] = 'A';
-  header[4] = 1;
+  header[4] = Mp3CacheVersion;
   writeLe16(header + 6, Mp3CacheHeaderBytes);
   writeLe32(header + 8, _sourceFileSize);
   writeLe32(header + 12, _sourceWriteTime);
@@ -510,15 +590,26 @@ void AudioSource::writeMp3Cache() {
   writeLe32(header + 24, _frameCount);
   writeLe32(header + 28, _sampleRate);
   writeLe16(header + 32, _channels);
+  writeLe16(header + 34, _mp3FrameSamples);
+  writeLe32(header + 36, _toc.interval());
+  writeLe32(header + 40, _toc.count());
   bool written = _mediaCache.write(writer, header, sizeof(header)) == MediaCache::Result::Complete;
+  uint8_t chunk[256];
+  for (uint16_t i = 0; written && i < _toc.count();) {
+    uint16_t entries = 0;
+    for (; entries < sizeof(chunk) / 4 && i < _toc.count(); entries++, i++) {
+      writeLe32(chunk + entries * 4, _toc.offsets()[i]);
+    }
+    written = _mediaCache.write(writer, chunk, entries * 4) == MediaCache::Result::Complete;
+  }
   if (!written || _mediaCache.commit(writer) != MediaCache::Result::Complete) {
     _mediaCache.abort(writer);
     Serial.print(F("MP3 cache write failed: "));
     Serial.println(paths.finalPath);
     return;
   }
-  Serial.print(F("MP3 cache ready: "));
-  Serial.println(paths.finalPath);
+  Serial.printf("MP3 cache ready (%u seek entries every %lu frames): %s\n", _toc.count(),
+                (unsigned long)_toc.interval(), paths.finalPath.c_str());
 }
 
 void AudioSource::analyzeMp3Step() {
@@ -530,6 +621,7 @@ void AudioSource::analyzeMp3Step() {
       if (_frameCount == 0) {
         fail(F("MP3 has no audio frames"));
       } else {
+        _tocReady = _toc.attached() && _toc.complete() && _toc.count() > 0;
         _mp3CachePending = true;
       }
       return;
@@ -543,6 +635,8 @@ void AudioSource::analyzeMp3Step() {
       fail(F("Invalid MP3 frame"));
       return;
     }
+    if (_mp3FrameSamples == 0) _mp3FrameSamples = frameSamples;
+    _toc.addFrame(_mp3ScanFrames++, _mp3AnalysisPosition);
     if (_sampleRate == 0) {
       _sampleRate = sampleRate;
       _channels = channels;
@@ -599,8 +693,8 @@ bool AudioSource::parseMp3FrameHeader(uint32_t position,
   return true;
 }
 
-bool AudioSource::resetMp3Decoder() {
-  if (!_file || !seekTo(_mp3DataOffset)) return false;
+bool AudioSource::resetMp3Decoder(uint32_t offset) {
+  if (!_file || !seekTo(offset)) return false;
   _mp3InputOffset = 0;
   _mp3InputBytes = 0;
   _mp3PcmFrames = 0;
@@ -668,9 +762,7 @@ bool AudioSource::prepareStream() {
       return fail(F("Could not seek WAV data"));
     }
   } else if (_format == Format::Mp3) {
-    // Without a seek table the decoder can only restart from the first frame.
-    if (_framePosition != 0) return fail(F("MP3 position lost"));
-    if (!resetMp3Decoder()) return fail(F("MP3 decoder setup failed"));
+    if (!prepareMp3Position()) return false;
   } else {
     return fail(F("Unsupported audio file"));
   }
@@ -710,15 +802,56 @@ AudioSource::StreamResult AudioSource::streamWav(SpeakerController &speaker) {
   return StreamResult::Streaming;
 }
 
+bool AudioSource::prepareMp3Position() {
+  _mp3SkipFrames = 0;
+  _mp3SkipSamples = 0;
+  uint32_t restart = _mp3DataOffset;
+  if (_framePosition > 0) {
+    // Without a seek table the decoder can only restart from the first frame.
+    uint32_t entryFrame = 0;
+    if (!_tocReady || _mp3FrameSamples == 0) return fail(F("MP3 position lost"));
+    const uint32_t target = _framePosition / _mp3FrameSamples;
+    if (!_toc.lookup(target, entryFrame, restart)) return fail(F("MP3 position lost"));
+    // The frames from the entry up to the target are decoded and dropped;
+    // the first of them only refills the bit reservoir.
+    _mp3SkipFrames = target - entryFrame;
+    _mp3SkipSamples = (uint16_t)(_framePosition % _mp3FrameSamples);
+  }
+  if (!resetMp3Decoder(restart)) return fail(F("MP3 decoder setup failed"));
+  return true;
+}
+
+AudioSource::StreamResult AudioSource::discardMp3Frames() {
+  for (uint8_t i = 0; i < Mp3DiscardFramesPerStep && _mp3SkipFrames > 0; i++) {
+    if (!lockBus(BusWaitMs)) return StreamResult::Busy;
+    if (!decodeMp3Frame()) {
+      if (!failed()) fail(F("MP3 ended early"));
+      return StreamResult::Failed;
+    }
+    _mp3PcmPosition = _mp3PcmFrames;
+    _mp3SkipFrames--;
+  }
+  // Nothing reached the speaker yet; the next call plays the target frame.
+  return StreamResult::Busy;
+}
+
 AudioSource::StreamResult AudioSource::streamMp3(SpeakerController &speaker) {
-  if (_mp3PcmPosition >= _mp3PcmFrames && !decodeMp3Frame()) {
-    if (failed()) return StreamResult::Failed;
-    // The stream ran out before the frame count the scan recorded.
-    fail(F("MP3 ended early"));
-    return StreamResult::Failed;
+  if (_mp3PcmPosition >= _mp3PcmFrames) {
+    if (!decodeMp3Frame()) {
+      if (failed()) return StreamResult::Failed;
+      // The stream ran out before the frame count the scan recorded.
+      fail(F("MP3 ended early"));
+      return StreamResult::Failed;
+    }
+    if (_mp3SkipSamples > 0) {
+      // A seek landed inside this frame.
+      _mp3PcmPosition = _mp3SkipSamples < _mp3PcmFrames ? _mp3SkipSamples : _mp3PcmFrames;
+      _mp3SkipSamples = 0;
+    }
   }
 
   unlockBus();
+  if (_mp3PcmPosition >= _mp3PcmFrames) return StreamResult::Streaming;
   uint16_t remaining = _mp3PcmFrames - _mp3PcmPosition;
   uint16_t frames = remaining > OutputFrames ? OutputFrames : remaining;
   if (frames > _frameCount - _framePosition) frames = (uint16_t)(_frameCount - _framePosition);

@@ -189,6 +189,8 @@ void AudioPlayerScreen::onExit() {
 
 bool AudioPlayerScreen::releaseResources() {
   dropCover();
+  // Frees the MP3 seek table as well as the file.
+  _source.reset();
   // False until the worker has unwound its job; Navigator retries.
   return _cover.end();
 }
