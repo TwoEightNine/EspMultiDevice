@@ -177,10 +177,6 @@ void drawFavoriteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                       uint16_t color, uint16_t backgroundColor);
 void drawMoreIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                   uint16_t color, uint16_t backgroundColor);
-void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                  uint16_t color, uint16_t backgroundColor);
-void drawMacRemoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                       uint16_t color, uint16_t backgroundColor);
 void drawRemoteActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                           RemoteActionIcon icon, uint16_t color,
                           uint16_t backgroundColor);

@@ -5,34 +5,6 @@
 
 namespace UiKit {
 
-void drawAppsIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                  uint16_t color, uint16_t backgroundColor) {
-  for (int16_t row = 0; row < 2; ++row) {
-    for (int16_t column = 0; column < 2; ++column) {
-      tft.fillSmoothRoundRect(centerX - 21 + column * 24,
-                              centerY - 21 + row * 24, 18, 18, 4,
-                              color, backgroundColor);
-    }
-  }
-}
-
-void drawMacRemoteIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
-                       uint16_t color, uint16_t backgroundColor) {
-  tft.fillSmoothRoundRect(centerX - 23, centerY - 17, 46, 31, 5,
-                          color, backgroundColor);
-  tft.fillSmoothRoundRect(centerX - 19, centerY - 13, 38, 23, 3,
-                          backgroundColor, color);
-  tft.drawWideLine(centerX, centerY + 14, centerX, centerY + 21,
-                   3.0f, color, backgroundColor);
-  tft.drawWideLine(centerX - 10, centerY + 21, centerX + 10, centerY + 21,
-                   3.0f, color, backgroundColor);
-  // Three small key cells distinguish this from the shared browser/home icon.
-  for (int16_t column = -1; column <= 1; ++column) {
-    tft.fillSmoothRoundRect(centerX + column * 10 - 3, centerY - 4,
-                            6, 6, 2, color, backgroundColor);
-  }
-}
-
 void drawRemoteActionIcon(TFT_eSPI &tft, int16_t centerX, int16_t centerY,
                           RemoteActionIcon icon, uint16_t color,
                           uint16_t backgroundColor) {

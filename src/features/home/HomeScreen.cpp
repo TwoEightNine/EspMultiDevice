@@ -394,28 +394,24 @@ void HomeScreen::drawPageIndicatorTo(TFT_eSPI &target, int16_t yOffset) {
 template <typename Canvas>
 void HomeScreen::drawAppIconTo(Canvas &canvas, const AppTile &app,
                                int16_t centerX, int16_t centerY) {
-  if (app.action == AppAction::External) {
-    if (app.iconColors && app.iconAlpha) {
-      UiKit::drawRgba565IconFromMemory(
-          canvas, centerX - AppCatalogLoader::IconWidth / 2,
-          centerY - AppCatalogLoader::IconHeight / 2,
-          AppCatalogLoader::IconWidth, AppCatalogLoader::IconHeight,
-          app.iconColors, app.iconAlpha, app.circleColor);
-    } else {
-      UiKit::drawAppsIcon(canvas, centerX, centerY, TFT_WHITE, app.circleColor);
-    }
-    return;
-  }
-  if (app.action == AppAction::MacRemote) {
-    UiKit::drawMacRemoteIcon(canvas, centerX, centerY, TFT_WHITE,
-                             app.circleColor);
+  if (app.action == AppAction::External && app.iconColors && app.iconAlpha) {
+    UiKit::drawRgba565IconFromMemory(
+        canvas, centerX - AppCatalogLoader::IconWidth / 2,
+        centerY - AppCatalogLoader::IconHeight / 2,
+        AppCatalogLoader::IconWidth, AppCatalogLoader::IconHeight,
+        app.iconColors, app.iconAlpha, app.circleColor);
     return;
   }
   const uint16_t *colors = nullptr;
   const uint8_t *alpha = nullptr;
   uint16_t width = 0;
   uint16_t height = 0;
-  if (app.action == AppAction::AiAssistant) {
+  if (app.action == AppAction::External) {
+    // Generic artwork for a package without its own icon.
+    colors = ic_app_colors; alpha = ic_app_alpha; width = ic_app_width; height = ic_app_height;
+  } else if (app.action == AppAction::MacRemote) {
+    colors = ic_remote_colors; alpha = ic_remote_alpha; width = ic_remote_width; height = ic_remote_height;
+  } else if (app.action == AppAction::AiAssistant) {
     colors = ic_ai_colors; alpha = ic_ai_alpha; width = ic_ai_width; height = ic_ai_height;
   } else if (app.action == AppAction::Recorder) {
     colors = ic_recorder_colors; alpha = ic_recorder_alpha; width = ic_recorder_width; height = ic_recorder_height;

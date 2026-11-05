@@ -54,9 +54,9 @@ Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws
 
 For a cross-screen shape, add one documented `UiKit` function and use it everywhere. Prefer a generated alpha-mask asset for an icon; build other shapes with TFT_eSPI smooth primitives such as `drawWideLine`, `fillSmoothCircle`, `drawSmoothCircle`, `fillSmoothRoundRect`, or `drawSmoothRoundRect`. Do not use pixelized `drawLine`, `fillCircle`, or `drawRoundRect` for UI icons and rounded controls.
 
-Lua app tiles use `drawRgba565IconFromMemory()` to alpha-blend worker-decoded 64×64 RGB565 artwork from PSRAM over the manifest-selected solid circle. `UiKit::drawAppsIcon()` is the smooth generic fallback when package artwork is unavailable.
+Lua app tiles use `drawRgba565IconFromMemory()` to alpha-blend worker-decoded 64×64 RGB565 artwork from PSRAM over the manifest-selected solid circle. When package artwork is unavailable, Home draws the generated 64×64 full-colour `ic_app` icon with `drawRgba565Icon()` instead.
 
-Home's Mac Remote tile uses `UiKit::drawMacRemoteIcon()`. The remote screen uses the shared `RemoteActionIcon` glyph set for its nine antialiased grid controls; each owner supplies the complete rounded cell, immediate fill background, enabled colour, and whole-cell hit target.
+Home's Mac Remote tile uses the generated 64×64 full-colour `ic_remote` icon, drawn like the other built-in tiles. The remote screen uses the shared `RemoteActionIcon` glyph set for its nine antialiased grid controls; each owner supplies the complete rounded cell, immediate fill background, enabled colour, and whole-cell hit target.
 
 Home's status bar uses `UiKit::drawBatteryVoltage()` for the 46×16 battery
 glyph. The helper centers Compact `#.#V` text inside its 38px body and uses
