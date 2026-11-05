@@ -368,6 +368,18 @@ void AssistantScreen::restoreBackground(const Rect &rect) {
   }
 }
 
+uint16_t AssistantScreen::backgroundColorAt(int16_t x, int16_t y) const {
+  const uint16_t *pixels = nullptr;
+  const int16_t sourceY = y - BackgroundTop;
+  if (_display.width() != AssistantAvatarLoader::BackgroundWidth ||
+      !_avatarLoader.background(pixels) || x < 0 || sourceY < 0 ||
+      x >= AssistantAvatarLoader::BackgroundWidth ||
+      sourceY >= AssistantAvatarLoader::BackgroundHeight) {
+    return ScreenBackground;
+  }
+  return pixels[static_cast<size_t>(sourceY) * AssistantAvatarLoader::BackgroundWidth + x];
+}
+
 void AssistantScreen::drawAvatar() {
   if (!_display.isReady()) return;
   const Rect avatarBounds{0, AvatarTop, AvatarWidth, AvatarHeight};
@@ -484,8 +496,11 @@ void AssistantScreen::drawPrimaryAction() {
   if (_voiceGesture.pulsing(millis())) fill = AutoListenPulseColor;
   const int16_t centerX = _primaryActionBounds.x + _primaryActionBounds.w / 2;
   const int16_t centerY = _primaryActionBounds.y + _primaryActionBounds.h / 2;
+  // The control sits over background artwork, so antialias against the
+  // artwork pixel just outside its left edge rather than assuming black.
   _display.tft().fillSmoothCircle(centerX, centerY, _primaryActionBounds.w / 2,
-                                  fill, ScreenBackground);
+                                  fill, backgroundColorAt(_primaryActionBounds.x - 1,
+                                                          centerY));
   UiKit::drawVoiceActionIcon(_display.tft(), centerX, centerY, icon, foreground, fill);
 }
 

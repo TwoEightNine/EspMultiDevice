@@ -18,9 +18,12 @@ public:
   static constexpr int16_t AssistantY = BackgroundTop + 100;
   static constexpr int16_t AssistantWidth = 276;
   static constexpr int16_t AssistantHeight = 72;
-  static constexpr int16_t VoiceControlX = 130;
-  static constexpr int16_t VoiceControlY = 396;
-  static constexpr int16_t VoiceControlSize = 60;
+  // Floating action in the avatar's lower-right corner with 16px screen
+  // margins, so it never covers a centered avatar's face or chin.
+  static constexpr int16_t VoiceControlSize = 56;
+  static constexpr int16_t VoiceControlMargin = 16;
+  static constexpr int16_t VoiceControlX = 320 - VoiceControlMargin - VoiceControlSize;
+  static constexpr int16_t VoiceControlY = 480 - VoiceControlMargin - VoiceControlSize;
   static constexpr int16_t TextWidth = 260;
   static constexpr uint8_t HumanLineCapacity = 2;
   static constexpr uint8_t AssistantLineCapacity = 3;

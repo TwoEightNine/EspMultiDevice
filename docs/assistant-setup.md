@@ -44,7 +44,7 @@ the new certificate and rebuild before the device can connect again.
 | Path on the card | Content |
 | --- | --- |
 | `/.system/ai_avatars/background.png` | Non-interlaced 320×432 PNG drawn directly below the app bar. It contains the fixed chat-bubble artwork. A missing, corrupt, or wrong-sized file falls back to black. |
-| `/.system/ai_avatars/default/` | The five 320×240 avatar PNGs `w.png`, `n.png`, `s.png`, `h.png`, and `t.png`. |
+| `/.system/ai_avatars/default/` | The five 320×240 avatar PNGs `w.png`, `n.png`, `s.png`, `h.png`, and `t.png`. Keep the lower-right 72×72 corner (x ≥ 248, y ≥ 168 in the PNG) free: the voice control covers it. |
 | `/.system/ai_avatars/<dir>/` | Optional additional avatar sets with the same five file names. |
 | `/.system/ai_avatars/avatars.config` | One `Name:dir` line per additional set. |
 
@@ -53,7 +53,7 @@ the new certificate and rebuild before the device can connect again.
 - The screen shows only the latest exchange: your text in two lines with an
   ellipsis, and the Assistant's spoken reply paged three lines at a time every
   two seconds.
-- The 60×60 control over the avatar is blue while ready, green while listening,
+- The round 56×56 control in the bottom-right corner is blue while ready, green while listening,
   and gray when unavailable. Tap it to start talking, and tap it during a turn
   to cancel that turn.
 - Hold the control for 800 ms to turn on auto-listen for the session. A short

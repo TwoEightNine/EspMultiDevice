@@ -285,8 +285,9 @@ arrows. The user caption is in (22,69)–(297,116), wraps to two 21px lines, and
 ellipsizes overflow. The assistant caption is in (22,148)–(297,219), shows at
 most three spoken lines, starts at its first page, and advances by three lines
 every two seconds to the final page without restarting on each sentence. Han
-text selects the assistant-only 18px Noto Sans CJK SC face. A 60×60 fill-only
-voice control at (130,396) overlays the avatar: blue microphone while ready,
+text selects the assistant-only 18px Noto Sans CJK SC face. A 56×56 fill-only
+voice control at (248,408), 16px from the right and bottom edges, floats in
+the avatar's lower-right corner so it never covers a centered avatar's face: blue microphone while ready,
 green stop while listening, blue cancel during active work, and gray slashed
 microphone when unavailable or disabled. The overflow menu contains a two-tap
 New conversation confirmation and the existing Avatar submenu; its rows begin

@@ -78,6 +78,7 @@ private:
   void draw(bool full);
   void drawBackground();
   void restoreBackground(const Rect &rect);
+  uint16_t backgroundColorAt(int16_t x, int16_t y) const;
   void drawAvatar();
   void drawCaptions(uint32_t nowMs);
   void drawCaptionLines(const String *lines, uint8_t count, const Rect &bounds);

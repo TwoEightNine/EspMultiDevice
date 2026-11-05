@@ -449,9 +449,9 @@ void testFixedCaptionPanel() {
         AssistantCaptionLayout::AssistantY == 148 &&
         AssistantCaptionLayout::AssistantWidth == 276 &&
         AssistantCaptionLayout::AssistantHeight == 72 &&
-        AssistantCaptionLayout::VoiceControlX == 130 &&
-        AssistantCaptionLayout::VoiceControlY == 396 &&
-        AssistantCaptionLayout::VoiceControlSize == 60,
+        AssistantCaptionLayout::VoiceControlX == 248 &&
+        AssistantCaptionLayout::VoiceControlY == 408 &&
+        AssistantCaptionLayout::VoiceControlSize == 56,
         "fixed bubble and voice-control geometry");
   check(AssistantScreen::RootMenuRowCount == 2 &&
         AssistantScreen::RootMenuRowCount * UiKit::ListCellHeight == 80,
