@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "../../src/features/apps/BitmapScale.h"
+#include "../../src/media/BitmapScale.h"
 
 namespace {
 int failures = 0;

@@ -15,6 +15,11 @@ class SpeakerController;
 // streaming to the speaker. It never draws or navigates. Every call does a
 // bounded amount of work on the caller's (UI) task.
 //
+// Every SD transaction holds SpiBusLock, because the cover worker reads the
+// same card from the other core. loadStep() and stream() wait only briefly
+// for the bus; on a miss they do nothing and the caller retries next tick
+// (stream() reports Busy), which the speaker's ~200 ms DMA queue absorbs.
+//
 // Errors close the file and leave a message in error(); the tags, format, and
 // duration read so far stay available so the screen can keep showing them.
 class AudioSource {
@@ -27,6 +32,7 @@ public:
 
   enum class StreamResult : uint8_t {
     Streaming,
+    Busy,
     Ended,
     Failed
   };
@@ -77,6 +83,10 @@ private:
   static const uint16_t Mp3CacheHeaderBytes = 36;
   static const uint16_t OutputFrames = 256;
   static const uint8_t TagFramesPerStep = 8;
+  // Per-tick work waits this long for the bus before skipping the tick.
+  static const uint32_t BusWaitMs = 10;
+  // One-off opens and closes wait longer; they cannot be retried silently.
+  static const uint32_t BusOpenWaitMs = 250;
 
   SecretStorage &_secretStorage;
   MediaCache &_mediaCache;
@@ -89,6 +99,12 @@ private:
   // False after anything moved the file position away from the stream:
   // opening, tag reads, the MP3 scan, or a seek.
   bool _streamReady;
+  // True while this object holds SpiBusLock, so nested helpers (fail() ->
+  // closeFile()) do not try to take the non-recursive mutex again.
+  bool _busLocked;
+  // The scan finished under the bus lock; MediaCache takes the lock itself,
+  // so the `.empa` write runs after it is released.
+  bool _mp3CachePending;
   uint32_t _dataOffset;
   uint32_t _dataBytes;
   uint32_t _sourceFileSize;
@@ -121,6 +137,8 @@ private:
   uint16_t _mp3PcmFrames;
   uint16_t _mp3PcmPosition;
 
+  bool lockBus(uint32_t waitMs);
+  void unlockBus();
   bool fail(const __FlashStringHelper *message);
   bool readExact(uint8_t *buffer, size_t length);
   bool seekTo(uint32_t position);
@@ -130,6 +148,7 @@ private:
   void beginTags();
   static bool readTagBytes(void *context, uint32_t offset, uint8_t *buffer, size_t length);
   bool beginMp3Analysis();
+  bool readMp3Bounds();
   bool loadMp3Cache();
   void writeMp3Cache();
   void analyzeMp3Step();

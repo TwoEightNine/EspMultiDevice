@@ -41,7 +41,7 @@ Use `UiKit::drawSeekBar()` for seek and level sliders: a 4px pill track, a fill 
 
 The Audio Player is a documented layout exception. Below the standard app bar ("Now playing", Close, and a More action that opens a Track info sheet) it has:
 
-- a 208×208 artwork tile (y 64–271), a `#222` smooth rounded rectangle with a grey music note until cover art exists;
+- a 208×208 artwork tile (y 64–271): the cover, pushed as a finished tile whose 12px antialiased corners the worker blended against black, or else a `#222` smooth rounded rectangle with a grey music note;
 - the title (Title face, white), the artist (Content, light grey), and "album · year" (Compact, grey), centred at y 288, 314, and 336. The artist line falls back to a grey "Unknown artist", shows a grey "Reading track..." while tags load, and shows errors in red;
 - the seek bar from x 16 to 303 at y 360, with a full-width hit band from y 344 to 383 and Compact elapsed/remaining times at y 386. While the track loads, the bar's place shows an indeterminate `drawProgressBar`. Without seek support it shows the fill without a thumb;
 - a transport row centred at y 436: 48×48px repeat, previous, next, and volume cells at x centres 40, 100, 220, and 280, and a 64px play button at the centre. The play button is a fill-only white smooth circle with a black glyph (`drawPlaybackIcon` at scale 2), dark grey (`#333`) with a grey glyph when disabled, and its whole 64×64px square is the target. Active repeat is cyan; an unavailable control keeps the black background and a grey icon.

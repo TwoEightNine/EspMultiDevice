@@ -25,6 +25,8 @@ version follows the rules in
 - The Audio Player shows the track title, artist, album, and year from
   ID3v1/ID3v2 tags and WAV `INFO`/`id3 ` chunks, and falls back to the file
   name without its extension.
+- The Audio Player shows embedded PNG and baseline JPEG cover art, decoded on
+  a background task.
 
 ### Changed
 

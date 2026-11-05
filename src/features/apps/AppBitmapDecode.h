@@ -2,10 +2,10 @@
 
 #include <Arduino.h>
 
-// Decodes an in-memory PNG or baseline JPEG into an RGB565 bitmap fitted
-// inside a box, for SDK 6 apps. Runs on the app worker (`esp.bitmap.decode`)
-// or the app's network task (`bitmap` responses); it never touches SD or the
-// display. The returned pixels are in PSRAM; free them with heap_caps_free.
+// SDK 6 limits over the shared BitmapDecode: a 128 KiB source, a box of at
+// most 320x432, and the documented app error wording. Runs on the app worker
+// (`esp.bitmap.decode`) or the app's network task (`bitmap` responses). The
+// returned pixels are in PSRAM; free them with heap_caps_free.
 namespace AppBitmapDecode {
 constexpr uint16_t MaxWidth = 320;
 constexpr uint16_t MaxHeight = 432;

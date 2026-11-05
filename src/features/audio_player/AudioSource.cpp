@@ -4,6 +4,7 @@
 
 #include "AudioSource.h"
 
+#include "../../core/SpiBusLock.h"
 #include "../../media/FileFormats.h"
 #include "../../services/audio/SpeakerController.h"
 
@@ -77,6 +78,8 @@ AudioSource::AudioSource(SecretStorage &secretStorage, MediaCache &mediaCache)
     _secretAccess(false),
     _format(Format::None),
     _streamReady(false),
+    _busLocked(false),
+    _mp3CachePending(false),
     _dataOffset(0),
     _dataBytes(0),
     _sourceFileSize(0),
@@ -103,8 +106,28 @@ AudioSource::AudioSource(SecretStorage &secretStorage, MediaCache &mediaCache)
   mp3dec_init(&_mp3Decoder);
 }
 
+bool AudioSource::lockBus(uint32_t waitMs) {
+  if (_busLocked) return true;
+  if (!SpiBusLock::lock(pdMS_TO_TICKS(waitMs))) return false;
+  _busLocked = true;
+  return true;
+}
+
+void AudioSource::unlockBus() {
+  if (!_busLocked) return;
+  _busLocked = false;
+  SpiBusLock::unlock();
+}
+
 void AudioSource::closeFile() {
-  if (_file) _file.close();
+  if (_file) {
+    const bool took = !_busLocked && lockBus(BusOpenWaitMs);
+    // Close even if the bus stayed busy, so the handle cannot leak; closing a
+    // read-only file does not write to the card.
+    _file.close();
+    if (took) unlockBus();
+  }
+  _mp3CachePending = false;
   _tagsParsing = false;
   _mp3Analyzing = false;
   _streamReady = false;
@@ -150,7 +173,9 @@ bool AudioSource::open(const String &path, bool secretAccess) {
     case FileFormats::Format::Mp3: _format = Format::Mp3; break;
     default: return fail(F("Unsupported audio file"));
   }
+  if (!lockBus(BusOpenWaitMs)) return fail(F("SD card busy"));
   _file = _secretStorage.open(path, FILE_READ, _secretAccess);
+  unlockBus();
   if (!_file) return fail(F("Unable to open audio file"));
   SourceFingerprint fingerprint{};
   if (_mediaCache.captureFingerprint(_file, fingerprint) != MediaCache::Result::Complete) {
@@ -158,7 +183,12 @@ bool AudioSource::open(const String &path, bool secretAccess) {
   }
   _sourceFileSize = fingerprint.size;
   _sourceWriteTime = fingerprint.modified;
-  if (_format == Format::Wav && !parseWav()) return false;
+  if (_format == Format::Wav) {
+    if (!lockBus(BusOpenWaitMs)) return fail(F("SD card busy"));
+    const bool parsed = parseWav();
+    unlockBus();
+    if (!parsed) return false;
+  }
   if (_format == Format::Mp3 && !beginMp3Analysis()) return false;
   beginTags();
   return true;
@@ -170,6 +200,7 @@ void AudioSource::loadStep() {
     _mp3Analyzing = false;
     return;
   }
+  if (!loading() || !lockBus(BusWaitMs)) return;
   _streamReady = false;
   if (_tagsParsing) {
     if (_tags.step(TagFramesPerStep)) {
@@ -181,9 +212,14 @@ void AudioSource::loadStep() {
                       (unsigned long)info.coverLength, (unsigned long)info.coverOffset);
       }
     }
-    return;
+  } else {
+    analyzeMp3Step();
   }
-  if (_mp3Analyzing) analyzeMp3Step();
+  unlockBus();
+  if (_mp3CachePending) {
+    _mp3CachePending = false;
+    writeMp3Cache();
+  }
 }
 
 uint32_t AudioSource::bitrateKbps() const {
@@ -211,8 +247,15 @@ bool AudioSource::seek(uint32_t frame) {
 AudioSource::StreamResult AudioSource::stream(SpeakerController &speaker) {
   if (!_file || failed()) return StreamResult::Failed;
   if (ended()) return StreamResult::Ended;
-  if (!_streamReady && !prepareStream()) return StreamResult::Failed;
-  return _format == Format::Wav ? streamWav(speaker) : streamMp3(speaker);
+  if (!lockBus(BusWaitMs)) return StreamResult::Busy;
+  if (!_streamReady && !prepareStream()) {
+    unlockBus();
+    return StreamResult::Failed;
+  }
+  // Both release the bus once their reads are done, before the speaker write.
+  const StreamResult result = _format == Format::Wav ? streamWav(speaker) : streamMp3(speaker);
+  unlockBus();
+  return result;
 }
 
 bool AudioSource::fail(const __FlashStringHelper *message) {
@@ -346,10 +389,27 @@ bool AudioSource::readTagBytes(void *context, uint32_t offset, uint8_t *buffer, 
 
 bool AudioSource::beginMp3Analysis() {
   uint32_t fileSize = _sourceFileSize;
-  if (fileSize < 4 || !seekTo(0)) return fail(F("Invalid MP3 file"));
+  if (fileSize < 4) return fail(F("Invalid MP3 file"));
 
   if (loadMp3Cache()) return true;
 
+  if (!lockBus(BusOpenWaitMs)) return fail(F("SD card busy"));
+  const bool bounded = readMp3Bounds();
+  unlockBus();
+  if (!bounded) return false;
+
+  _frameCount = 0;
+  _framePosition = 0;
+  _sampleRate = 0;
+  _channels = 0;
+  _bitsPerSample = 16;
+  _mp3AnalysisPosition = _mp3DataOffset;
+  _mp3Analyzing = true;
+  return true;
+}
+
+bool AudioSource::readMp3Bounds() {
+  const uint32_t fileSize = _sourceFileSize;
   _mp3DataOffset = 0;
   _mp3AudioEnd = fileSize;
   uint8_t tag[10];
@@ -372,14 +432,6 @@ bool AudioSource::beginMp3Analysis() {
   if (_mp3DataOffset >= _mp3AudioEnd || _mp3AudioEnd - _mp3DataOffset < 4) {
     return fail(F("MP3 has no audio frames"));
   }
-
-  _frameCount = 0;
-  _framePosition = 0;
-  _sampleRate = 0;
-  _channels = 0;
-  _bitsPerSample = 16;
-  _mp3AnalysisPosition = _mp3DataOffset;
-  _mp3Analyzing = true;
   return true;
 }
 
@@ -417,8 +469,11 @@ bool AudioSource::loadMp3Cache() {
   uint16_t firstFrameSamples = 0;
   uint32_t firstSampleRate = 0;
   uint16_t firstChannels = 0;
-  if (!parseMp3FrameHeader(dataOffset, firstFrameBytes, firstFrameSamples, firstSampleRate, firstChannels) ||
-      firstSampleRate != sampleRate || firstChannels != channels || firstFrameSamples > frameCount) {
+  if (!lockBus(BusOpenWaitMs)) return false;
+  const bool parsed =
+    parseMp3FrameHeader(dataOffset, firstFrameBytes, firstFrameSamples, firstSampleRate, firstChannels);
+  unlockBus();
+  if (!parsed || firstSampleRate != sampleRate || firstChannels != channels || firstFrameSamples > frameCount) {
     return false;
   }
 
@@ -475,7 +530,7 @@ void AudioSource::analyzeMp3Step() {
       if (_frameCount == 0) {
         fail(F("MP3 has no audio frames"));
       } else {
-        writeMp3Cache();
+        _mp3CachePending = true;
       }
       return;
     }
@@ -577,6 +632,8 @@ bool AudioSource::decodeMp3Frame() {
     if (_file && (uint32_t)_file.position() >= _mp3AudioEnd && _mp3InputBytes == 0) return false;
     return fail(F("MP3 read failed"));
   }
+  // Decoding needs no SD access.
+  unlockBus();
 
   mp3dec_frame_info_t info;
   memset(&info, 0, sizeof(info));
@@ -629,6 +686,7 @@ AudioSource::StreamResult AudioSource::streamWav(SpeakerController &speaker) {
     fail(F("WAV read failed"));
     return StreamResult::Failed;
   }
+  unlockBus();
 
   uint16_t bytesPerSample = (_bitsPerSample + 7) / 8;
   for (uint16_t frame = 0; frame < frames; frame++) {
@@ -646,10 +704,9 @@ AudioSource::StreamResult AudioSource::streamWav(SpeakerController &speaker) {
     fail(F("Speaker write failed"));
     return StreamResult::Failed;
   }
-  if (written < frames && !seekTo(_dataOffset + (uint64_t)_framePosition * _blockAlign)) {
-    fail(F("Could not resume WAV stream"));
-    return StreamResult::Failed;
-  }
+  // A partial write left the file ahead of the stream; the next stream()
+  // seeks back under the bus lock.
+  if (written < frames) _streamReady = false;
   return StreamResult::Streaming;
 }
 
@@ -661,6 +718,7 @@ AudioSource::StreamResult AudioSource::streamMp3(SpeakerController &speaker) {
     return StreamResult::Failed;
   }
 
+  unlockBus();
   uint16_t remaining = _mp3PcmFrames - _mp3PcmPosition;
   uint16_t frames = remaining > OutputFrames ? OutputFrames : remaining;
   if (frames > _frameCount - _framePosition) frames = (uint16_t)(_frameCount - _framePosition);

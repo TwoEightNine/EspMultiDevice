@@ -3,7 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Arduino-free sizing and downscaling for SDK 6 bitmaps. Pixels are native
+// Arduino-free sizing and downscaling for BitmapDecode (SDK 6 app bitmaps
+// and Audio Player covers). Pixels are native
 // RGB565 values. tests/bitmap_scale covers the contract on the host.
 namespace BitmapScale {
 

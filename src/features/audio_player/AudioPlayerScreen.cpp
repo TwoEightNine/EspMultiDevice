@@ -3,15 +3,16 @@
 #include "../../app/Navigator.h"
 #include "../../ui/UiKit.h"
 
+#include <esp_heap_caps.h>
 #include <math.h>
 
 namespace {
 // Layout of the 320 x 480 portrait screen; see docs/ui-kit.md.
-constexpr int16_t CoverSize = 208;
+constexpr int16_t CoverSize = AudioCoverWorker::Size;
 constexpr int16_t CoverTop = 64;
-constexpr int16_t CoverRadius = 12;
+constexpr int16_t CoverRadius = AudioCoverWorker::CornerRadius;
 constexpr int16_t CoverGlyphSize = 88;
-constexpr uint16_t CoverColor = 0x2104;       // #222222
+constexpr uint16_t CoverColor = AudioCoverWorker::TileColor;
 constexpr uint16_t CoverGlyphColor = 0x52AA;  // #555555
 
 constexpr int16_t TextTop = 274;
@@ -121,6 +122,9 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
     _speaker(speaker),
     _audioSettings(audioSettings),
     _source(secretStorage, mediaCache),
+    _cover(secretStorage),
+    _coverPixels(nullptr),
+    _coverGeneration(0),
     _secretAccess(false),
     _sdMounted(false),
     _pendingOpen(false),
@@ -147,6 +151,7 @@ AudioPlayerScreen::AudioPlayerScreen(Navigator &navigator,
 void AudioPlayerScreen::onEnter(const ScreenData &data) {
   stopSpeaker();
   _source.reset();
+  dropCover();
   _lastTouchDown = false;
   _volumeOpen = false;
   _infoOpen = false;
@@ -177,8 +182,15 @@ void AudioPlayerScreen::onEnter(const ScreenData &data) {
 void AudioPlayerScreen::onExit() {
   if (_drag != Drag::None) endDrag();
   stopSpeaker();
+  _cover.cancel();
   _source.closeFile();
   _pendingOpen = false;
+}
+
+bool AudioPlayerScreen::releaseResources() {
+  dropCover();
+  // False until the worker has unwound its job; Navigator retries.
+  return _cover.end();
 }
 
 void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
@@ -237,6 +249,7 @@ void AudioPlayerScreen::handleTouch(const TouchPoint &point) {
 
 void AudioPlayerScreen::tick(uint32_t nowMs) {
   handleSdCardEvent(_sdCard.takeEvent());
+  takeCover();
   if (_drag != Drag::None) {
     const TouchPoint held = _touch.point();
     if (held.touched) updateDrag(held.x);
@@ -259,7 +272,10 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
       refresh();
       return;
     }
-    if (hadTags && !_source.tagsParsing()) drawTrackText();
+    if (hadTags && !_source.tagsParsing()) {
+      drawTrackText();
+      requestCover();
+    }
     if (!_source.loading()) {
       onSourceLoaded();
     } else if (elapsedSince(nowMs, _lastDrawMs) >= LoadingRedrawMs) {
@@ -291,6 +307,10 @@ void AudioPlayerScreen::tick(uint32_t nowMs) {
 }
 
 bool AudioPlayerScreen::openSource() {
+  // A remount reopens the same track: keep a cover that is already shown.
+  _cover.cancel();
+  ++_coverGeneration;
+  if (_coverGeneration == 0) ++_coverGeneration;
   _error = "";
   _state = State::Ready;
   _finishAtMs = 0;
@@ -391,6 +411,7 @@ void AudioPlayerScreen::handleSdCardEvent(SdCardEvent event) {
   if (event == SdCardEvent::None) return;
   if (event == SdCardEvent::Removed || event == SdCardEvent::MountFailed) {
     _sdMounted = false;
+    _cover.cancel();
     fail(event == SdCardEvent::Removed ? F("SD card removed") : F("SD card unavailable"));
     refresh();
     return;
@@ -400,6 +421,34 @@ void AudioPlayerScreen::handleSdCardEvent(SdCardEvent event) {
     if (_path.length() > 0) _pendingOpen = true;
     refresh();
   }
+}
+
+void AudioPlayerScreen::requestCover() {
+  const AudioTags::Info &tags = _source.tags();
+  if (_coverPixels || !tags.hasCover()) return;
+  if (!_cover.request(_path, _secretAccess, tags.coverOffset, tags.coverLength, _coverGeneration)) {
+    Serial.println(F("[Audio cover] worker unavailable"));
+  }
+}
+
+void AudioPlayerScreen::takeCover() {
+  AudioCoverWorker::Result result{};
+  while (_cover.take(result)) {
+    if (result.generation != _coverGeneration || !result.pixels || _coverPixels) {
+      heap_caps_free(result.pixels);
+      continue;
+    }
+    _coverPixels = result.pixels;
+    drawCover();
+  }
+}
+
+void AudioPlayerScreen::dropCover() {
+  _cover.cancel();
+  ++_coverGeneration;
+  if (_coverGeneration == 0) ++_coverGeneration;
+  heap_caps_free(_coverPixels);
+  _coverPixels = nullptr;
 }
 
 void AudioPlayerScreen::beginDrag(Drag drag, int16_t x) {
@@ -535,6 +584,11 @@ void AudioPlayerScreen::drawCover() {
   if (!_display.isReady() || _infoOpen) return;
   TFT_eSPI &tft = _display.tft();
   const int16_t x = (_display.width() - CoverSize) / 2;
+  if (_coverPixels) {
+    // The worker already blended the rounded corners against black.
+    tft.pushImage(x, CoverTop, CoverSize, CoverSize, _coverPixels);
+    return;
+  }
   tft.fillSmoothRoundRect(x, CoverTop, CoverSize, CoverSize, CoverRadius, CoverColor, TFT_BLACK);
   UiKit::drawMusicNoteIcon(tft, _display.width() / 2, CoverTop + CoverSize / 2, CoverGlyphSize,
                            CoverGlyphColor, CoverColor);

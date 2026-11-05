@@ -6,12 +6,13 @@
 #include "../../services/audio/AudioSettings.h"
 #include "../../services/audio/SpeakerController.h"
 #include "../../services/storage/SdCardController.h"
+#include "AudioCoverWorker.h"
 #include "AudioSource.h"
 
 // "Now playing" screen: cover tile, track text, seek bar, and a transport row
 // with repeat, previous, play/pause, next, and a volume popover. Decoding and
-// file access live in AudioSource; this class owns layout, touch, and the
-// playback state machine.
+// file access live in AudioSource and the cover picture in AudioCoverWorker;
+// this class owns layout, touch, and the playback state machine.
 class AudioPlayerScreen : public Screen {
 public:
   AudioPlayerScreen(Navigator &navigator,
@@ -27,6 +28,7 @@ public:
   void onExit() override;
   void handleTouch(const TouchPoint &point) override;
   void tick(uint32_t nowMs) override;
+  bool releaseResources() override;
 
 private:
   enum class State : uint8_t {
@@ -55,6 +57,11 @@ private:
   SpeakerController &_speaker;
   AudioSettings &_audioSettings;
   AudioSource _source;
+  AudioCoverWorker _cover;
+  // The decoded tile, owned by the UI task once taken from the worker.
+  uint16_t *_coverPixels;
+  // Bumped for every open; results for an older one are dropped.
+  uint32_t _coverGeneration;
 
   String _path;
   String _fileName;
@@ -97,6 +104,9 @@ private:
   void failFromSource();
   void stopSpeaker();
   void handleSdCardEvent(SdCardEvent event);
+  void requestCover();
+  void takeCover();
+  void dropCover();
 
   void beginDrag(Drag drag, int16_t x);
   void updateDrag(int16_t x);

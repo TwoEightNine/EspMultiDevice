@@ -6,7 +6,7 @@
 
 `.eth1`, `.em16`, `.em16z`, `.emga`, and `.empa` are internal cache files; `.emga` is a legacy format that nothing writes any more (`FileFormats::isLegacyCache`). They keep their image/audio grouping but are never openable or downloadable source media. Their extensions and internal classification live in `FileFormats`; new enum values must be appended because the ETH1 header persists the numeric source format.
 
-Downloads go through the shared `DownloadStore` (`src/services/storage/`), which verifies each finished file's signature against the format its name or content type declared before an atomic rename. The Browser saves to `/Downloads/`; an SDK 6 app's `download` requests save only to its own `/Downloads/<app name>/` folder (the app id when the display name is not a valid path segment), so the 2ch example's files land in `/Downloads/2ch/`. Both are ordinary visible folders: Files lists, opens, and deletes their contents, and nothing prunes them automatically. SDK 6 apps also decode small PNG/JPEG images straight into PSRAM bitmaps fitted to a box (`AppBitmapDecode` with the `BitmapScale` box filter); those never touch SD or the media caches.
+Downloads go through the shared `DownloadStore` (`src/services/storage/`), which verifies each finished file's signature against the format its name or content type declared before an atomic rename. The Browser saves to `/Downloads/`; an SDK 6 app's `download` requests save only to its own `/Downloads/<app name>/` folder (the app id when the display name is not a valid path segment), so the 2ch example's files land in `/Downloads/2ch/`. Both are ordinary visible folders: Files lists, opens, and deletes their contents, and nothing prunes them automatically. SDK 6 apps also decode small PNG/JPEG images straight into PSRAM bitmaps fitted to a box (`AppBitmapDecode`, the SDK 6 limits over the shared `BitmapDecode` and its `BitmapScale` box filter in `src/media/`); those never touch SD or the media caches.
 
 Assistant image and video filename searches use this registry and the same
 normal-SD privacy filter as audio search. They return at most five opaque
@@ -131,10 +131,17 @@ The tags are read before playback starts, by the Arduino-free `AudioTags` parser
   - UTF-16 (BOM or big-endian), UTF-8, and Latin-1 are recognised.
   - Latin-1-declared text (ID3 encoding 0, ID3v1, INFO) that is valid multi-byte UTF-8 is read as UTF-8.
   - Text whose high bytes are all Windows-1251 Cyrillic letters, in a run of at least three, is read as Windows-1251. Isolated accents such as "Beyoncé" stay Latin-1.
-- **Picture:** the parser records the position and length of the front cover (`APIC`/`PIC` type 3), or else the first picture, without reading its bytes. A picture inside an unsynchronised tag or frame is not offered. Nothing displays it yet; the redesign plan's cover phase will classify it through `FileFormats` before decoding.
+- **Picture:** the parser records the position and length of the front cover (`APIC`/`PIC` type 3), or else the first picture, without reading its bytes. A picture inside an unsynchronised tag or frame is not offered. The player's cover worker displays it (see **Cover art** below).
 - **Bounds:** every frame and chunk size is checked against its tag, chunk, and file, and the first inconsistent size ends that source only. Each source visits at most 256 frames and reads at most 256 bytes of any text frame. Other frame bodies are skipped by offset, so a large embedded picture costs no reads.
 - **Scheduling:** parsing runs on the UI task, eight frames or chunks per `tick()`, while the player shows "Reading track...". It uses the source's own file handle, so the first `stream()` afterwards repositions the file (an MP3 rewinds its decoder to the first audio frame). Tags are re-read on each open; there is no tag cache.
 - **Log:** serial logs one `Audio tags:` line per tagged file.
+
+**Cover art.** Once the tags are read, `AudioCoverWorker` loads the recorded picture on the core opposite the UI loop and the player shows it in the 208×208 artwork tile:
+
+- **Reading:** the picture bytes go into a PSRAM buffer in 8 KiB chunks, each under `SpiBusLock`, through the same normal or hidden access mode as the track. Pictures over 1 MiB are skipped.
+- **Decoding:** `FileFormats` classifies the bytes; PNG (non-interlaced) and baseline JPEG are decoded by the shared `BitmapDecode` (`src/media/`, also behind `AppBitmapDecode`) and fitted inside 208×208 with the aspect ratio kept. A smaller picture is centred, not enlarged. The space around a non-square picture is the tile's `#222`, and the corners are rounded and antialiased against black.
+- **Fallback:** a progressive JPEG, an interlaced PNG, a GIF/WebP/BMP picture, a read failure, or a PSRAM shortage leaves the music-note placeholder. The serial log names the reason on an `[Audio cover]` line, and a success logs its time.
+- **Lifetime:** nothing is cached on SD; the cover is decoded again on each open. A new track, SD removal, or leaving the screen cancels a running job, which stops at its next chunk. After an SD remount the shown cover stays.
 
 MP3 playback uses a sidecar cache at `<source-directory>/.cache/<file>.empa`. It stores validated compressed-audio bounds, format, and decoded sample count so later playback can skip a full MP3 scan while still decoding the original stream. It is valid only when source size and last-modified time match.
 

@@ -131,9 +131,23 @@ machine (ready, playing, paused, finished, error, plus the visit-scoped repeat
 mode). Its `AudioSource` member owns the open WAV/MP3 file: header parsing, tag
 reading, the MP3 frame scan and `.empa` cache, positioning, and mono PCM writes
 to the speaker. The source never draws or navigates, and every call is one
-bounded step on the UI task. Its SD reads do not yet take `SpiBusLock`, which is
-safe only while nothing else touches SD during playback; the planned cover
-worker must add locking to both.
+bounded step on the UI task. Every source SD transaction takes `SpiBusLock`:
+per-tick work waits at most 10 ms and otherwise skips the tick (`stream()`
+reports Busy, which the speaker's ~200 ms DMA queue absorbs), and the
+`.empa` write runs after the lock is released because `MediaCache` locks
+itself.
+
+The screen-scoped `AudioCoverWorker` (task `audio-cover`, 12 KiB stack,
+priority 1, on the core opposite the UI loop) turns the tag's picture into
+the 208×208 artwork tile. It is started by the first cover request. It reads
+the picture through its own `SecretStorage` handle in 8 KiB chunks, each
+under `SpiBusLock`, decodes it with the shared `BitmapDecode`, and publishes a
+PSRAM tile tagged with the screen's generation number. The UI task takes the
+tile in `tick()`, owns it from then on, and pushes it with `pushImage` (the
+parallel display needs no SPI lock). A new track, SD removal, or `onExit()`
+makes the job stale; the worker notices at its next chunk, frees its buffers,
+and publishes nothing. `releaseResources()` returns false until the worker is
+idle, then deletes the task and drains the queues.
 
 `VideoPlayerScreen` owns only video UI and TFT presentation. Its screen-scoped `VideoStreamWorker` runs on the core opposite the Arduino UI loop and exclusively owns the source `StorageFile`, ISO-BMFF demuxer, video/audio decoders, 16,384-frame mono PCM ring, packed PSRAM frame slots, and I2S speaker calls. It drains at most 256 PCM frames with a zero-timeout I2S call, decodes at most eight compressed audio packets when restoring its reserve, and decodes at most one available video sample in a scheduling pass; it yields after a video decode or an 8 ms work quantum. Audio backpressure therefore cannot pace video decoding. Playback time is active wall time clamped by submitted PCM duration, so underruns stop progress rather than making video run ahead. Pause stops and resumes the installed I2S peripheral without destroying its queued DMA audio.
 
