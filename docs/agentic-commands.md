@@ -122,7 +122,8 @@ The pinned backend is extended only through
    or secret data. Log only the command name, outcome class, and safe metrics.
 6. Remove or hide legacy tools that can compete with the new capability for
    eligible device sessions. Audio commands remove the backend's generic
-   `play_music` tool.
+   `play_music` tool. Device sessions also hide the upstream `web_search`,
+   `get_weather`, and news plugins, which the hosted web search replaces.
 
 If an accepted command takes over device playback or navigation, mark it as a
 terminal device action. Give the result to the LLM so the tool call completes,

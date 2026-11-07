@@ -78,6 +78,12 @@ fail_check("OpenAILLM provider is incomplete") unless
   llm["base_url"] == "https://api.openai.com/v1" &&
   llm["model_name"] == "gpt-5.6-luna" &&
   llm["reasoning_effort"] == "medium"
+web_search = llm["web_search"]
+fail_check("LLM.OpenAILLM.web_search must set the approximate user location") unless
+  web_search.is_a?(Hash) && web_search["enabled"] != false &&
+  web_search["country"].to_s.match?(/\A[A-Z]{2}\z/) &&
+  !web_search["city"].to_s.strip.empty? &&
+  web_search["timezone"].to_s.match?(%r{\A[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+\z})
 [asr["api_key"], llm["api_key"]].each do |key|
   fail_check("OpenAI API key is missing or still a placeholder") unless
     key.is_a?(String) && !key.empty? && !key.match?(/replace|placeholder|your|你的/i)

@@ -75,6 +75,13 @@ ASR:
 
 LLM:
   OpenAILLM:
+    # Hosted OpenAI web search for weather, news, and other current facts.
+    # Approximate location used when the user names none.
+    web_search:
+      country: GE
+      city: Tbilisi
+      region: Tbilisi
+      timezone: Asia/Tbilisi
     type: esp_media_openai_responses
     api_key: REPLACE_ONLY_IN_IGNORED_RUNTIME_CONFIG
     base_url: https://api.openai.com/v1

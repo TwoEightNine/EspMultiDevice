@@ -5,6 +5,7 @@ shape.  This provider owns the translation so upstream code and device RPCs
 remain unchanged while every LLM request uses the Responses API.
 """
 
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -12,6 +13,125 @@ import openai
 
 from core.providers.llm.base import LLMProviderBase
 from core.utils.util import check_model_key
+
+
+WEB_SEARCH_INSTRUCTIONS = (
+    "\n\nYou can search the web for current facts such as weather, news, "
+    "prices, exchange rates, schedules, and recent events. Use it whenever an "
+    "answer depends on information newer than your training or on today's "
+    "conditions; use the configured location when the user names none. Your "
+    "answer is spoken aloud: never include links, URLs, citations, markdown, "
+    "headings, or bullet lists. Name a source only when it matters. The device "
+    "search_web tool only opens results on screen, so use it only when the "
+    "user asks to see or open results."
+)
+
+_LOCATION_FIELDS = ("country", "region", "city", "timezone")
+
+
+def web_search_tool(config):
+    """Build the hosted web_search tool from the LLM config, or None."""
+    settings = config.get("web_search")
+    if settings is None or settings is False:
+        return None
+    if settings is True:
+        settings = {}
+    if not isinstance(settings, dict):
+        raise ValueError("web_search must be a mapping")
+    if settings.get("enabled", True) is False:
+        return None
+    tool = {"type": "web_search"}
+    location = {
+        field: str(settings[field]) for field in _LOCATION_FIELDS
+        if settings.get(field)
+    }
+    if location:
+        country = location.get("country", "")
+        if country and not re.fullmatch(r"[A-Z]{2}", country):
+            raise ValueError("web_search.country must be an ISO 3166-1 alpha-2 code")
+        tool["user_location"] = {"type": "approximate", **location}
+    return tool
+
+
+class SpokenTextFilter:
+    """Streaming filter that keeps links and citations out of spoken text.
+
+    Web-search answers carry inline citations such as
+    ``([example.com](https://example.com/...))``.  The TTS sentence splitter
+    would cut those at their dots and speak them, and the device would show
+    them as captions.  Text is held back only while a bracket or URL that may
+    still become a link is open, and never longer than ``MAX_HOLD`` chars.
+    """
+
+    MAX_HOLD = 400
+    _CITATION = re.compile(r"[ \t]*\(\s*(?:\[[^\]\n]*\]\([^)\s]*\)[\s,;]*)+\)")
+    _LINK = re.compile(r"\[([^\]\n]*)\]\((?:https?://|www\.)[^)\s]*\)")
+    _URL = re.compile(r"[ \t]*\(?(?:https?://|www\.)[^\s)]+\)?")
+    # A URL that still runs to the end of the buffer may continue.
+    _OPEN_URL = re.compile(r"(?:https?://|www\.)[^\s)]*\Z")
+    # The final word, after whitespace or an opening bracket.
+    _TAIL = re.compile(r"[^\s(\[]*\Z")
+
+    def __init__(self):
+        self._pending = ""
+
+    @classmethod
+    def _clean(cls, text):
+        text = cls._CITATION.sub("", text)
+        text = cls._LINK.sub(r"\1", text)
+        return cls._URL.sub("", text)
+
+    @classmethod
+    def _hold_index(cls, text):
+        """Return where an unfinished link, citation, or URL may begin."""
+        stack = []
+        last_closed_bracket = None
+        for index, char in enumerate(text):
+            if char in "([":
+                if char == "(" and last_closed_bracket is not None and \
+                        last_closed_bracket[1] == index - 1:
+                    stack.append(last_closed_bracket[0])
+                else:
+                    stack.append(index)
+                last_closed_bracket = None
+            elif char in ")]":
+                opened = stack.pop() if stack else None
+                last_closed_bracket = (opened, index) \
+                    if char == "]" and opened is not None else None
+        hold = len(text)
+        if stack:
+            hold = stack[0]
+        if last_closed_bracket is not None and last_closed_bracket[1] == len(text) - 1:
+            hold = min(hold, last_closed_bracket[0])
+        url = cls._OPEN_URL.search(text)
+        if url:
+            hold = min(hold, url.start())
+        tail = cls._TAIL.search(text).group(0).lower()
+        if tail and any(scheme.startswith(tail) for scheme in ("https://", "http://", "www.")):
+            hold = min(hold, len(text) - len(tail))
+        # Hold trailing spaces, and the spaces before a held span, so a
+        # citation or URL removed later cannot leave a stray space before
+        # the next punctuation.
+        while hold > 0 and text[hold - 1] in " \t":
+            hold -= 1
+        return hold
+
+    def feed(self, delta):
+        if not delta:
+            return ""
+        # Decide what to hold on the raw text: cleaning a partial link could
+        # strip half of it and let the rest leak through later.
+        text = self._pending + delta
+        hold = self._hold_index(text)
+        if len(text) - hold > self.MAX_HOLD:
+            hold = len(text)
+        self._pending = text[hold:]
+        return self._clean(text[:hold])
+
+    def flush(self):
+        text = self._clean(self._pending)
+        self._pending = ""
+        return text
 
 
 class LLMProvider(LLMProviderBase):
@@ -26,6 +146,7 @@ class LLMProvider(LLMProviderBase):
             "none", "low", "medium", "high", "xhigh", "max"
         }:
             raise ValueError("reasoning_effort is invalid")
+        self.web_search = web_search_tool(config)
 
         timeout_value = config.get("timeout", 300)
         if isinstance(timeout_value, dict):
@@ -122,17 +243,32 @@ class LLMProvider(LLMProviderBase):
         if max_tokens is not None:
             request["max_output_tokens"] = max_tokens
         tools = self._to_responses_tools(functions)
+        web_search = getattr(self, "web_search", None)
+        if tools and web_search:
+            # Hosted search runs inside this response; only conversational
+            # turns that already offer tools get it, never memory summaries.
+            tools.append(dict(web_search))
+            request["instructions"] = (instructions or "") + WEB_SEARCH_INSTRUCTIONS
         if tools:
             request["tools"] = tools
 
         calls = {}
         next_index = 0
+        spoken = SpokenTextFilter()
         stream = self.client.responses.create(**request)
         try:
             for event in stream:
                 event_type = getattr(event, "type", "")
                 if event_type == "response.output_text.delta":
-                    yield getattr(event, "delta", ""), None
+                    text = spoken.feed(getattr(event, "delta", ""))
+                    if text:
+                        yield text, None
+                    continue
+
+                if event_type == "response.output_text.done":
+                    text = spoken.flush()
+                    if text:
+                        yield text, None
                     continue
 
                 if event_type == "response.output_item.added":
@@ -196,6 +332,9 @@ class LLMProvider(LLMProviderBase):
                         yield "", [self._tool_delta(
                             state["index"], call_id, name, remaining
                         )]
+            text = spoken.flush()
+            if text:
+                yield text, None
         finally:
             close = getattr(stream, "close", None)
             if callable(close):

@@ -233,7 +233,10 @@ Details, and web launches wait for the terminal assistant turn to return to
 Ready, then enter their existing screens while preserving the idle
 authenticated session underneath. `search_web`
 passes search words, never a URL, to the Browser's fixed DuckDuckGo Lite
-entry; it is terminal and omitted from browser recents. The recorder writes
+entry; it is terminal and omitted from browser recents. Spoken answers that
+need current facts (weather, news, rates) use the backend's hosted OpenAI
+web search instead, located by the backend configuration; nothing opens on
+the device. The recorder writes
 one `/voice_last.wav`, which remains available through `search_audio`.
 
 ### Stage 0/1 validation history

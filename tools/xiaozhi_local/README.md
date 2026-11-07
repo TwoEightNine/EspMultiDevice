@@ -25,6 +25,16 @@ file path or URL to firmware. Version-3 firmware returns user-facing
 SD-relative paths from file search and adds paged visible-directory listing;
 paths remain result data and are never accepted back as filesystem authority.
 
+Current facts come from OpenAI's hosted `web_search` tool. The Responses adapter
+adds it, with the approximate location from `LLM.OpenAILLM.web_search`, to
+every conversational request that offers tools; memory summaries never search.
+Each search is billed to the same OpenAI key. Device sessions hide the upstream
+`web_search`, `get_weather`, and news plugins, which need China-only providers
+and keys. The adapter removes citations, Markdown links, and bare URLs from the
+streamed answer before TTS and captions see it, holding text only while a
+bracket or URL is still open and never more than 400 characters. Device
+`search_web` remains the way to open results on screen.
+
 Runtime state, the Caddy private CA, model data, endpoint settings, and provider
 secrets live below ignored `.runtime/` paths. The OpenAI API key must appear only
 in `.runtime/data/.config.yaml`, separately in the ASR and LLM sections. Azure
@@ -51,7 +61,9 @@ or commands.
    `selected_module.Memory` from `nomem` to `mem_local_short`, select
    `Intent: function_call` with the matching `Intent.function_call` block, add the matching
    `Memory.mem_local_short` block, and enable the root-level
-   `enable_websocket_ping` setting.
+   `enable_websocket_ping` setting. Set `LLM.OpenAILLM.web_search` to your
+   approximate location (ISO country code, city, IANA timezone); the
+   configuration check requires it.
 3. Put the pinned Silero VAD ONNX file at
    `.runtime/models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx`.
    The validated file is 2,327,524 bytes with SHA-256

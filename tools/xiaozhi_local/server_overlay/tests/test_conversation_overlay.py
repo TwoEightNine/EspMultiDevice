@@ -19,7 +19,9 @@ if not _test_config.exists():
 
 from core.handle.textHandler.conversationMessageHandler import ConversationMessageHandler
 from core.providers.memory.mem_local_short import esp_media_memory_overlay as memory_overlay
-from core.providers.llm.esp_media_openai_responses.esp_media_openai_responses import LLMProvider as ResponsesProvider
+from core.providers.llm.esp_media_openai_responses.esp_media_openai_responses import (
+    LLMProvider as ResponsesProvider, SpokenTextFilter, web_search_tool,
+)
 from core.providers.tts.esp_media_azure_multilingual import TTSProvider as AzureTtsProvider
 from core.providers.tools.device_audio import DeviceAudioExecutor, handle_device_result
 from core.providers.tools.device_audio.device_audio_executor import DEVICE_TOOL_NAMES, V2_TOOLS
@@ -491,9 +493,11 @@ class DeviceAudioToolIsolationTests(unittest.TestCase):
     def test_device_session_excludes_legacy_play_music(self):
         manager = ToolManager(FakeDeviceConnection(enabled=True))
         manager.register_executor(ToolType.SERVER_PLUGIN, self.StaticExecutor({
-            "play_music": object(), "get_weather": object(),
+            "play_music": object(), "get_weather": object(), "web_search": object(),
+            "get_news_from_newsnow": object(), "get_news_from_chinanews": object(),
+            "get_lunar": object(),
         }))
-        self.assertEqual(set(manager.get_all_tools()), {"get_weather"})
+        self.assertEqual(set(manager.get_all_tools()), {"get_lunar"})
 
     def test_non_device_session_retains_legacy_play_music(self):
         manager = ToolManager(FakeDeviceConnection(enabled=False))
@@ -570,7 +574,7 @@ class ResponsesProviderTests(unittest.TestCase):
         ], functions=[{"type": "function", "function": {
             "name": "direct_answer", "parameters": {"type": "object"},
         }}]))
-        self.assertEqual(result[0][0], "Hi ")
+        self.assertEqual("".join(text for text, _ in result), "Hi ")
         calls = [call for _, call_list in result if call_list for call in call_list]
         self.assertEqual(calls[0].function.name, "direct_answer")
         self.assertEqual("".join(call.function.arguments for call in calls), '{"response":"Hello"}')
@@ -624,6 +628,57 @@ class ResponsesProviderTests(unittest.TestCase):
         self.assertEqual(items[1], {
             "type": "function_call_output", "call_id": "call-2", "output": "matches",
         })
+
+    def test_tool_turns_add_located_hosted_web_search(self):
+        provider = self._provider([
+            SimpleNamespace(type="response.output_text.delta", delta="It is 9°C."),
+        ])
+        provider.web_search = web_search_tool({"web_search": {
+            "country": "GE", "city": "Tbilisi", "timezone": "Asia/Tbilisi",
+        }})
+        list(provider.response_with_functions("session", [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "weather?"},
+        ], functions=[{"type": "function", "function": {"name": "get_time"}}]))
+        request = provider.client.responses.request
+        self.assertEqual(request["tools"][-1], {
+            "type": "web_search", "user_location": {
+                "type": "approximate", "country": "GE", "city": "Tbilisi",
+                "timezone": "Asia/Tbilisi",
+            },
+        })
+        self.assertTrue(request["instructions"].startswith("policy"))
+        self.assertIn("never include links", request["instructions"])
+
+    def test_summary_requests_and_disabled_config_have_no_web_search(self):
+        provider = self._provider([])
+        provider.web_search = web_search_tool({"web_search": {"country": "GE"}})
+        list(provider.response("session", [{"role": "user", "content": "summarize"}]))
+        self.assertNotIn("tools", provider.client.responses.request)
+        self.assertIsNone(web_search_tool({}))
+        self.assertIsNone(web_search_tool({"web_search": {"enabled": False}}))
+        with self.assertRaises(ValueError):
+            web_search_tool({"web_search": {"country": "Georgia"}})
+
+    def test_streamed_citations_and_urls_never_reach_speech(self):
+        answer = ("Курс: 1 USD ≈ 2,5949 ₾. ([nbg.gov.ge](https://nbg.gov.ge/rates?utm_source=openai))"
+                  "\n- Strikes resumed ([apnews.com](https://apnews.com/a)). See "
+                  "[the report](https://example.com/r) or https://example.com/x now (about 9°C).")
+        expected = ("Курс: 1 USD ≈ 2,5949 ₾.\n- Strikes resumed. See "
+                    "the report or now (about 9°C).")
+        for size in (1, 3, 7, len(answer)):
+            events = [SimpleNamespace(type="response.output_text.delta", delta=answer[i:i + size])
+                      for i in range(0, len(answer), size)]
+            provider = self._provider(events)
+            text = "".join(provider.response("session", [{"role": "user", "content": "q"}]))
+            self.assertEqual(text, expected, size)
+
+    def test_unclosed_bracket_is_released_after_bounded_hold(self):
+        spoken = SpokenTextFilter()
+        emitted = spoken.feed("Note (" + "x" * (SpokenTextFilter.MAX_HOLD + 10))
+        self.assertTrue(emitted.startswith("Note ("))
+        self.assertEqual(spoken.feed("[a"), "")
+        self.assertEqual(spoken.flush(), "[a")
 
 
 class AzureTtsProviderTests(unittest.IsolatedAsyncioTestCase):

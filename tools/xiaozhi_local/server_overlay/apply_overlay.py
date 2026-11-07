@@ -14,6 +14,14 @@ DEVICE_TOOL_NAMES = (
     "search_files", "show_file_info", "open_folder", "search_web", "list_directory",
 )
 DEVICE_TOOL_NAMES_LITERAL = repr(DEVICE_TOOL_NAMES)
+# Upstream plugins hidden from authenticated device sessions: play_music
+# competes with device playback, and the search/weather/news plugins need
+# China-only providers. Hosted web_search in the Responses adapter replaces them.
+DEVICE_SESSION_EXCLUDED_PLUGINS = (
+    "play_music", "web_search", "get_weather",
+    "get_news_from_newsnow", "get_news_from_chinanews",
+)
+DEVICE_SESSION_EXCLUDED_PLUGINS_LITERAL = repr(DEVICE_SESSION_EXCLUDED_PLUGINS)
 
 
 EXPECTED = {
@@ -218,9 +226,13 @@ def main() -> None:
                         "        # ESP Media owns normal-SD playback. Its older generic\n"
                         "        # play_music plugin can only synthesize a spoken reply and\n"
                         "        # must not compete with the authenticated device RPC.\n"
+                        "        # The upstream search, weather, and news plugins depend on\n"
+                        "        # China-only providers and demo keys; the Responses adapter's\n"
+                        "        # hosted web_search replaces them.\n"
                         "        if isinstance(getattr(self.conn, \"features\", None), dict) and \\\n"
                         "                self.conn.features.get(\"device_tools\"):\n"
-                        "            all_tools.pop(\"play_music\", None)\n"
+                        f"            for _name in {DEVICE_SESSION_EXCLUDED_PLUGINS_LITERAL}:\n"
+                        "                all_tools.pop(_name, None)\n"
                         "        self._cached_tools = all_tools\n", relative)
     (root / relative).write_text(text, encoding="utf-8")
 
