@@ -149,6 +149,14 @@ private:
   uint32_t _receivedDownlinkBytes;
   uint32_t _playedPcmSamples;
   uint16_t _peakPcm;
+  // Per-turn timestamps (millis, 0 = not reached) and counters for the
+  // serial turn summary. Diagnostics only; never carry user content.
+  uint32_t _turnStartedMs;
+  uint32_t _sttAtMs;
+  uint32_t _firstAudioAtMs;
+  uint32_t _ttsStopAtMs;
+  uint16_t _sentUplinkPackets;
+  uint16_t _ttsCaptions;
   AssistantDeviceTools _deviceTools;
   std::atomic<uint32_t> _lastDeviceCommandId;
 
@@ -188,4 +196,8 @@ private:
   void publishDeactivated(uint32_t generation);
   bool publish(const XiaozhiSessionEvent &event);
   void logTransition(uint32_t generation, AssistantPhase phase);
+  void logMessage(uint32_t generation, const __FlashStringHelper *type);
+  void logSpeakerFailure(uint32_t generation, size_t decoded, size_t written,
+                         uint32_t waitedMs);
+  void logTurnSummary(bool completed);
 };

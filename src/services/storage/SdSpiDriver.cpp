@@ -545,15 +545,18 @@ bool sendBlock(uint8_t token, const uint8_t *source) {
   return dmaUsable() ? sendBlockDma(token, source) : sendBlockFifo(token, source);
 }
 
-// Allocates a TX/RX pair and connects it to SPI2. Pair 0 is never used:
-// on this firmware the hardware-AES DMA path reprogrammed channel 0 to AES
-// while SD owned it, outside the allocator. A pair 0 that the allocator
-// hands out is therefore kept allocated and idle, so no other driver gets it
-// either, and the next pair is used.
+// Allocates a TX/RX pair and connects it to SPI2. The TX allocation must
+// reserve its sibling: ESP-IDF's sibling_chan path joins the pair without
+// marking the RX channel occupied, so without the reservation the allocator
+// later hands that RX channel to another driver (the I2S0 microphone and the
+// hardware-AES DMA have both been observed reconnecting it). Pair 0 is still
+// kept allocated and idle, so no other driver gets it either, and the next
+// pair is used.
 bool acquirePair() {
   for (uint8_t attempt = 0; attempt < 2; ++attempt) {
     gdma_channel_alloc_config_t txConfig = {};
     txConfig.direction = GDMA_CHANNEL_DIRECTION_TX;
+    txConfig.flags.reserve_sibling = 1;
     gdma_channel_handle_t tx = nullptr;
     gdma_channel_handle_t rx = nullptr;
     if (gdma_new_ahb_channel(&txConfig, &tx) != ESP_OK) return false;

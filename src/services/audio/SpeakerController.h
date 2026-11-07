@@ -26,6 +26,9 @@ public:
   void setVolume(uint8_t level);
   uint8_t volume() const;
   const String &lastError() const;
+  // Result of the most recent i2s_write: ESP_OK, or the error a failed or
+  // timed-out blocking write returned. For serial diagnostics only.
+  esp_err_t lastWriteResult() const;
 
   size_t writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs = 100);
   // Attempts one immediate write and may accept fewer samples than requested.
@@ -49,6 +52,7 @@ private:
   bool _paused;
   bool _controlStarted;
   String _lastError;
+  esp_err_t _lastWriteResult;
 
   static const size_t VolumeBufferSamples = 256;
   static const uint32_t StartupSilenceMs = 10;

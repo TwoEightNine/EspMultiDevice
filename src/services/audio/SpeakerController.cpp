@@ -41,7 +41,8 @@ SpeakerController::SpeakerController(int bclkPin,
     _ready(false),
     _paused(false),
     _controlStarted(false),
-    _lastError(F("Not initialized")) {
+    _lastError(F("Not initialized")),
+    _lastWriteResult(ESP_OK) {
 }
 
 void SpeakerController::beginControl() {
@@ -152,6 +153,10 @@ const String &SpeakerController::lastError() const {
   return _lastError;
 }
 
+esp_err_t SpeakerController::lastWriteResult() const {
+  return _lastWriteResult;
+}
+
 size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount, uint32_t timeoutMs) {
   if (!_ready || _paused || !samples || sampleCount == 0) {
     return 0;
@@ -166,6 +171,7 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
       &bytesWritten,
       timeoutMs / portTICK_PERIOD_MS
     );
+    _lastWriteResult = result;
     if (result != ESP_OK) {
       if (timeoutMs == 0 && result == ESP_ERR_TIMEOUT) return bytesWritten / sizeof(samples[0]);
       setError(F("Speaker I2S write failed"));
@@ -193,6 +199,7 @@ size_t SpeakerController::writePcm16(const int16_t *samples, size_t sampleCount,
     );
     size_t chunkSamples = bytesWritten / sizeof(_volumeBuffer[0]);
     writtenSamples += chunkSamples;
+    _lastWriteResult = result;
     if (result != ESP_OK) {
       if (timeoutMs == 0 && result == ESP_ERR_TIMEOUT) break;
       setError(F("Speaker I2S write failed"));

@@ -1,5 +1,6 @@
 #include "XiaozhiSession.h"
 
+#include "../audio/GdmaRouting.h"
 #include "../audio/MicController.h"
 #include "../audio/SpeakerController.h"
 #include "../network/TimeController.h"
@@ -66,6 +67,8 @@ XiaozhiSession::XiaozhiSession(WiFiController &wifi, TimeController &time,
       _uplink(nullptr), _downlink(nullptr), _decodedPcm(nullptr), _uplinkHead(0), _uplinkCount(0),
       _downlinkHead(0), _downlinkCount(0), _receivedDownlinkPackets(0),
       _receivedDownlinkBytes(0), _playedPcmSamples(0), _peakPcm(0),
+      _turnStartedMs(0), _sttAtMs(0), _firstAudioAtMs(0), _ttsStopAtMs(0),
+      _sentUplinkPackets(0), _ttsCaptions(0),
       _deviceTools(_sdCard), _lastDeviceCommandId(0) {
 }
 
@@ -437,9 +440,16 @@ bool XiaozhiSession::connectWebSocket(uint32_t generation) {
     reinterpret_cast<const uint8_t *>(_config.caCertificate),
     _config.caCertificateLength
   };
+  const uint32_t connectStarted = millis();
   const bool connected = _websocket.connect(
       endpoint, headers, sizeof(headers) / sizeof(headers[0]), trust);
   memset(authorization, 0, sizeof(authorization));
+  Serial.printf("Assistant websocket connect generation=%lu ok=%d ms=%lu failure=%u "
+                "heap=%lu\n",
+                static_cast<unsigned long>(generation), connected ? 1 : 0,
+                static_cast<unsigned long>(millis() - connectStarted),
+                static_cast<unsigned>(_websocket.lastFailure()),
+                static_cast<unsigned long>(ESP.getFreeHeap()));
   if (!connected) {
     if (_websocket.lastFailure() == SecureWebSocketClient::FailureKind::AuthenticationRejected) {
       publishPhase(generation, AssistantPhase::Bootstrapping, "Refreshing credentials");
@@ -528,14 +538,21 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
   _receivedDownlinkBytes = 0;
   _playedPcmSamples = 0;
   _peakPcm = 0;
+  _sttAtMs = _firstAudioAtMs = _ttsStopAtMs = 0;
+  _sentUplinkPackets = _ttsCaptions = 0;
   _credentialsRejected = false;
   if (!_websocket.isConnected() || !_sessionId[0]) return false;
   _speaker.mute();
   _speaker.stop();
   if (!_mic.isPowered() || !_mic.start()) {
+    Serial.printf("Assistant mic start failed generation=%lu powered=%d error=\"%s\"\n",
+                  static_cast<unsigned long>(generation), _mic.isPowered() ? 1 : 0,
+                  _mic.lastError().c_str());
     publishError(generation, AssistantError::Microphone, true);
     return false;
   }
+  _turnStartedMs = millis();
+  GdmaRouting::log("mic_start");
   char json[XiaozhiProtocol::MaxJsonBytes + 1] = {};
   if (!XiaozhiProtocol::buildListenStart(_sessionId, json, sizeof(json)) ||
       !_websocket.sendText(json, strlen(json))) {
@@ -610,7 +627,20 @@ bool XiaozhiSession::runTurn(uint32_t generation) {
           memset(&event, 0, sizeof(event)); stopTurn(false); return false;
         }
         if (phase == AssistantPhase::Thinking) {
-          if (!_speaker.start(_decoder.sampleRate())) {
+          _firstAudioAtMs = now;
+          const bool speakerStarted = _speaker.start(_decoder.sampleRate());
+          Serial.printf("Assistant speaker start generation=%lu rate=%lu ok=%d "
+                        "after_stt_ms=%ld heap=%lu dma_heap=%lu error=\"%s\"\n",
+                        static_cast<unsigned long>(generation),
+                        static_cast<unsigned long>(_decoder.sampleRate()),
+                        speakerStarted ? 1 : 0,
+                        _sttAtMs ? static_cast<long>(now - _sttAtMs) : -1L,
+                        static_cast<unsigned long>(ESP.getFreeHeap()),
+                        static_cast<unsigned long>(
+                            heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)),
+                        speakerStarted ? "" : _speaker.lastError().c_str());
+          GdmaRouting::log("speaker_start");
+          if (!speakerStarted) {
             publishError(generation, AssistantError::Speaker, true);
             memset(&event, 0, sizeof(event)); stopTurn(false); return false;
           }
@@ -682,7 +712,12 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
     // Xiaozhi can finish a second ASR task after the first final STT has
     // already advanced this half-duplex turn. It is stale at this point; do
     // not let it disable active TTS playback.
-    if (phase != AssistantPhase::Listening) return true;
+    if (phase != AssistantPhase::Listening) {
+      logMessage(generation, F("stt_stale"));
+      return true;
+    }
+    _sttAtMs = now;
+    logMessage(generation, F("stt"));
     _mic.stop();
     // The backend's auto VAD already completed this utterance. Sending a
     // second listen-stop starts another ASR job while the LLM tool runs.
@@ -691,29 +726,39 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
     publishCaption(generation, XiaozhiSessionEventType::SttCaption, message.text);
     publishPhase(generation, phase, "Thinking");
   } else if (message.type == XiaozhiProtocol::MessageType::TtsStart) {
+    logMessage(generation, F("tts_start"));
     _mic.stop();
     // The backend sends this before LLM tool selection. Keep the turn in
     // Thinking so authenticated device commands can run; audio packets are
     // the point at which the speaker actually becomes active.
     ttsStarted = true;
   } else if (message.type == XiaozhiProtocol::MessageType::TtsCaption) {
+    ++_ttsCaptions;
     publishCaption(generation, XiaozhiSessionEventType::TtsCaption, message.text);
   } else if (message.type == XiaozhiProtocol::MessageType::Emotion) {
     XiaozhiSessionEvent output = {};
     output.type = XiaozhiSessionEventType::Emotion;
     output.generation = generation;
     output.emotion = message.emotion;
+    Serial.printf("Assistant emotion generation=%lu value=%u\n",
+                  static_cast<unsigned long>(generation),
+                  static_cast<unsigned>(message.emotion));
     publish(output);
   } else if (message.type == XiaozhiProtocol::MessageType::TtsStop) {
+    _ttsStopAtMs = now;
+    logMessage(generation, F("tts_stop"));
     ttsStopped = true;
   } else if (message.type == XiaozhiProtocol::MessageType::Pong) {
     _heartbeatPending = false;
     _lastHeartbeatMs = now;
   } else if (message.type == XiaozhiProtocol::MessageType::Goodbye ||
              message.type == XiaozhiProtocol::MessageType::ServerHello) {
+    logMessage(generation, message.type == XiaozhiProtocol::MessageType::Goodbye
+                               ? F("goodbye") : F("unexpected_hello"));
     publishError(generation, AssistantError::WebSocket, true);
     return false;
   } else if (message.type == XiaozhiProtocol::MessageType::Error) {
+    logMessage(generation, message.authenticationRejected ? F("error_auth") : F("error"));
     if (message.authenticationRejected) {
       _credentialsRejected = true;
       publishPhase(generation, AssistantPhase::Bootstrapping, "Refreshing credentials");
@@ -722,6 +767,7 @@ bool XiaozhiSession::handleText(const SecureWebSocketClient::Event &event,
     }
     return false;
   } else if (message.type == XiaozhiProtocol::MessageType::Invalid) {
+    logMessage(generation, F("invalid"));
     publishError(generation, AssistantError::Protocol, true);
     return false;
   }
@@ -983,6 +1029,7 @@ bool XiaozhiSession::captureAndSend(uint32_t generation, size_t &pcmUsed) {
   memset(opus, 0, sizeof(opus));
   const bool sent = wrapped && !interrupted(generation) &&
                     _websocket.sendBinary(envelope, envelopeLength);
+  if (sent) ++_sentUplinkPackets;
   memset(envelope, 0, sizeof(envelope));
   memset(&frame, 0, sizeof(frame));
   _uplinkHead = (_uplinkHead + 1) % UplinkQueueCapacity;
@@ -1024,9 +1071,20 @@ bool XiaozhiSession::playOne(uint32_t generation) {
     }
     _playedPcmSamples += static_cast<uint32_t>(decoded);
   }
-  const bool played = decoded > 0 && !interrupted(generation) &&
-      _speaker.writePcm16(_decodedPcm, static_cast<size_t>(decoded), 250) ==
-          static_cast<size_t>(decoded);
+  bool played = false;
+  if (decoded > 0 && !interrupted(generation)) {
+    const uint32_t writeStarted = millis();
+    const size_t written = _speaker.writePcm16(_decodedPcm, static_cast<size_t>(decoded), 250);
+    played = written == static_cast<size_t>(decoded);
+    if (!played && !interrupted(generation)) {
+      logSpeakerFailure(generation, static_cast<size_t>(decoded), written,
+                        millis() - writeStarted);
+    }
+  } else if (decoded <= 0) {
+    Serial.printf("Assistant opus decode failed generation=%lu bytes=%u queued=%u result=%d\n",
+                  static_cast<unsigned long>(generation), static_cast<unsigned>(packet.length),
+                  static_cast<unsigned>(_downlinkCount), decoded);
+  }
   memset(_decodedPcm, 0, capacity * sizeof(int16_t));
   memset(&packet, 0, sizeof(packet));
   _downlinkHead = (_downlinkHead + 1) % DownlinkQueueCapacity;
@@ -1039,6 +1097,7 @@ void XiaozhiSession::stopTurn(bool drainPlayback) {
   if (drainPlayback) _speaker.drain();
   _speaker.mute();
   _speaker.stop();
+  if (_turnStartedMs) logTurnSummary(drainPlayback);
   if (_receivedDownlinkPackets) {
     Serial.print(F("Assistant playback generation="));
     Serial.print(_generation);
@@ -1180,6 +1239,51 @@ bool XiaozhiSession::publish(const XiaozhiSessionEvent &event) {
   // UI drain the bounded PSRAM queue before conceding delivery; this worker
   // never draws or navigates directly.
   return xQueueSend(_events, &event, pdMS_TO_TICKS(250)) == pdTRUE;
+}
+
+void XiaozhiSession::logMessage(uint32_t generation, const __FlashStringHelper *type) {
+  Serial.print(F("Assistant message generation="));
+  Serial.print(generation);
+  Serial.print(F(" type="));
+  Serial.print(type);
+  Serial.print(F(" t_ms="));
+  Serial.println(_turnStartedMs ? static_cast<long>(millis() - _turnStartedMs) : -1L);
+}
+
+void XiaozhiSession::logSpeakerFailure(uint32_t generation, size_t decoded, size_t written,
+                                       uint32_t waitedMs) {
+  // A blocking write that times out means the I2S TX DMA stopped draining:
+  // the queue holds about 200 ms, so a 60 ms frame should fit within 250 ms.
+  Serial.printf("Assistant speaker write failed generation=%lu samples=%u written=%u "
+                "waited_ms=%lu result=%s rate=%lu played_samples=%lu queued=%u "
+                "error=\"%s\"\n",
+                static_cast<unsigned long>(generation), static_cast<unsigned>(decoded),
+                static_cast<unsigned>(written), static_cast<unsigned long>(waitedMs),
+                esp_err_to_name(_speaker.lastWriteResult()),
+                static_cast<unsigned long>(_speaker.sampleRate()),
+                static_cast<unsigned long>(_playedPcmSamples),
+                static_cast<unsigned>(_downlinkCount), _speaker.lastError().c_str());
+  GdmaRouting::log("speaker_failure");
+}
+
+void XiaozhiSession::logTurnSummary(bool completed) {
+  const uint32_t ended = millis();
+  auto since = [this](uint32_t at) -> long {
+    return at ? static_cast<long>(at - _turnStartedMs) : -1L;
+  };
+  const uint32_t sampleRate = _decoder.sampleRate() ? _decoder.sampleRate() : 16000;
+  Serial.printf("Assistant turn generation=%lu result=%s total_ms=%lu stt_ms=%ld "
+                "first_audio_ms=%ld tts_stop_ms=%ld uplink_packets=%u downlink_packets=%u "
+                "tts_captions=%u audio_ms=%lu\n",
+                static_cast<unsigned long>(_generation), completed ? "completed" : "aborted",
+                static_cast<unsigned long>(ended - _turnStartedMs), since(_sttAtMs),
+                since(_firstAudioAtMs), since(_ttsStopAtMs),
+                static_cast<unsigned>(_sentUplinkPackets),
+                static_cast<unsigned>(_receivedDownlinkPackets),
+                static_cast<unsigned>(_ttsCaptions),
+                static_cast<unsigned long>(
+                    static_cast<uint64_t>(_playedPcmSamples) * 1000 / sampleRate));
+  _turnStartedMs = 0;
 }
 
 void XiaozhiSession::logTransition(uint32_t generation, AssistantPhase phase) {
