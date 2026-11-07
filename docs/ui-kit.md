@@ -1,6 +1,6 @@
 # UI Kit contract
 
-`src/ui/UiKit.h/.cpp` and `UiText.h/.cpp` are the mandatory shared drawing contract for application screens. Do not copy primitive app-bar, icon, button, list-row, or progress-bar drawing into a screen. Home, Splash, and the Image Viewer canvas are intentional layout exceptions: the viewer overlays its shared informative-mode app bar over image content and hides it in full-screen mode.
+`src/ui/UiKit.h/.cpp` and `UiText.h/.cpp` are the mandatory shared drawing contract for application screens. Do not copy primitive app-bar, icon, button, list-row, or progress-bar drawing into a screen. Home, Splash, the Image Viewer canvas, and the Benchmark canvas are intentional layout exceptions: the viewer overlays its shared informative-mode app bar over image content and hides it in full-screen mode.
 
 ## App bars and navigation
 
@@ -49,6 +49,12 @@ The Audio Player is a documented layout exception. Below the standard app bar ("
 - a transport row centred at y 436: 48×48px repeat, previous, next, and volume cells at x centres 40, 100, 220, and 280, and a 64px play button at the centre. The play button is a fill-only white smooth circle with a black glyph (`drawPlaybackIcon` with `large`), dark grey (`#333`) with a grey glyph when disabled, and its whole 64×64px square is the target. Active repeat is cyan; an unavailable control (previous or next with no track to move to) keeps the black background and a grey icon.
 
 The volume cell opens a `#222` rounded panel over the album line, seek bar, and times (y 336–395). It holds the speaker glyph, a 0–10 `drawSeekBar` slider, and the value. Dragging sets the speaker level live and persists through `AudioSettings` once on release. Tapping the volume cell or outside the panel, or 3 s without input, closes it.
+
+The Benchmark screen is a documented layout exception. Below the standard app bar ("Benchmark", Close) it presents a software-rendered RGB565 canvas, full width from y=48, as screen content. Its 3D scenes, including the score digits, are drawn by the benchmark rasterizer rather than by `UiKit`:
+
+- Intro: a 192px preview canvas, the Title "How fast is it?", two grey Content lines, a Compact best-score line, and a 288×48 `drawFilledButton` Start at y 408.
+- Running: a 384px canvas (y 48–431) and a 48px `#111` HUD (y 432–479) with the stage name (Content, cyan "Second core joined!" for 2.5 s at the two-core stage), live FPS (Title number with a Compact "FPS" unit, right-aligned), and an 8px `drawProgressBar` for the whole run. The HUD is repainted at most every 250 ms, only between canvas transfers.
+- Results: a 144px canvas with the score as extruded seven-segment digits (unlit segments stay dark), the rating in Title, a Compact detail line, four `drawListCell` rows of stage FPS from y 252, and a 288×48 Run again button at y 424.
 
 Use `UiKit::drawVoiceActionIcon()` inside a screen-owned voice control. It draws the 40px Material `mic`, `stop`, the close glyph for cancel, or `mic_off` when unavailable; the owner supplies the solid control fill as `backgroundColor` and owns the complete hit target. Assistant's documented exception is a 56×56 fill-only circle in the avatar's lower-right corner at (248,408), antialiased against the background artwork beside it, with blue ready/cancel, green listening, and gray unavailable/disabled fills. Holding it for 800 ms may use a bounded 160 ms cyan fill pulse as feedback; it has no persistent microphone-status strip.
 

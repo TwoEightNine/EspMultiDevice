@@ -74,6 +74,39 @@ checked between transactions, Back waits for cleanup and worker shutdown, and
 an incomplete cleanup is reported instead of hidden. No result or test payload
 is retained after the screen visit.
 
+## Benchmark
+
+`Settings → Benchmark` runs a 42-second procedural 3D show that loads both CPU
+cores and the display path, then shows a score card. The intro shows one
+rendered preview frame, a short explanation, the best score, and Start. A run
+has five fixed-duration stages: Star warp (8 s, two cores; 3D-projected
+streaking stars over a radial glow), Crystals (10 s, two cores; seven
+flat-shaded displaced icospheres over a sunset sky and scrolling neon floor
+grid), Knot on one core (7 s), Knot on two cores (7 s; the same Gouraud-shaded,
+depth-buffered 3,840-triangle torus knot continuing its animation, with a
+flash and a "Second core joined!" label), and Plasma tunnel (10 s, two cores;
+a per-pixel tunnel lookup with a sine-plasma palette). All geometry is
+generated in code; the scenes need no SD card or assets.
+
+Each stage's result is the average rate of frames completed in that stage,
+which is bounded by both rendering and the DMA transfer of the previous
+frame. The score is `1000 × geometric mean(stage FPS / reference FPS)`, so a
+healthy reference device (ESP32-S3 at 240 MHz with the 20 MHz LCD pixel
+clock) scores about 1000. The reference rates are constants in
+`BenchmarkWorker.cpp`; recalibrate them together whenever a scene's workload
+changes. Ratings are Outstanding (≥ 1100), Excellent (≥ 900), Good (≥ 700),
+and Slower than usual. Background work on either core, such as Wi-Fi traffic or
+an Assistant session, lowers the score. The results show per-stage FPS, the
+one-to-two-core speed-up, and the chip temperature from `temperatureRead()`.
+Serial logs each stage rate and the score.
+
+The best score is the only persisted value: key `best` (unsigned 32-bit) in
+the `bench` Preferences namespace, written only when a run beats it. While the
+screen is open it holds about 0.7 MiB of PSRAM for three frame slots, about
+1 MiB of PSRAM for scene tables (torus-knot mesh, triangle setup, the tunnel
+lookup), and two 20 KiB band depth buffers in internal RAM when available; all
+of it is released when the screen closes.
+
 `HttpClient` (`src/services/network/`) is the bounded HTTP/1.1 client behind the SDK 6 `esp.net` API. It performs one blocking request at a time on its caller's worker task, with a caller-supplied host policy that also reports cancellation and progress, and a body sink. HTTPS validates certificates against the Mozilla root bundle that ESP-IDF's mbedTLS component already links into every Arduino-ESP32 3.x image (`_binary_x509_crt_bundle_start`), attached with `setCACertBundle`, so it adds no flash for trust anchors; handshakes run inside `TlsMemoryScope`. It refuses HTTPS before the clock is valid (`Clock not set`), distinguishes DNS, TCP, and TLS failures, follows allowlisted redirects, decodes chunked bodies, rejects compressed ones, keeps one idle keep-alive connection, and logs only method, host, status, and timing. Unlike `BrowserTransport`, it never disables certificate validation; the Browser keeps its own transport and compatibility policy.
 
 `SpiBusLock` logs `[SPI bus] <task> … waited N ms; holder=<task>` when a wait of 10 ms or more times out, and `[SPI bus] <task> … held the bus N ms` for holds over 100 ms, each at most every 250 ms. A holder of `none` means the bus was free and the waiting task did not get CPU time. `[SD]` lines report card-detect removals, failed health checks, and remounts.

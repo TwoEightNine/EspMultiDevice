@@ -27,6 +27,10 @@ version follows the rules in
   name without its extension.
 - The Audio Player shows embedded PNG and baseline JPEG cover art, decoded on
   a background task.
+- Settings → Benchmark runs a 42-second 3D show (star warp, crystals, a torus
+  knot that switches from one core to two, and a plasma tunnel) on both CPU
+  cores with live FPS, then shows a score where 1000 is a typical device. The
+  best score is kept on the device.
 
 ### Changed
 

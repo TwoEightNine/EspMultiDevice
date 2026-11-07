@@ -223,6 +223,28 @@ worker is active. Back navigation generation-cancels the active work and
 remains on the screen until the task, mutex, TLS/buffer resources when present,
 and SD temporary-file cleanup have finished.
 
+`BenchmarkScreen` (Settings → Benchmark) owns a screen-scoped
+`BenchmarkWorker` (`src/features/settings/benchmark/`). Its lead task runs on
+the core opposite the Arduino loop and owns the stage timeline, timing, and
+the serial per-frame setup in `BenchmarkScenes` (vertex transform, lighting,
+culling, triangle setup). Rasterization is split into 32-row bands: the lead
+and a helper task pinned to the loop's core claim bands through one atomic
+counter tagged with a frame token, so a late claim can never take a band of
+the next frame. Each task keeps its band depth buffer in internal RAM and
+writes colour directly into one of three 64-byte-aligned PSRAM frame slots
+(free, rendering, ready, presenting). Single-core stages never wake the
+helper. The UI task takes the oldest ready slot of the current job generation,
+sends it with `DisplayController::beginDmaImage()`, and releases it after the
+transfer; it repaints the HUD only between transfers. While a job is active
+the screen's `tick()` ends with a one-tick `vTaskDelay` so the helper, which
+shares the loop's priority, gets the rest of that core; touch polling still
+runs every millisecond. The lead yields one tick every 100 ms so the core's
+idle task can feed the task watchdog. Neither task draws to the TFT or
+navigates. Close cancels by generation, and `releaseResources()` returns
+false until both tasks have exited; the screen retries `pop()` from `tick()`,
+then frees the slots, scene tables, and LCD_CAM bus. The renderer is
+host-tested by `tests/benchmark_render/run.sh`.
+
 `BrowserLifecycleWorker` owns the Browser's one-entry lifecycle queue, worker
 task, generation invalidation, and completion signal. It invokes a narrow
 Browser callback for cache cleanup and persistent-state loading; the callback

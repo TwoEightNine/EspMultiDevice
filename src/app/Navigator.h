@@ -30,12 +30,13 @@ enum class ScreenId : uint8_t {
   MacRemote,
   ExternalApp,
   About,
-  AppsSettings
+  AppsSettings,
+  Benchmark
 };
 
 class Navigator {
 public:
-  static const uint8_t MaxScreens = 24;
+  static const uint8_t MaxScreens = 25;
   static const uint8_t MaxStackDepth = 8;
 
   Navigator();
