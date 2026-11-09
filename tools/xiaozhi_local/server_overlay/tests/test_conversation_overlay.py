@@ -634,7 +634,7 @@ class ResponsesProviderTests(unittest.TestCase):
             SimpleNamespace(type="response.output_text.delta", delta="It is 9°C."),
         ])
         provider.web_search = web_search_tool({"web_search": {
-            "country": "GE", "city": "Tbilisi", "timezone": "Asia/Tbilisi",
+            "country": "CN", "city": "Chongqing", "timezone": "Asia/Shanghai",
         }})
         list(provider.response_with_functions("session", [
             {"role": "system", "content": "policy"},
@@ -643,8 +643,8 @@ class ResponsesProviderTests(unittest.TestCase):
         request = provider.client.responses.request
         self.assertEqual(request["tools"][-1], {
             "type": "web_search", "user_location": {
-                "type": "approximate", "country": "GE", "city": "Tbilisi",
-                "timezone": "Asia/Tbilisi",
+                "type": "approximate", "country": "CN", "city": "Chongqing",
+                "timezone": "Asia/Shanghai",
             },
         })
         self.assertTrue(request["instructions"].startswith("policy"))
@@ -652,19 +652,19 @@ class ResponsesProviderTests(unittest.TestCase):
 
     def test_summary_requests_and_disabled_config_have_no_web_search(self):
         provider = self._provider([])
-        provider.web_search = web_search_tool({"web_search": {"country": "GE"}})
+        provider.web_search = web_search_tool({"web_search": {"country": "CN"}})
         list(provider.response("session", [{"role": "user", "content": "summarize"}]))
         self.assertNotIn("tools", provider.client.responses.request)
         self.assertIsNone(web_search_tool({}))
         self.assertIsNone(web_search_tool({"web_search": {"enabled": False}}))
         with self.assertRaises(ValueError):
-            web_search_tool({"web_search": {"country": "Georgia"}})
+            web_search_tool({"web_search": {"country": "China"}})
 
     def test_streamed_citations_and_urls_never_reach_speech(self):
-        answer = ("Курс: 1 USD ≈ 2,5949 ₾. ([nbg.gov.ge](https://nbg.gov.ge/rates?utm_source=openai))"
+        answer = ("Курс: 1 USD ≈ 7,1 ¥. ([pbc.gov.cn](https://www.pbc.gov.cn/rates?utm_source=openai))"
                   "\n- Strikes resumed ([apnews.com](https://apnews.com/a)). See "
                   "[the report](https://example.com/r) or https://example.com/x now (about 9°C).")
-        expected = ("Курс: 1 USD ≈ 2,5949 ₾.\n- Strikes resumed. See "
+        expected = ("Курс: 1 USD ≈ 7,1 ¥.\n- Strikes resumed. See "
                     "the report or now (about 9°C).")
         for size in (1, 3, 7, len(answer)):
             events = [SimpleNamespace(type="response.output_text.delta", delta=answer[i:i + size])
